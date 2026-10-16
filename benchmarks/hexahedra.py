@@ -395,22 +395,25 @@ class Shape:
         return ", ".join(words)
 
     def steps(
-        self, loops: dict[str, str]
-    ) -> tuple[list[tuple[str, int]], dict[str, str], list[str]]:
+        self, loops: dict[str, Any]
+    ) -> tuple[list[tuple[Any, int]], dict[Any, str], list[Any]]:
         """The splits, the tags and the order of the sequential loops, for ``loops``.
 
         ``loops`` names a launch's loops by role: ``e``, ``k``, ``j``, ``i``
-        and, when it has one, ``q``.
+        and, when it has one, ``q``; each is a loopty handle, or plain loopy's
+        name, and a split's two loops the handle's children or loopy's
+        ``e_outer`` and ``e_inner``.
         """
         e, k, j, i = (loops[x] for x in "ekji")
         q = loops.get("q")
-        splits: list[tuple[str, int]] = []
+        splits: list[tuple[Any, int]] = []
         if self.per_group == 1:
             tags = {e: "g.0", k: "l.2", j: "l.1", i: "l.0"}
             sequential = []
         else:
             splits.append((e, self.per_group))
-            tags = {f"{e}_outer": "g.0", f"{e}_inner": "l.2", j: "l.1", i: "l.0"}
+            tags = {_part(e, "outer"): "g.0", _part(e, "inner"): "l.2", j: "l.1"}
+            tags[i] = "l.0"
             sequential = [k]
         if q is not None:
             if self.fields == "groups":
@@ -418,8 +421,8 @@ class Shape:
             elif self.fields == "ilp":
                 # three at a time: an ilp loop needs a length that is a number
                 splits.append((q, 3))
-                tags[f"{q}_inner"] = "ilp"
-                sequential = [f"{q}_outer", *sequential]
+                tags[_part(q, "inner")] = "ilp"
+                sequential = [_part(q, "outer"), *sequential]
             else:
                 sequential = [q, *sequential]
         return splits, tags, sequential
@@ -437,12 +440,17 @@ SHAPES = (
 )
 
 
-def _placed(schedule: Any, shape: Shape, loops: dict[str, str]) -> Any:
+def _part(loop: Any, side: str) -> Any:
+    """The ``side`` half of a split of ``loop``: its handle's, or loopy's name."""
+    return getattr(loop, side) if not isinstance(loop, str) else f"{loop}_{side}"
+
+
+def _placed(schedule: Any, shape: Shape, loops: dict[str, Any]) -> Any:
     """``schedule`` with ``shape``'s splits and tags, each step checked by loopty."""
     splits, tags, _sequential = shape.steps(loops)
     for loop, factor in splits:
         schedule = schedule.split(loop, factor)
-    return schedule.tag(**tags)
+    return schedule.tag(tags)
 
 
 def _without_contraction(launch: Launch) -> Launch:
@@ -454,13 +462,14 @@ def _without_contraction(launch: Launch) -> Launch:
 
 
 #: Each operator's launches: the demo's kernel or program, what is substituted
-#: in it, its loops by role, and the arrays it takes, by the variants' names.
+#: in it, its loops by role (the binders of the scope ``_scope`` gives), and
+#: the arrays it takes, by the variants' names.
 LAUNCHES = {
     "weak_grad": (
         (
             "metric_along_r",
             "w",
-            {"e": "e_0", "k": "k_0", "j": "j_0", "i": "i_0", "q": "q_0"},
+            {"e": "e", "k": "k", "j": "j", "i": "i", "q": "q"},
             {"G": "G", "u": "u", "Fr": "Fr9", "v": "v"},
         ),
         (
@@ -480,7 +489,7 @@ LAUNCHES = {
         (
             "contravariant_along_r",
             "w",
-            {"e": "e_0", "k": "k_0", "j": "j_0", "i": "i_0", "q": "q"},
+            {"e": "e", "k": "k", "j": "j", "i": "i", "q": "q"},
             {"G": "G", "f": "f", "Fr": "Fr3", "v": "v3"},
         ),
         (
@@ -499,6 +508,12 @@ LAUNCHES = {
 }
 
 
+def _scope(launch: Any) -> Any:
+    """Where a launch's loops are: a kernel's own, or the pass along r a program
+    runs after what it substitutes (``metric_along_r.along_r``)."""
+    return getattr(launch, "along_r", None) or launch
+
+
 def loopty_launches(
     demo: dict[str, Any], op: str, shape: Shape, order: int, ne: int
 ) -> list[Launch]:
@@ -508,10 +523,13 @@ def loopty_launches(
     sizes = {"n": order + 1, "ne": ne, "nq": 9 if op == "weak_grad" else 3}
     out = []
     for name, substituted, loops, args in LAUNCHES[op]:
-        schedule = Schedule(demo[name])
+        program = demo[name]
+        schedule = Schedule(program)
         if substituted is not None:
-            schedule = schedule.substitute(substituted)
-        launch = from_schedule(_placed(schedule, shape, loops), args, **sizes)
+            schedule = schedule.substitute(getattr(program, substituted))
+        scope = _scope(program)
+        handles = {role: getattr(scope, binder) for role, binder in loops.items()}
+        launch = from_schedule(_placed(schedule, shape, handles), args, **sizes)
         out.append(launch if shape.contraction else _without_contraction(launch))
     return out
 

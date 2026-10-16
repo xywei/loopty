@@ -19,22 +19,31 @@ one question.
 
 ## What it looks like
 
-Nothing to turn on. With Lean installed, the stencil's ledger reads:
+Nothing to turn on. With Lean installed, the stencil's ledger, with the casts of
+its schedule, reads:
 
 ```console
 $ lanky check examples/stencil_skew.py
-STATUS  BY           WHERE               OWNER   STATEMENT
-------  -----------  ------------------  ------  ------------------------------------------------------
-proved  lean         stencil_skew.py:62  jacobi  u[t + 1, i] is in bounds for every instance of S0
-proved  lean         stencil_skew.py:62  jacobi  u[t, i - 1] is in bounds for every instance of S0
-proved  lean         stencil_skew.py:62  jacobi  u[t, i + 1] is in bounds for every instance of S0
-proved  lean         stencil_skew.py:62  jacobi  distinct instances of S0 write distinct cells of u
-proved  lean         stencil_skew.py:54  jacobi  the source order runs every dependence forward in time
-tested  interpreter  stencil_skew.py:54  jacobi  the traced term computes what the body computes
+STATUS  BY           WHERE                OWNER   STATEMENT
+------  -----------  -------------------  ------  ----------------------------------------------------------------------------------------------
+proved  lean         stencil_skew.py:61   jacobi  u[t + 1, i] is in bounds for every instance of u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2
+                                                    (stencil_skew.py:61)
+proved  lean         stencil_skew.py:61   jacobi  u[t, i - 1] is in bounds for every instance of u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2
+                                                    (stencil_skew.py:61)
+proved  lean         stencil_skew.py:61   jacobi  u[t, i + 1] is in bounds for every instance of u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2
+                                                    (stencil_skew.py:61)
+proved  lean         stencil_skew.py:61   jacobi  distinct instances of u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2 (stencil_skew.py:61) write
+                                                    distinct cells of u
+proved  lean         stencil_skew.py:53   jacobi  the source order runs every dependence forward in time
+tested  interpreter  stencil_skew.py:53   jacobi  the traced term computes what the body computes
+proved  lean         stencil_skew.py:115  jacobi  skew(jacobi.i, by=jacobi.t) renames the instances of jacobi one for one
+proved  lean         stencil_skew.py:115  jacobi  the order after skew(jacobi.i, by=jacobi.t) runs every dependence of jacobi forward
+proved  lean         stencil_skew.py:116  jacobi  tile(jacobi.t, jacobi.i, 8, 8) renames the instances of jacobi one for one
+proved  lean         stencil_skew.py:116  jacobi  the order after tile(jacobi.t, jacobi.i, 8, 8) runs every dependence of jacobi forward
 
-6 facts: 5 proved, 1 tested
+10 facts: 9 proved, 1 tested
 
-LEAN proved all 5 facts isl decided. Lean's statements are loopty's, from its own description, not isl's results, and isl's hints were checked, not trusted. --show-lean prints the Lean.
+LEAN proved all 9 facts isl decided. Lean's statements are loopty's, from its own description, not isl's results, and isl's hints were checked, not trusted. --show-lean prints the Lean.
 ```
 
 and `loopty run` proves the casts of every schedule it runs:
@@ -42,11 +51,11 @@ and `loopty run` proves the casts of every schedule it runs:
 ```console
 $ loopty run examples/stencil_skew.py
 ...
-proved  lean   stencil_skew.py:116  jacobi  skew(i, by='t') renames the instances of jacobi one for one
-proved  lean   stencil_skew.py:116  jacobi  the order after skew(i, by='t') runs every dependence of jacobi forward
-proved  lean   stencil_skew.py:117  jacobi  tile(t,i,8,8) renames the instances of jacobi one for one
-proved  lean   stencil_skew.py:117  jacobi  the order after tile(t,i,8,8) runs every dependence of jacobi forward
-tested  loopy  stencil_skew.py:117  jacobi  the scheduled run of jacobi agrees with the native run to the accurac...
+proved  lean   stencil_skew.py:115  jacobi  skew(jacobi.i, by=jacobi.t) renames the instances of jacobi one for one
+proved  lean   stencil_skew.py:115  jacobi  the order after skew(jacobi.i, by=jacobi.t) runs every dependence of jacobi forward
+proved  lean   stencil_skew.py:116  jacobi  tile(jacobi.t, jacobi.i, 8, 8) renames the instances of jacobi one for one
+proved  lean   stencil_skew.py:116  jacobi  the order after tile(jacobi.t, jacobi.i, 8, 8) runs every dependence of jacobi forward
+tested  loopy  stencil_skew.py:116  jacobi  the scheduled run of jacobi agrees with the native run to the accurac...
 
 5 facts: 4 proved, 1 tested
 
@@ -63,10 +72,10 @@ text it is given:
 ```console
 $ lanky check examples/stencil_skew.py --show-lean "u[t, i - 1]"
 ...
-LEAN jacobi at stencil_skew.py:62: u[t, i - 1] is in bounds for every instance of S0
+LEAN jacobi at stencil_skew.py:61: u[t, i - 1] is in bounds for every instance of u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2 (stencil_skew.py:61)
   proved by Lean (omega)
     set_option autoImplicit false in
-    theorem Lanky.jacobi_in_bounds
+    theorem Lanky.jacobi_in_bounds_2
         (nt : Int)
         (nx : Int)
         (t : Int)
@@ -84,8 +93,8 @@ LEAN jacobi at stencil_skew.py:62: u[t, i - 1] is in bounds for every instance o
       omega
 ```
 
-`h2` to `h4` are the guard the kernel wrote, `with when((t + 1 < steps.size) &
-(i > 0) & (i + 1 < row.size))`, and `h5` to `h8` its two loops. The file the
+`h2` to `h4` are the condition the kernel wrote, `if t + 1 < steps.size and
+i > 0 and i + 1 < row.size:`, and `h5` to `h8` its two loops. The file the
 source is part of replays with `lean` alone. `loopty run --show-lean` does the
 same for the casts.
 
@@ -95,7 +104,7 @@ proves the claim false there:
 ```console
 $ lanky check tests/kernels/out_of_bounds.py
 ...
-REFUTED shift at out_of_bounds.py:24: u[i + 1] is in bounds for every instance of S0
+REFUTED shift at out_of_bounds.py:24: u[i + 1] is in bounds for every instance of v[i] = u[i + 1] (out_of_bounds.py:24)
   witness: (1,)
   cells u[i + 1] reaches are cells u has, except [a0=1] at [n=1]
   Lean confirmed the counterexample: the claim is false at n=1, i=0
@@ -168,7 +177,7 @@ $ lanky check examples/calls.py --show-lean "the row passed to dot as a"
 LEAN matvec at calls.py:100: A[i], the row passed to dot as a, is in bounds wherever dot is called at calls.py:100
   proved by Lean (omega)
     set_option autoImplicit false in
-    theorem Lanky.matvec_in_bounds
+    theorem Lanky.matvec_in_bounds_4
         (m : Int)
         (i : Int)
         (h0 : m ≥ 0)
@@ -178,8 +187,8 @@ LEAN matvec at calls.py:100: A[i], the row passed to dot as a, is in bounds wher
       omega
 ```
 
-A class two statements never form, `S1` before `S0` in a program whose `S0`
-runs first, has a hypothesis that is `False` as written, and is closed by
+A class two statements never form, the second statement of a program before
+the first, which runs first, has a hypothesis that is `False` as written, and is closed by
 `contradiction`: that a class is empty is isl's verdict too, and Lean proves
 it again.
 
@@ -194,10 +203,10 @@ licenses them is a fact of its own, which Lean proves too:
 ```console
 $ lanky check examples/spmv.py --show-lean "off[r + 1] == off[r] + cnt[r])"
 ...
-proved   proved     lean         spmv.py:79   scan           no cell of off is stored twice, or read before its store
-proved   proved     lean         spmv.py:69   scan           off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
+proved   proved     lean         spmv.py:81   scan           no cell of off is stored twice, or read before its store
+proved   proved     lean         spmv.py:71   scan           off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
 ...
-LEAN scan at spmv.py:69: off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
+LEAN scan at spmv.py:71: off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
   proved by Lean (omega; omega, with the hypotheses taken at 1 point)
     set_option autoImplicit false in
     theorem Lanky.scan_conjunct_0 (off : Int → Int) (h0 : off 0 = 0) : off 0 = 0 := by
@@ -218,7 +227,8 @@ LEAN scan at spmv.py:69: off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[
       omega
 ```
 
-`h3` is `S1`'s value equation: what it stores at `r` is `off[r] + cnt[r]`,
+`h3` is the value equation of the statement `off[r + 1] = off[r] + cnt[r]`:
+what it stores at `r` is `off[r] + cnt[r]`,
 and isl's discharge took it at `r`, the hint `have hi0 := h3 r`.
 
 That the equations are what the kernel does is the reading of a kernel's
@@ -336,8 +346,9 @@ stays `decided`.
   hypotheses only the conjuncts in which nothing rounds, copies and sign
   changes, whose two readings agree: `s[i] == a[i] + b[i]` holds of the
   floats a kernel stores, and not of them read as reals.
-- The gap between the model and the code: lowering, loopy and the compiler,
-  which the native and compiled differential covers, by sampling.
+- The gap between the model and the code: lowering, the operands of a sum
+  the generated code computes once before it (`loopty.hoist`), loopy and the
+  compiler, which the native and compiled differential covers, by sampling.
 
 ## Cost
 
@@ -364,7 +375,7 @@ and test kernel to Lean, the casts each file's `rejected*` functions refuse
 included, from an empty proof cache. Its report, with Lean v4.29.1 (a
 file's time is Lean's on all its facts, a part's on one declaration):
 
-Of 1584 facts isl decides in 34 files (10 of them a theorem a kernel cites, applied to what isl decided), Lean proved 1521; 25 stay decided; 37 refuted facts have their negation proved at isl's counterexample; 1 refuted facts are stated for isl only. 507 more facts are not isl's to decide (by type, tested, assumed).
+Of 1579 facts isl decides in 34 files (10 of them a theorem a kernel cites, applied to what isl decided), Lean proved 1516; 25 stay decided; 37 refuted facts have their negation proved at isl's counterexample; 1 refuted facts are stated for isl only. 524 more facts are not isl's to decide (by type, tested, assumed).
 
 Not all of them are equally hard. The 202 `ordering` facts, that the source
 order runs every dependence forward, hold by the definition of a dependence
@@ -375,68 +386,68 @@ time includes starting Lean.
 
 | file | isl facts | proved | decided, not proved | refuted, negation proved | Lean time |
 |---|---:|---:|---:|---:|---:|
-| `examples/advection.py` | 112 | 108 | 0 | 3 | 21.4 s |
-| `examples/assembly.py` | 38 | 38 | 0 | 0 | 4.2 s |
-| `examples/calls.py` | 44 | 44 | 0 | 0 | 2.4 s |
-| `examples/composition.py` | 10 | 10 | 0 | 0 | 0.6 s |
-| `examples/fusion.py` | 19 | 17 | 0 | 2 | 1.0 s |
-| `examples/hexahedra.py` | 64 | 62 | 0 | 2 | 27.3 s |
-| `examples/l2p.py` | 48 | 43 | 3 | 2 | 14.5 s |
-| `examples/layer_potential.py` | 32 | 31 | 1 | 0 | 4.0 s |
-| `examples/p2p.py` | 19 | 19 | 0 | 0 | 2.3 s |
-| `examples/pairs.py` | 14 | 14 | 0 | 0 | 0.9 s |
-| `examples/quadrature.py` | 12 | 12 | 0 | 0 | 1.4 s |
-| `examples/reshape_layouts.py` | 16 | 16 | 0 | 0 | 1.7 s |
-| `examples/spmv.py` | 20 | 20 | 0 | 0 | 1.2 s |
-| `examples/stencil_skew.py` | 10 | 9 | 0 | 1 | 2.3 s |
+| `examples/advection.py` | 115 | 111 | 0 | 3 | 14.9 s |
+| `examples/assembly.py` | 38 | 38 | 0 | 0 | 3.0 s |
+| `examples/calls.py` | 44 | 44 | 0 | 0 | 1.3 s |
+| `examples/composition.py` | 10 | 10 | 0 | 0 | 0.3 s |
+| `examples/fusion.py` | 18 | 16 | 0 | 2 | 0.6 s |
+| `examples/hexahedra.py` | 65 | 63 | 0 | 2 | 21.6 s |
+| `examples/l2p.py` | 46 | 41 | 3 | 2 | 6.6 s |
+| `examples/layer_potential.py` | 32 | 31 | 1 | 0 | 3.8 s |
+| `examples/p2p.py` | 17 | 17 | 0 | 0 | 1.3 s |
+| `examples/pairs.py` | 14 | 14 | 0 | 0 | 1.0 s |
+| `examples/quadrature.py` | 12 | 12 | 0 | 0 | 1.3 s |
+| `examples/reshape_layouts.py` | 16 | 16 | 0 | 0 | 1.5 s |
+| `examples/spmv.py` | 18 | 18 | 0 | 0 | 1.0 s |
+| `examples/stencil_skew.py` | 10 | 9 | 0 | 1 | 2.1 s |
 | `examples/storage_layouts.py` | 18 | 18 | 0 | 0 | 2.9 s |
-| `examples/sum_factorization.py` | 16 | 15 | 0 | 1 | 2.3 s |
-| `examples/taylor_reconstruction.py` | 14 | 11 | 2 | 1 | 2.4 s |
-| `examples/travel.py` | 53 | 53 | 0 | 0 | 4.6 s |
-| `examples/wavefront_acoustic.py` | 24 | 21 | 0 | 3 | 8.4 s |
+| `examples/sum_factorization.py` | 16 | 15 | 0 | 1 | 2.0 s |
+| `examples/taylor_reconstruction.py` | 14 | 11 | 2 | 1 | 2.3 s |
+| `examples/travel.py` | 53 | 53 | 0 | 0 | 4.3 s |
+| `examples/wavefront_acoustic.py` | 24 | 21 | 0 | 3 | 8.7 s |
 | `tests/kernels/axpy.py` | 4 | 4 | 0 | 0 | 0.1 s |
-| `tests/kernels/calls.py` | 151 | 144 | 0 | 7 | 4.5 s |
-| `tests/kernels/dataflow.py` | 236 | 222 | 14 | 0 | 8.2 s |
-| `tests/kernels/domains.py` | 90 | 89 | 0 | 1 | 2.7 s |
-| `tests/kernels/out_of_bounds.py` | 4 | 3 | 0 | 1 | 0.1 s |
-| `tests/kernels/program_domains.py` | 15 | 15 | 0 | 0 | 0.5 s |
-| `tests/kernels/program_posts.py` | 41 | 40 | 1 | 0 | 1.2 s |
-| `tests/kernels/reals.py` | 26 | 25 | 1 | 0 | 0.2 s |
-| `tests/kernels/series.py` | 27 | 24 | 3 | 0 | 0.4 s |
+| `tests/kernels/calls.py` | 151 | 144 | 0 | 7 | 9.8 s |
+| `tests/kernels/dataflow.py` | 236 | 222 | 14 | 0 | 13.5 s |
+| `tests/kernels/domains.py` | 90 | 89 | 0 | 1 | 4.3 s |
+| `tests/kernels/out_of_bounds.py` | 4 | 3 | 0 | 1 | 0.2 s |
+| `tests/kernels/program_domains.py` | 15 | 15 | 0 | 0 | 0.9 s |
+| `tests/kernels/program_posts.py` | 41 | 40 | 1 | 0 | 2.3 s |
+| `tests/kernels/reals.py` | 26 | 25 | 1 | 0 | 0.3 s |
+| `tests/kernels/series.py` | 27 | 24 | 3 | 0 | 0.5 s |
 | `tests/kernels/spmv_min.py` | 16 | 16 | 0 | 0 | 0.0 s |
 | `tests/kernels/stencil.py` | 5 | 5 | 0 | 0 | 0.0 s |
-| `tests/kernels/travel.py` | 70 | 69 | 0 | 1 | 2.5 s |
+| `tests/kernels/travel.py` | 70 | 69 | 0 | 1 | 2.3 s |
 | `tests/kernels/travel_wrong.py` | 194 | 187 | 0 | 7 | 22.5 s |
 | `tests/kernels/upstream.py` | 11 | 11 | 0 | 0 | 0.2 s |
-| `tests/kernels/windows.py` | 111 | 106 | 0 | 5 | 15.3 s |
+| `tests/kernels/windows.py` | 109 | 104 | 0 | 5 | 15.3 s |
 
 By kind:
 
 | kind | isl facts | proved | decided, not proved | refuted, negation proved | parts | median s per part | slowest part |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| argument | 2 | 1 | 0 | 1 | 1 | 0.024 | 0.02 s |
-| bijective | 55 | 55 | 0 | 0 | 248 | 0.097 | 0.54 s |
-| by-theorem | 10 | 1 | 9 | 0 | 1 | 0.102 | 0.10 s |
-| definedness | 87 | 87 | 0 | 0 | 148 | 0.015 | 0.48 s |
-| disjoint-writes | 248 | 246 | 0 | 1 | 246 | 0.017 | 0.16 s |
-| distinct-arguments | 2 | 1 | 0 | 1 | 1 | 0.017 | 0.02 s |
-| element-sort | 28 | 20 | 0 | 8 | 20 | 0.050 | 0.07 s |
-| in-bounds | 701 | 696 | 0 | 5 | 870 | 0.039 | 1.14 s |
-| layout | 6 | 6 | 0 | 0 | 12 | 0.092 | 11.84 s |
-| layout-in-bounds | 7 | 7 | 0 | 0 | 9 | 0.123 | 0.61 s |
-| layout-one-for-one | 7 | 7 | 0 | 0 | 11 | 0.166 | 4.27 s |
-| layout-onto | 7 | 7 | 0 | 0 | 7 | 0.271 | 2.05 s |
-| layout-same | 3 | 3 | 0 | 0 | 5 | 0.131 | 0.20 s |
-| monotone | 70 | 55 | 0 | 15 | 735 | 0.108 | 0.58 s |
-| no-clobber | 23 | 17 | 0 | 6 | 61 | 0.200 | 0.65 s |
-| ordering | 202 | 202 | 0 | 0 | 517 | 0.019 | 0.12 s |
-| postcondition | 47 | 31 | 16 | 0 | 49 | 0.059 | 0.20 s |
-| requirement | 16 | 16 | 0 | 0 | 16 | 0.109 | 0.41 s |
-| single-assignment | 63 | 63 | 0 | 0 | 141 | 0.012 | 0.14 s |
+| argument | 2 | 1 | 0 | 1 | 1 | 0.064 | 0.06 s |
+| bijective | 52 | 52 | 0 | 0 | 234 | 0.079 | 0.52 s |
+| by-theorem | 10 | 1 | 9 | 0 | 1 | 0.215 | 0.21 s |
+| definedness | 84 | 84 | 0 | 0 | 144 | 0.048 | 0.52 s |
+| disjoint-writes | 248 | 246 | 0 | 1 | 246 | 0.022 | 0.14 s |
+| distinct-arguments | 2 | 1 | 0 | 1 | 1 | 0.042 | 0.04 s |
+| element-sort | 28 | 20 | 0 | 8 | 20 | 0.056 | 0.07 s |
+| in-bounds | 705 | 700 | 0 | 5 | 867 | 0.041 | 1.11 s |
+| layout | 6 | 6 | 0 | 0 | 12 | 0.096 | 11.06 s |
+| layout-in-bounds | 7 | 7 | 0 | 0 | 9 | 0.069 | 0.44 s |
+| layout-one-for-one | 7 | 7 | 0 | 0 | 11 | 0.127 | 4.49 s |
+| layout-onto | 7 | 7 | 0 | 0 | 7 | 0.223 | 2.03 s |
+| layout-same | 3 | 3 | 0 | 0 | 5 | 0.118 | 0.15 s |
+| monotone | 67 | 52 | 0 | 15 | 443 | 0.103 | 0.60 s |
+| no-clobber | 23 | 17 | 0 | 6 | 61 | 0.185 | 0.67 s |
+| ordering | 202 | 202 | 0 | 0 | 517 | 0.021 | 0.11 s |
+| postcondition | 47 | 31 | 16 | 0 | 49 | 0.060 | 0.24 s |
+| requirement | 16 | 16 | 0 | 0 | 16 | 0.126 | 0.40 s |
+| single-assignment | 63 | 63 | 0 | 0 | 141 | 0.022 | 0.07 s |
 
 Every fact Lean did not prove, and why:
 
-- `examples/advection.py`, lift_on_faces: two updates of rhs that run at the same time after tag(e='g.0', a='l.1', b='l.0') update distinct cells. the updates a step runs at the same time are read off its order and its work items, from sets isl computes, which loopty states for isl only
+- `examples/advection.py`, lift_on_faces: two updates of lift_on_faces.rhs that run at the same time after tag({lift_on_faces.e: 'g.0', lift_on_faces.a: 'l.1', lift_on_faces.b: 'l.0'}) update distinct cells. the updates a step runs at the same time are read off its order and its work items, from sets isl computes, which loopty states for isl only
 - `examples/l2p.py`, unpack: (forall i in Fin(nb). C[i, 0, 0] == coeffs[i, 0]) and (forall i in Fin(nb), a in Nat, b in Nat where a < 2 and a + b >= 1 and a + b <= 10. C[i, a, b] == coeffs[i, 2*(a + b) - 1 + a]). the claim is about real numbers, which core Lean does not have; where Mathlib is (LANKY_LEAN_MATHLIB), Lean checks it
 - `examples/l2p.py`, reconstruct: (forall i in Fin(nb), a in Nat, b in Nat where a < 2 and a + b <= 10. R[i, a, b] == C[i, a, b]) and (forall i in Fin(nb), a in Nat, b in Nat where a + b + 2 <= 10. R[i, a + 2, b] == -R[i, a, b + 2]). the claim is about real numbers, which core Lean does not have; where Mathlib is (LANKY_LEAN_MATHLIB), Lean checks it
 - `examples/l2p.py`, reconstruct: by on_every_triangle, for every D with pde and stored: forall i in Fin(nb), a in Nat, b in Nat where a + b <= 10. R[i, a, b] == D[i, a, b]. the claim is about real numbers, which core Lean does not have; where Mathlib is (LANKY_LEAN_MATHLIB), Lean checks it
@@ -490,10 +501,10 @@ loopty states for isl only (see below).
 
 With Mathlib (`LANKY_LEAN_MATHLIB`), the 25 claims about reals,
 postconditions and the theorems applied to them, the terms a kernel adds
-among them, are proved too: 1546 proved, none left decided, and the same 37
+among them, are proved too: 1541 proved, none left decided, and the same 37
 refuted facts proved false. The slowest part about reals is a theorem's
-application to the terms a kernel adds, 1.11 s, and a postcondition's,
-0.55 s.
+application to the terms a kernel adds, 0.90 s, and a postcondition's,
+0.43 s.
 
 ## What stays isl's
 
@@ -508,7 +519,7 @@ asked about, and claims core Lean has no words for; each says so with
   equation of floats means at a `NaN`.
 - **Two updates of one cell at the same time:** a step that runs two updates
   of one cell of `y` on two work items or in no order, without
-  `atomic("y")`, is refused with a `disjoint-writes` fact of the step, which
+  `atomic(k.y)`, is refused with a `disjoint-writes` fact of the step, which
   is read off the step's order and its work items, as a crossing is, and is
   stated for isl only; where the cell is read from an array the pair is read
   off an example input, and the fact is the native run's, not isl's; issue

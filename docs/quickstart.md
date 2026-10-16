@@ -65,24 +65,20 @@ dense   = [ 0.4821 -0.8792 -0.0973 -0.5674  0.4291  0.    ]
 scan_monotone: n : Nat, cnt : Fn[Fin(n), Nat], off : Fn[Fin(n + 1), Nat] | off(0) == 0, forall r in Fin(n). off(r + 1) == off(r) + cnt(r) |- forall a in Fin(n + 1), b in Fin(n + 1) where a <= b. off(a) <= off(b)
   ok after 50 valid draws of 50
 
-schedule: Schedule(spmv, target='c').split(j, 2).realize('y', tree=True)
-  decided  isl  split(j, 2) renames the instances of spmv one for one
-  decided  isl  the order after split(j, 2) runs every dependence of spmv forward
-  decided  isl  realize('y', tree=True) renames the instances of spmv one for one
-  decided  isl  the order after realize('y', tree=True) runs every dependence of spmv forward
-  decided  isl  the accumulation into y is reassociated by realize('y', tree=True), so its result is compared at 'reassoc'
-device schedule: Schedule(spmv, target='c').tag(r='g.0').split(j, 32).tag(j_in='l.0').realize('y', tree=True)
-  decided  isl  tag(r='g.0') renames the instances of spmv one for one
-  decided  isl  the order after tag(r='g.0') runs every dependence of spmv forward, within one work item
-  decided  isl  split(j, 32) renames the instances of spmv one for one
-  decided  isl  the order after split(j, 32) runs every dependence of spmv forward, within one work item
-  decided  isl  tag(j_in='l.0') renames the instances of spmv one for one
-  decided  isl  the order after tag(j_in='l.0') runs every dependence of spmv forward, within one work item
-  refuted  loopy-target c code can be generated for spmv after tag(j_in='l.0')
-  decided  isl  the accumulation into y is reassociated by tag(j_in='l.0'), so its result is compared at 'reassoc'
-  decided  isl  realize('y', tree=True) renames the instances of spmv one for one
-  decided  isl  the order after realize('y', tree=True) runs every dependence of spmv forward, within one work item
-  reason: the parallel tag on j_in sits inside a loop whose bound comes from an array (a ragged fiber), and loopy will not put a hardware axis in a domain with a data-dependent parameter. Parallelize an enclosing loop with a size known at launch instead, such as the rows of a CSR product
+schedule: Schedule(spmv, target='c').split(spmv.j, 2).realize(spmv.y, tree=True)
+  decided  isl  split(spmv.j, 2) renames the instances of spmv one for one
+  decided  isl  the order after split(spmv.j, 2) runs every dependence of spmv forward
+  decided  isl  the accumulation into spmv.y is reassociated by realize(spmv.y, tree=True), so its result is compared at 'reassoc'
+device schedule: Schedule(spmv, target='c').on_groups(spmv.r).split(spmv.j, 32).on_items(spmv.j.inner).realize(spmv.y, tree=True)
+  decided  isl  on_groups(spmv.r) renames the instances of spmv one for one
+  decided  isl  the order after on_groups(spmv.r) runs every dependence of spmv forward, within one work item
+  decided  isl  split(spmv.j, 32) renames the instances of spmv one for one
+  decided  isl  the order after split(spmv.j, 32) runs every dependence of spmv forward, within one work item
+  decided  isl  on_items(spmv.j.inner) renames the instances of spmv one for one
+  decided  isl  the order after on_items(spmv.j.inner) runs every dependence of spmv forward, within one work item
+  refuted  loopy-target c code can be generated for spmv after on_items(spmv.j.inner)
+  decided  isl  the accumulation into spmv.y is reassociated by on_items(spmv.j.inner), so its result is compared at 'reassoc'
+  reason: the parallel tag on spmv.j.inner sits inside a loop whose bound comes from an array (a ragged fiber), and loopy will not put a hardware axis in a domain with a data-dependent parameter. Parallelize an enclosing loop with a size known at launch instead, such as the rows of a CSR product
 
   y: difference 0 within 1e-06 (approx) -> tested
 ```
@@ -94,8 +90,8 @@ than rejecting samples until one happened to fit, which is why the count is 50
 and not 3.
 
 The schedule at the bottom of the file is built at import time, and building it
-is what checks it. `split(j, 2)` cuts a row's entries into pieces and
-`realize("y", tree=True)` sums the pieces separately, which reassociates a
+is what checks it. `split(spmv.j, 2)` cuts a row's entries into pieces and
+`realize(spmv.y, tree=True)` sums the pieces separately, which reassociates a
 floating-point accumulation. That is why the last line compares at `1.48e-06`
 rather than at zero: the tolerance comes from the `reassoc` fact, not from a
 number somebody picked. It is a per-element tolerance,
@@ -125,44 +121,44 @@ row per work group, is the schedule for this shape that does build and did run.
 ```console
 $ uv run lanky check examples/spmv.py
 STATUS   BY             WHERE        OWNER          STATEMENT
--------  -------------  -----------  -------------  ----------------------------------------------------------------------------------------------
-decided  isl            spmv.py:79   scan           off[0] is in bounds for every instance of S0
-decided  isl            spmv.py:81   scan           off[r + 1] is in bounds for every instance of S1
-decided  isl            spmv.py:81   scan           off[r] is in bounds for every instance of S1
-decided  isl            spmv.py:81   scan           cnt[r] is in bounds for every instance of S1
-decided  isl            spmv.py:79   scan           distinct instances of S0 write distinct cells of off
-decided  isl            spmv.py:81   scan           distinct instances of S1 write distinct cells of off
-decided  isl            spmv.py:81   scan           every cell of off that S1 reads, S0 or S1 wrote before the read
-decided  isl            spmv.py:69   scan           the source order runs every dependence forward in time
-decided  isl            spmv.py:79   scan           no cell of off is stored twice, or read before its store
-decided  isl            spmv.py:69   scan           off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
-tested   interpreter    spmv.py:69   scan           the traced term computes what the body computes
-tested   property-test  spmv.py:84   scan_monotone  n : Nat, cnt : Fn[Fin(n), Nat], off : Fn[Fin(n + 1), Nat]
+-------  -------------  -----------  -------------  ---------------------------------------------------------------------------------------------------
+decided  isl            spmv.py:81   scan           off[0] is in bounds for every instance of off[0] = 0 (spmv.py:81)
+decided  isl            spmv.py:83   scan           off[r + 1] is in bounds for every instance of off[r + 1] = off[r] + cnt[r] (spmv.py:83)
+decided  isl            spmv.py:83   scan           off[r] is in bounds for every instance of off[r + 1] = off[r] + cnt[r] (spmv.py:83)
+decided  isl            spmv.py:83   scan           cnt[r] is in bounds for every instance of off[r + 1] = off[r] + cnt[r] (spmv.py:83)
+decided  isl            spmv.py:81   scan           distinct instances of off[0] = 0 (spmv.py:81) write distinct cells of off
+decided  isl            spmv.py:83   scan           distinct instances of off[r + 1] = off[r] + cnt[r] (spmv.py:83) write distinct cells of off
+decided  isl            spmv.py:83   scan           every cell of off that off[r + 1] = off[r] + cnt[r] (spmv.py:83) reads was written before the read,
+                                                      by off[0] = 0 (spmv.py:81) or itself
+decided  isl            spmv.py:71   scan           the source order runs every dependence forward in time
+decided  isl            spmv.py:81   scan           no cell of off is stored twice, or read before its store
+decided  isl            spmv.py:71   scan           off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
+tested   interpreter    spmv.py:71   scan           the traced term computes what the body computes
+tested   property-test  spmv.py:86   scan_monotone  n : Nat, cnt : Fn[Fin(n), Nat], off : Fn[Fin(n + 1), Nat]
                                                     | h0: off(0) == 0
                                                     | hs: forall r in Fin(n). off(r + 1) == off(r) + cnt(r)
                                                     |- forall a in Fin(n + 1), b in Fin(n + 1) where a <= b. off(a) <= off(b)
-tested   python         spmv.py:84   scan_monotone  the term computes what the annotations compute
-decided  isl            spmv.py:112  spmv           y[r] is in bounds for every instance of S0
-decided  isl            spmv.py:112  spmv           val[r, j] is in bounds for every instance of S0
-decided  type           spmv.py:112  spmv           x[col[r, j]] is in bounds by type (col[r, j] : Fin(m))
-decided  isl            spmv.py:112  spmv           col[r, j] is in bounds for every instance of S0
-decided  isl            spmv.py:112  spmv           cnt[r], the length of row r that bounds the loop over j, is in bounds for every instance of S0
-decided  isl            spmv.py:112  spmv           distinct instances of S0 write distinct cells of y
-decided  isl            spmv.py:102  spmv           the source order runs every dependence forward in time
-decided  type           spmv.py:112  spmv           the accumulation into y[r] over j is approx
-tested   interpreter    spmv.py:102  spmv           the traced term computes what the body computes
-decided  isl            spmv.py:193  spmv           split(j, 2) renames the instances of spmv one for one
-decided  isl            spmv.py:193  spmv           the order after split(j, 2) runs every dependence of spmv forward
-decided  isl            spmv.py:194  spmv           realize('y', tree=True) renames the instances of spmv one for one
-decided  isl            spmv.py:194  spmv           the order after realize('y', tree=True) runs every dependence of spmv forward
-decided  isl            spmv.py:194  spmv           the accumulation into y is reassociated by realize('y', tree=True),
+tested   python         spmv.py:86   scan_monotone  the term computes what the annotations compute
+decided  isl            spmv.py:114  spmv           y[r] is in bounds for every instance of y[r] = reduce_sum(...) (spmv.py:114)
+decided  isl            spmv.py:114  spmv           val[r, j] is in bounds for every instance of y[r] = reduce_sum(...) (spmv.py:114)
+decided  type           spmv.py:114  spmv           x[col[r, j]] is in bounds by type (col[r, j] : Fin(m))
+decided  isl            spmv.py:114  spmv           col[r, j] is in bounds for every instance of y[r] = reduce_sum(...) (spmv.py:114)
+decided  isl            spmv.py:114  spmv           cnt[r], the length of row r that bounds the loop over j, is in bounds
+                                                      for every instance of y[r] = reduce_sum(...) (spmv.py:114)
+decided  isl            spmv.py:114  spmv           distinct instances of y[r] = reduce_sum(...) (spmv.py:114) write distinct cells of y
+decided  isl            spmv.py:104  spmv           the source order runs every dependence forward in time
+decided  type           spmv.py:114  spmv           the accumulation into y[r] over j is approx
+tested   interpreter    spmv.py:104  spmv           the traced term computes what the body computes
+decided  isl            spmv.py:195  spmv           split(spmv.j, 2) renames the instances of spmv one for one
+decided  isl            spmv.py:195  spmv           the order after split(spmv.j, 2) runs every dependence of spmv forward
+decided  isl            spmv.py:196  spmv           the accumulation into spmv.y is reassociated by realize(spmv.y, tree=True),
                                                       so its result is compared at 'reassoc'
-decided  call           spmv.py:115  solve          after scan(...) in solve: off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
-tested   interpreter    spmv.py:115  solve          the traced term computes what the body computes
+decided  call           spmv.py:117  solve          after scan(...) in solve: off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
+tested   interpreter    spmv.py:117  solve          the traced term computes what the body computes
 
-29 facts: 24 decided, 5 tested
+27 facts: 22 decided, 5 tested
 
-WITHOUT LEAN: scan_monotone and 20 more rows are not proved. To have Lean prove what it can: pip install "lanky[lean]", and Lean v4.29.1 from elan (elan default leanprover/lean4:v4.29.1).
+WITHOUT LEAN: scan_monotone and 18 more rows are not proved. To have Lean prove what it can: pip install "lanky[lean]", and Lean v4.29.1 from elan (elan default leanprover/lean4:v4.29.1).
 ```
 
 Read the `BY` column.
@@ -193,9 +189,9 @@ Read the `BY` column.
 - `isl` decided `scan`'s postcondition too, from the term. A postcondition is
   a claim about the arguments once the kernel has run, and the row before it
   says that no cell of `off` is stored twice, or read before its store: so
-  what each statement stores is what `off` holds when `scan` returns, `S0`'s
-  `off[0] == 0` and `S1`'s `off[r + 1] == off[r] + cnt[r]` at every `r`, and
-  the claim is those two equations. The native runs test it as well, at
+  what each statement stores is what `off` holds when `scan` returns, `off[0]
+  == 0` and `off[r + 1] == off[r] + cnt[r]` at every `r`, and the claim is
+  those two equations. The native runs test it as well, at
   what each of them left in the arguments, and it held after every one,
   which its provenance keeps (`native`).
 - `isl` decided the casts of `rows_split`, the schedule the file holds: `lanky
@@ -220,7 +216,7 @@ Read the `BY` column.
 
 ```console
 $ uv run loopty run examples/spmv.py
-spmv: Schedule(spmv, target='c').split(j, 2).realize('y', tree=True)
+spmv: Schedule(spmv, target='c').split(spmv.j, 2).realize(spmv.y, tree=True)
   y: difference 0 within 1e-06 (approx) -> tested
 scan: Schedule(scan, target='c')
   off: difference 0 within 0 (exact) -> tested
@@ -230,19 +226,17 @@ solve: Schedule(solve, target='c')
 
 STATUS   BY     WHERE        OWNER  STATEMENT
 -------  -----  -----------  -----  -------------------------------------------------------------------------------------
-decided  isl    spmv.py:193  spmv   split(j, 2) renames the instances of spmv one for one
-decided  isl    spmv.py:193  spmv   the order after split(j, 2) runs every dependence of spmv forward
-decided  isl    spmv.py:194  spmv   realize('y', tree=True) renames the instances of spmv one for one
-decided  isl    spmv.py:194  spmv   the order after realize('y', tree=True) runs every dependence of spmv forward
-decided  isl    spmv.py:194  spmv   the accumulation into y is reassociated by realize('y', tree=True),
+decided  isl    spmv.py:195  spmv   split(spmv.j, 2) renames the instances of spmv one for one
+decided  isl    spmv.py:195  spmv   the order after split(spmv.j, 2) runs every dependence of spmv forward
+decided  isl    spmv.py:196  spmv   the accumulation into spmv.y is reassociated by realize(spmv.y, tree=True),
                                       so its result is compared at 'reassoc'
-tested   loopy  spmv.py:194  spmv   the scheduled run of spmv agrees with the native run to the accuracy its types state
-tested   loopy  spmv.py:69   scan   the scheduled run of scan agrees with the native run to the accuracy its types state
-tested   loopy  spmv.py:115  solve  the scheduled run of solve agrees with the native run to the accuracy its types state
+tested   loopy  spmv.py:196  spmv   the scheduled run of spmv agrees with the native run to the accuracy its types state
+tested   loopy  spmv.py:71   scan   the scheduled run of scan agrees with the native run to the accuracy its types state
+tested   loopy  spmv.py:117  solve  the scheduled run of solve agrees with the native run to the accuracy its types state
 
-8 facts: 5 decided, 3 tested
+6 facts: 3 decided, 3 tested
 
-WITHOUT LEAN: 4 rows are not proved. To have Lean prove what it can: pip install "lanky[lean]", and Lean v4.29.1 from elan (elan default leanprover/lean4:v4.29.1).
+WITHOUT LEAN: 2 rows are not proved. To have Lean prove what it can: pip install "lanky[lean]", and Lean v4.29.1 from elan (elan default leanprover/lean4:v4.29.1).
 ```
 
 The ragged loop became a genuine CSR loop: a flat buffer, an offsets argument,
@@ -253,23 +247,23 @@ $ uv run loopty run examples/spmv.py --emit-code
 ...
 void spmv(int32_t const n, int64_t const *__restrict__ cnt, int32_t const *__restrict__ col, double const *__restrict__ val, double const *__restrict__ x, double *__restrict__ y, int32_t const *__restrict__ off_cnt)
 {
-  double acc_j_out_j_in;
+  double acc_j_outer_j_inner;
   int32_t nl_cnt_r;
 
   for (int32_t r = 0; r <= -1 + n; ++r)
   {
-    acc_j_out_j_in = (double) (0.0);
+    acc_j_outer_j_inner = (double) (0.0);
     nl_cnt_r = (int32_t) (cnt[r]);
-    for (int32_t j_out = 0; j_out <= -1 + loopy_floor_div_pos_b_int32(1 + nl_cnt_r, 2); ++j_out)
-      for (int32_t j_in = 0; j_in <= ((1 + -1 * nl_cnt_r + 2 * j_out == 0) ? 0 : 1); ++j_in)
-        acc_j_out_j_in = acc_j_out_j_in + val[off_cnt[r] + j_in + j_out * 2] * x[col[off_cnt[r] + j_in + j_out * 2]];
-    y[r] = acc_j_out_j_in;
+    for (int32_t j_outer = 0; j_outer <= -1 + loopy_floor_div_pos_b_int32(1 + nl_cnt_r, 2); ++j_outer)
+      for (int32_t j_inner = 0; j_inner <= ((1 + -1 * nl_cnt_r + 2 * j_outer == 0) ? 0 : 1); ++j_inner)
+        acc_j_outer_j_inner = acc_j_outer_j_inner + val[off_cnt[r] + j_inner + j_outer * 2] * x[col[off_cnt[r] + j_inner + j_outer * 2]];
+    y[r] = acc_j_outer_j_inner;
   }
 }
 ```
 
 `nl_cnt_r` is the row's count, read once per row; `off_cnt` is the offsets
-argument lowering added; `j_out` and `j_in` are the two halves of the split,
+argument lowering added; `j_outer` and `j_inner` are the two halves of the split,
 the outer one outside, so each row is summed in the order the native run sums
 it. The kernel never mentioned any of them. `cnt` is an array of `Nat`, which
 is 64 bits wide as numpy's integers are, and `col` one of `Fin[m]`, which its
@@ -304,21 +298,22 @@ def jacobi(u: Arr[Fin[nt], Fin[nx], Real]):
     for t in steps:
         row = u.dom[t]
         for i in row:
-            with when((t + 1 < steps.size) & (i > 0) & (i + 1 < row.size)):
+            if t + 1 < steps.size and i > 0 and i + 1 < row.size:
                 u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2
 ```
 
-The guard is a `when` block and not an `if`, because tracing an `if` on a value
-the kernel computes would have to choose a branch. `when` records the condition,
-intersects it into the statement's isl domain where isl can state it (an affine
-comparison of loop variables, sizes and integral scalars, as here), and under
-plain `python` masks the writes of the block. The narrowed domain is what makes
-`u[t + 1, i]` in bounds: it is only ever written where `t + 1 < nt`. A guard
-isl cannot state, such as one that reads an array or compares with a `Real`
-scalar, is checked at run time instead, and the facts about the statement say
-that its domain is wider than the instances that write. A guard has to be a
-truth value: write the complement of a comparison as a comparison (`i <= 0`),
-not with `~`, which is bitwise on a Python bool and gives `-2` or `-1`.
+The interior is a plain `if`. Tracing runs the body once per branch (`and`,
+`or`, `elif`, `else` and `a if c else b` included) and records each statement
+under the conditions of its branch, its guard, which is intersected into the
+statement's isl domain where isl can state it (an affine comparison of loop
+variables, sizes and integral scalars, as here). The narrowed domain is what
+makes `u[t + 1, i]` in bounds: it is only ever written where `t + 1 < nt`. A
+condition isl cannot state, such as one that reads an array or compares with
+a `Real` scalar, is checked at run time instead, and the facts about the
+statement say that its domain is wider than the instances that write. A
+condition is a truth value: write the complement of a comparison as a
+comparison (`i <= 0`) or with `not`, not with `~`, which is bitwise on a
+Python bool and gives `-2` or `-1`.
 
 The dependences are the classic pair, `(1, 1)` and `(1, -1)`. A rectangular tile
 of the `(t, i)` nest cuts both.
@@ -333,16 +328,16 @@ native, the 16 by 16 array (first six levels around the spike):
  [0.    0.25  0.    0.375 0.    0.25  0.   ]
  [0.156 0.    0.312 0.    0.312 0.    0.156]]
 
-Schedule(jacobi).tile('t', 'i', 8, 8) ->
-  IllegalCast: tile(t,i,8,8) illegal: u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2 (stencil_skew.py:62) at t=0, i=8 writes u[1, 8], read by the same statement at t=1, i=7, scheduled earlier (at nt=16, nx=16, as hinted)
-  witness: S0{'t': 0, 'i': 8} runs before S0{'t': 1, 'i': 7} at {'nt': 16, 'nx': 16}
+Schedule(jacobi).tile(jacobi.t, jacobi.i, 8, 8) ->
+  IllegalCast: tile(jacobi.t, jacobi.i, 8, 8) illegal: u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2 (stencil_skew.py:61) at t=0, i=8 writes u[1, 8], read by the same statement at t=1, i=7, scheduled earlier (at nt=16, nx=16, as hinted)
+  witness: u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2 (stencil_skew.py:61) at t=0, i=8 runs before the same statement at t=1, i=7, where nt=16, nx=16
 
-accepted: Schedule(jacobi, target='c').skew(i, by='t').tile(t,i,8,8)
-  loop nest: t_outer i_outer t_inner i_inner
-  decided  isl  skew(i, by='t') renames the instances of jacobi one for one
-  decided  isl  the order after skew(i, by='t') runs every dependence of jacobi forward
-  decided  isl  tile(t,i,8,8) renames the instances of jacobi one for one
-  decided  isl  the order after tile(t,i,8,8) runs every dependence of jacobi forward
+accepted: Schedule(jacobi, target='c').skew(jacobi.i, by=jacobi.t).tile(jacobi.t, jacobi.i, 8, 8)
+  loop nest: jacobi.t.outer jacobi.i.outer jacobi.t.inner jacobi.i.inner
+  decided  isl  skew(jacobi.i, by=jacobi.t) renames the instances of jacobi one for one
+  decided  isl  the order after skew(jacobi.i, by=jacobi.t) runs every dependence of jacobi forward
+  decided  isl  tile(jacobi.t, jacobi.i, 8, 8) renames the instances of jacobi one for one
+  decided  isl  the order after tile(jacobi.t, jacobi.i, 8, 8) runs every dependence of jacobi forward
 
   u: difference 0 within 1e-06 (approx) -> tested
   the native run matches the hand-written sweep: True
@@ -353,8 +348,9 @@ The pair is the whole point. The statement on line 62 writes `u[1, 8]` at
 second one first, because `i = 7` is in the first tile column and `i = 8` is in
 the second. That is a pair of real instances of this kernel at these sizes,
 produced by pulling an isl solution back from time space into instance space.
-The `witness` under it is the same pair as the ledger records it, by the
-statement's id, `S0`. No code was generated, and
+The `witness` under it is the same pair, from the refusal's `instances`; its
+`witness` keeps the pair as the ledger records it, by the statement's id,
+`S0`, which is how a map per statement names it. No code was generated, and
 the schedule the cast was asked of is unchanged, so the demo can go on and ask
 for a legal one.
 
@@ -367,17 +363,21 @@ Checking and running the file behave the same way as the sparse product:
 ```console
 $ uv run lanky check examples/stencil_skew.py
 STATUS   BY           WHERE                OWNER   STATEMENT
--------  -----------  -------------------  ------  -----------------------------------------------------------------------
-decided  isl          stencil_skew.py:62   jacobi  u[t + 1, i] is in bounds for every instance of S0
-decided  isl          stencil_skew.py:62   jacobi  u[t, i - 1] is in bounds for every instance of S0
-decided  isl          stencil_skew.py:62   jacobi  u[t, i + 1] is in bounds for every instance of S0
-decided  isl          stencil_skew.py:62   jacobi  distinct instances of S0 write distinct cells of u
-decided  isl          stencil_skew.py:54   jacobi  the source order runs every dependence forward in time
-tested   interpreter  stencil_skew.py:54   jacobi  the traced term computes what the body computes
-decided  isl          stencil_skew.py:116  jacobi  skew(i, by='t') renames the instances of jacobi one for one
-decided  isl          stencil_skew.py:116  jacobi  the order after skew(i, by='t') runs every dependence of jacobi forward
-decided  isl          stencil_skew.py:117  jacobi  tile(t,i,8,8) renames the instances of jacobi one for one
-decided  isl          stencil_skew.py:117  jacobi  the order after tile(t,i,8,8) runs every dependence of jacobi forward
+-------  -----------  -------------------  ------  ----------------------------------------------------------------------------------------------
+decided  isl          stencil_skew.py:61   jacobi  u[t + 1, i] is in bounds for every instance of u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2
+                                                     (stencil_skew.py:61)
+decided  isl          stencil_skew.py:61   jacobi  u[t, i - 1] is in bounds for every instance of u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2
+                                                     (stencil_skew.py:61)
+decided  isl          stencil_skew.py:61   jacobi  u[t, i + 1] is in bounds for every instance of u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2
+                                                     (stencil_skew.py:61)
+decided  isl          stencil_skew.py:61   jacobi  distinct instances of u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2 (stencil_skew.py:61) write
+                                                     distinct cells of u
+decided  isl          stencil_skew.py:53   jacobi  the source order runs every dependence forward in time
+tested   interpreter  stencil_skew.py:53   jacobi  the traced term computes what the body computes
+decided  isl          stencil_skew.py:115  jacobi  skew(jacobi.i, by=jacobi.t) renames the instances of jacobi one for one
+decided  isl          stencil_skew.py:115  jacobi  the order after skew(jacobi.i, by=jacobi.t) runs every dependence of jacobi forward
+decided  isl          stencil_skew.py:116  jacobi  tile(jacobi.t, jacobi.i, 8, 8) renames the instances of jacobi one for one
+decided  isl          stencil_skew.py:116  jacobi  the order after tile(jacobi.t, jacobi.i, 8, 8) runs every dependence of jacobi forward
 
 10 facts: 9 decided, 1 tested
 
@@ -386,7 +386,7 @@ WITHOUT LEAN: 9 rows are not proved. To have Lean prove what it can: pip install
 
 ```console
 $ uv run loopty run examples/stencil_skew.py
-jacobi: Schedule(jacobi, target='c').skew(i, by='t').tile(t,i,8,8)
+jacobi: Schedule(jacobi, target='c').skew(jacobi.i, by=jacobi.t).tile(jacobi.t, jacobi.i, 8, 8)
   u: difference 0 within 1e-06 (approx) -> tested
 ...
 5 facts: 4 decided, 1 tested
@@ -413,12 +413,12 @@ decided  isl  reshape_layouts.py:3x4  layouts  delinearization undoes the row-ma
 
 4 facts: 4 decided
 ...
-schedule: Schedule(transpose, target='c').split(i, 2).interchange(i_out, j, i_in)
-  loop nest: i_out j i_in
-  decided  isl  split(i, 2) renames the instances of transpose one for one
-  decided  isl  the order after split(i, 2) runs every dependence of transpose forward
-  decided  isl  interchange(i_out, j, i_in) renames the instances of transpose one for one
-  decided  isl  the order after interchange(i_out, j, i_in) runs every dependence of transpose forward
+schedule: Schedule(transpose, target='c').split(transpose.i, 2).interchange(transpose.i.outer, transpose.j, transpose.i.inner)
+  loop nest: transpose.i.outer transpose.j transpose.i.inner
+  decided  isl  split(transpose.i, 2) renames the instances of transpose one for one
+  decided  isl  the order after split(transpose.i, 2) runs every dependence of transpose forward
+  decided  isl  interchange(transpose.i.outer, transpose.j, transpose.i.inner) renames the instances of transpose one for one
+  decided  isl  the order after interchange(transpose.i.outer, transpose.j, transpose.i.inner) runs every dependence of transpose forward
 ...
   b: difference 0 within 1e-06 (approx) -> tested
 ```
@@ -452,7 +452,7 @@ f packed: 15 cells for 15 pairs, and a table of row starts [0, 0, 1, 3, 6, 10]
 
 The ledger decides every in-bounds obligation over the triangle itself, not
 over the box: the column read `f[k, p]` under `k > p` is in, and `f[p, p]`
-would be out. The layout is a schedule step, `Schedule(pairs).pack("f")`, that
+would be out. The layout is a schedule step, `Schedule(pairs).pack(pairs.f)`, that
 changes no fact; `loopty run` compiles both layouts and compares each with the
 native run.
 
@@ -482,7 +482,7 @@ $ uv run python examples/calls.py
 native: matvec agrees with A @ x: True
 ...
 the term of matvec, with dot inlined at calls.py:100:
-  S0 over i: y[i] = sum over k of A[i, k]*x[k]
+  for every i: y[i] = sum over k of A[i, k]*x[k]
   dot's a is A[i]
   dot's b is x
 ...
@@ -499,7 +499,7 @@ The same file applies firedrake's quadrature rule to an integrand,
 - Break something. Change the stencil's guard from `i > 0` to `i >= 0` and
   re-check. The in-bounds fact for `u[t, i - 1]` turns `refuted`, `lanky check`
   prints `6 facts: 1 assumed, 4 decided, 1 refuted` and then
-  `REFUTED jacobi at ...: u[t, i - 1] is in bounds for every instance of S0`
+  `REFUTED jacobi at ...: u[t, i - 1] is in bounds for every instance of u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2 (stencil_skew.py:61)`
   with the cell that escapes under it, first as isl's tuple,
   `witness: (0, -1)`, then named, at the sizes isl read it off at:
   `cells u[t, i - 1] reaches are cells u has, except [a0=0, a1=-1] at [nt=2, nx=2]`.
@@ -517,7 +517,9 @@ The same file applies firedrake's quadrature rule to an integrand,
 - Ask for a tiling before the skew in your own kernel and read the witness.
 - Ask for the diamond instead of the skew:
   `Schedule(jacobi).affine("{ [t, i] -> [a, b] : a = t + i and b = t - i }")`,
-  then `.tile("a", "b", 4, 4)`. For the stencil both are accepted and compute
+  then `.tile(jacobi.loops.a, jacobi.loops.b, 4, 4)`, the two loops the map
+  makes, named under `loops` since no line of the file binds them. For the
+  stencil both are accepted and compute
   what the untiled kernel computes, though the map reaches only the points
   where `a` and `b` have the same parity; `.strides` shows the loop that
   counts its steps over them. Write the map with `i + t` first and read the

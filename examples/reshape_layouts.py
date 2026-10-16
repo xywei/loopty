@@ -61,9 +61,8 @@ def rows_of(flat: Arr[Fin[n * COLS], Real], mat: Arr[Fin[n], Fin[COLS], Real]):
     is a literal, so isl decides ``0 <= COLS * i + j < COLS * n`` from the loop
     bounds, with no size equation and no assumption about the storage.
     """
-    for i in mat.dom:
-        for j in mat.dom[i]:
-            mat[i, j] = flat[COLS * i + j]
+    for i, j in mat.dom:
+        mat[i, j] = flat[COLS * i + j]
 
 
 @kernel
@@ -73,9 +72,8 @@ def cols_of(flat: Arr[Fin[ROWS * COLS], Real], mat: Arr[Fin[ROWS], Fin[COLS], Re
     Both sizes are literals here, because the column stride is the number of
     rows: leaving that symbolic would multiply two unknowns inside an index.
     """
-    for i in mat.dom:
-        for j in mat.dom[i]:
-            mat[i, j] = flat[i + ROWS * j]
+    for i, j in mat.dom:
+        mat[i, j] = flat[i + ROWS * j]
 
 
 @kernel
@@ -85,9 +83,8 @@ def transpose(a: Arr[Fin[n], Fin[m], Real], b: Arr[Fin[m], Fin[n], Real]):
     Every obligation is affine for any ``n`` and ``m``, and the loop nest is
     free to be reordered, which is what the schedule below asks for.
     """
-    for i in a.dom:
-        for j in a.dom[i]:
-            b[j, i] = a[i, j]
+    for i, j in a.dom:
+        b[j, i] = a[i, j]
 
 
 # }}}
@@ -202,8 +199,8 @@ def matrix() -> Arr:
 #: would be rejected; the difference is in the footprints, not in the syntax.
 blocked = (
     Schedule(transpose, target="c", sizes={"n": ROWS, "m": COLS})
-    .split("i", 2, inner="i_in", outer="i_out")
-    .interchange("i_out", "j", "i_in")
+    .split(transpose.i, 2)
+    .interchange(transpose.i.outer, transpose.j, transpose.i.inner)
     .example(a=matrix(), b=Arr.zeros((COLS, ROWS)))
 )
 
@@ -248,7 +245,7 @@ def main() -> int:
 
     print()
     print(f"schedule: {blocked!r}")
-    print(f"  loop nest: {' '.join(blocked.order)}")
+    print(f"  loop nest: {' '.join(blocked.nest)}")
     for fact in blocked.facts():
         print(f"  {fact.status.value:8} {fact.decided_by or '-':4} {fact.statement}")
 

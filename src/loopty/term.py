@@ -31,9 +31,12 @@ __all__ = [
     "Access",
     "Argument",
     "ArrType",
+    "Binder",
     "Call",
+    "Callsite",
     "Difference",
     "Expression",
+    "Fiber",
     "Hypothesis",
     "Reduction",
     "Requirement",
@@ -213,14 +216,14 @@ class Reduction:
 
     ``loop_domain`` is ``domain`` before the statement's guard and the
     generator's own ``if`` clause narrowed it, as :attr:`Stmt.loop_domain` is
-    a statement's: the points at which the sum starts and reads its bounds,
-    since a ``when`` masks the write and does not skip the right-hand side,
-    and ``for k in val.dom[r] if k == j`` reads the row's length before it
-    tests ``k``. isl simplifies the narrowed set, and ``k == j`` leaves no
-    constraint of the sum's own bound in it, so what reads a bound reads it
-    here (#111). ``None`` means "the same as ``domain``", which is right for
-    a sum with no guard around it and no clause, and for a term written by
-    hand.
+    a statement's: the points at which the sum's loops are bounded, a
+    superset of where the statement's ``if`` lets the sum start, so an
+    obligation over it is harder and never falsely discharged; and ``for k
+    in val.dom[r] if k == j`` reads the row's length before it tests ``k``.
+    isl simplifies the narrowed set, and ``k == j`` leaves no constraint of
+    the sum's own bound in it, so what reads a bound reads it here (#111).
+    ``None`` means "the same as ``domain``", which is right for a sum with
+    no guard around it and no clause, and for a term written by hand.
     """
 
     op: str
@@ -240,8 +243,10 @@ class Stmt:
     """One statement instance family: a domain plus what it computes.
 
     ``inames`` are the enclosing loop variables, outer to inner, and ``domain``
-    is the isl set of their values. ``guard`` is the condition of an enclosing
-    ``when`` block, which masks the write rather than skipping it.
+    is the isl set of their values. ``guard`` is the statement's path
+    condition, the conjunction of the conditions of the ``if`` statements,
+    ``and``, ``or`` and conditional expressions around it, each as the branch
+    it is on took it (:mod:`loopty.trace`); the statement writes where it holds.
 
     ``kind`` is ``"assign"`` or ``"accumulate"``, and the difference is a claim
     about ``expr``, not a licence to guess:
@@ -268,11 +273,19 @@ class Stmt:
     term written by hand in a test does not have to care.
 
     ``loop_domain`` is the enclosing loop nest *before* any guard narrowed it:
-    the set over which the guard's own reads happen, because a ``when``
-    evaluates its whole condition at every point of the nest (Python's ``&`` is
-    eager) and masks the write rather than skipping the block. ``None`` means
-    "the same as ``domain``", which is right for a statement without a guard
-    and for a term written by hand.
+    where the loops read their bounds, which isl may no longer show in the
+    narrowed ``domain`` (``k == j`` leaves no constraint of the bound of
+    ``k``, #111), and where the guard's own reads happen unless ``path`` says
+    otherwise. ``None`` means "the same as ``domain``", which is right for a
+    statement without a guard and for a term written by hand.
+
+    ``path`` is the guard condition by condition, in the order the body asked
+    them, each with the points at which it is asked: the loop nest narrowed
+    by the conditions before it, where isl states them, since Python asks a
+    condition of ``if i > 0 and x[i - 1] > 0:`` only where those before it
+    held. A condition's reads happen there (:func:`loopty.flow.source_accesses`),
+    and nowhere else. Empty for a statement without a guard, and for a term
+    written by hand, whose guard is read over ``loop_domain``.
 
     ``unnarrowed`` lists the conjuncts of ``guard`` that ``domain`` does not
     state, each as ``(conjunct, why)`` with the conjunct as the body spells it.
@@ -332,6 +345,7 @@ class Stmt:
     text: str = ""
     spelled: tuple[str, ...] = ()
     unrolled: tuple[tuple[str, int], ...] = ()
+    path: tuple[tuple[Expression, isl.Set], ...] = ()
 
     def __post_init__(self) -> None:
         _check_domains(self.domain, self.loop_domain, f"statement {self.id}")
@@ -414,6 +428,15 @@ class ArrType:
         return tuple(Var(name) for name in sorted(self.domain.size_names()))
 
 
+class _Names(frozenset):
+    """A frozenset of names that prints them sorted (see :class:`Hypothesis`)."""
+
+    def __repr__(self) -> str:
+        if not self:
+            return "frozenset()"
+        return "frozenset({" + ", ".join(repr(name) for name in sorted(self)) + "})"
+
+
 @dataclass(frozen=True, eq=False)
 class Hypothesis:
     """A proposition a fact about a program may assume, and what it rests on.
@@ -437,6 +460,12 @@ class Hypothesis:
     source: str
     rests_on: tuple[str, ...] = ()
     mentions: frozenset[str] = frozenset()
+
+    def __post_init__(self) -> None:
+        # A frozenset of strings prints in the order of the process's hash
+        # seed, and a program fact's term in the JSON ledger is a repr with
+        # this in it, so two runs of one file wrote two ledgers (#298).
+        object.__setattr__(self, "mentions", _Names(self.mentions))
 
 
 @dataclass(frozen=True, eq=False)
@@ -519,6 +548,78 @@ class Scope:
     hypotheses: tuple[Hypothesis, ...] = ()
 
 
+@dataclass(frozen=True)
+class Binder:
+    """A loop of the source: the target of a ``for``, or the binder of a sum.
+
+    ``name`` is what the term calls it, an iname of its statements or a
+    binder of a sum in them, and ``binder`` what the source calls it: the
+    second ``for r`` of a body is ``r_0`` in the term and ``r`` here.
+    ``where`` is the line of the ``for``, or of the sum's ``for`` clause.
+    ``scope`` is the labels of the calls the loop is inside, outermost
+    first: empty for a kernel's own loops, ``("dot",)`` for a loop of a
+    kernel its body calls and inlines (:mod:`loopty.calls`), and
+    ``("unpack",)`` in a program for a loop of its call of ``unpack``
+    (:mod:`loopty.compose`). ``sum`` says that it binds a sum.
+
+    A schedule names a loop by a handle (:mod:`loopty.handles`), which is
+    this record seen from the kernel or the program: ``l2p.reconstruct.box``
+    is the binder ``box`` in the scope ``("reconstruct",)`` of ``l2p``.
+    """
+
+    name: str
+    binder: str
+    where: str = ""
+    sum: bool = False
+    scope: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, eq=False)
+class Fiber:
+    """A fiber a program's body reads a size off, ``x.dom[0].size``.
+
+    The array the program makes with that size is ``made``, at ``where``,
+    and the fiber is of the program's array ``array`` at the indices
+    ``index``, each of an axis of the length ``extents`` gives, in the
+    program's sizes: ``Arr.zeros((x.dom[0].size,))`` of an ``x`` of
+    ``n`` rows is the fiber at ``(0,)`` of an axis of length ``n``.
+    Natively ``x.dom[0]`` raises ``IndexError`` where the axis has no
+    index 0, ``n = 0``, so the compiled run is refused at such sizes
+    (:func:`loopty.contract.made_fibers`); an index out of range at every
+    size is refused when the term is built.
+    """
+
+    made: str
+    where: str
+    array: str
+    index: tuple[int, ...]
+    extents: tuple[Expression, ...]
+
+    @property
+    def spelled(self) -> str:
+        """The fiber as the body wrote it: ``x.dom[0]``."""
+        return f"{self.array}.dom" + "".join(f"[{k}]" for k in self.index)
+
+
+@dataclass(frozen=True)
+class Callsite:
+    """A call a term holds: a kernel's inlined call, or a program's call.
+
+    ``labels`` are the labels of the calls it is inside and its own, last,
+    outermost first: ``("evaluate",)`` for a program's call, and
+    ``("assemble", "dot@2")`` for the second call of ``dot`` that the
+    program's call of ``assemble`` makes. ``kernel`` is the callee's name,
+    ``where`` the line of the call, and ``arrays`` the term's array passed
+    for each of the callee's array parameters, ``(param, array)``. A handle
+    reaches a call's loops and arrays through it (:mod:`loopty.handles`).
+    """
+
+    labels: tuple[str, ...]
+    kernel: str
+    where: str = ""
+    arrays: tuple[tuple[str, str], ...] = ()
+
+
 @dataclass(frozen=True, eq=False)
 class Argument:
     """What one argument of a call inside a kernel's body is, in the caller's names.
@@ -584,6 +685,8 @@ class Call:
     ``unknown`` says why the points of the call cannot be stated, where they
     cannot (inside a sum over a binder the trace does not bind itself), and
     is empty otherwise; the facts of such a call are left ``assumed``.
+    ``within`` are the labels of the calls this one is made inside,
+    outermost first, empty for a call the body makes itself.
     """
 
     callee: str
@@ -600,6 +703,7 @@ class Call:
     loop_domain: isl.Set | None = None
     unnarrowed: tuple[tuple[str, str], ...] = ()
     unknown: str = ""
+    within: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -621,7 +725,7 @@ class Term:
     guessing from the spelling. A term written by hand leaves it empty and is
     read by spelling, which is what :data:`COUNT_PARAM_REFLECTED` is for.
 
-    Four fields are empty for a kernel's term and filled in for a program's
+    Five fields are empty for a kernel's term and filled in for a program's
     (:mod:`loopty.compose`), which is one term made of several kernels':
 
     * ``temporaries`` are the arrays the term writes and reads that are not
@@ -643,6 +747,9 @@ class Term:
       Natively that dtype is whatever ``u`` is called with, so it is checked
       when the compiled term is run
       (:func:`loopty.contract.inherited_storage`).
+    * ``fibers`` are the fibers the body reads sizes off for the arrays it
+      makes (:class:`Fiber`), ``x.dom[0].size``, which natively exist only
+      at some sizes; the compiled program is refused at the others.
 
     Two more are a program's alone, and are how its callees' facts travel
     from one call to the next:
@@ -677,6 +784,17 @@ class Term:
       writes that value into a one-cell array, ``result[0] = ...``, which
       the lowering compiles and the native run fills in. ``None`` for a
       kernel that writes its parameters.
+
+    Two more say what the source calls what the term holds, for the handles
+    a schedule names its loops and arrays by (:mod:`loopty.handles`):
+
+    * ``binders`` are the loops of the source, each with the name the term
+      gives it, its line and the calls it is inside (:class:`Binder`);
+    * ``callsites`` are the calls, inlined or composed, each with the
+      arrays it was passed (:class:`Callsite`).
+
+    Both are empty for a term written by hand, whose statements' loops are
+    then its binders, each named as the term names it.
     """
 
     name: str
@@ -692,9 +810,12 @@ class Term:
     requirements: tuple[Requirement, ...] = ()
     scopes: tuple[Scope, ...] = ()
     deferred_offsets: tuple[str, ...] = ()
+    fibers: tuple[Fiber, ...] = ()
     tables: tuple[tuple[str, Any], ...] = ()
     calls: tuple[Call, ...] = ()
     result: str | None = None
+    binders: tuple[Binder, ...] = ()
+    callsites: tuple[Callsite, ...] = ()
 
     @property
     def param_names(self) -> tuple[str, ...]:

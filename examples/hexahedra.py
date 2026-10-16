@@ -80,9 +80,10 @@ another order than the dense operator does.
 
 *How deep each fusion goes.* ``along_s`` reads a whole column of what
 ``along_r`` stored in the same ``k``-slab, so the two fuse on ``(q, e, k)``
-and no deeper; the metric product fuses with ``along_r`` on every loop but
-the row's. The refusal of the deeper fusion names the pair it would run
-backwards.
+and no deeper, ``fuse(weak_grad.along_r.k, weak_grad.along_s.k)``: a fusion
+names the loop of each call it goes down to. The metric product fuses with
+``along_r`` on every loop but the row's, down to ``j``. The refusal of the
+deeper fusion names the pair it would run backwards.
 
 *What passes between the passes.* Fused so, ``w`` is read one row at a time
 and ``v`` one slab at a time, so ``contract`` keeps them in ``n`` and
@@ -95,6 +96,8 @@ each pass is a launch of its own, every node on a work item:
 """
 
 from __future__ import annotations
+
+from typing import Any
 
 import numpy as np
 from lanky import theorem
@@ -181,12 +184,8 @@ def metric(
     w: Arr[Fin[9], Fin[ne], Fin[n], Fin[n], Fin[n], Real],
 ):
     """The field times each metric term ``J dr_d/dx_x``, field ``q = 3 x + d``."""
-    for q in w.dom:
-        for e in w.dom[q]:
-            for k in w.dom[q, e]:
-                for j in w.dom[q, e, k]:
-                    for i in w.dom[q, e, k, j]:
-                        w[q, e, k, j, i] = G[q, e, k, j, i] * u[e, k, j, i]
+    for q, e, k, j, i in w.dom:
+        w[q, e, k, j, i] = G[q, e, k, j, i] * u[e, k, j, i]
 
 
 @kernel
@@ -196,14 +195,10 @@ def contravariant(
     w: Arr[Fin[3], Fin[ne], Fin[n], Fin[n], Fin[n], Real],
 ):
     """The flux along each reference direction ``d``: ``sum_x J dr_d/dx_x f_x``."""
-    for d in w.dom:
-        for e in w.dom[d]:
-            for k in w.dom[d, e]:
-                for j in w.dom[d, e, k]:
-                    for i in w.dom[d, e, k, j]:
-                        w[d, e, k, j, i] = reduce_sum(
-                            G[3 * x + d, e, k, j, i] * f[x, e, k, j, i] for x in Fin[3]
-                        )
+    for d, e, k, j, i in w.dom:
+        w[d, e, k, j, i] = reduce_sum(
+            G[3 * x + d, e, k, j, i] * f[x, e, k, j, i] for x in Fin[3]
+        )
 
 
 @kernel
@@ -213,14 +208,10 @@ def along_r(
     v: Arr[Fin[nq], Fin[ne], Fin[n], Fin[n], Fin[n], Real],
 ):
     """Each field's own matrix applied along ``r``, the first reference axis."""
-    for q in v.dom:
-        for e in v.dom[q]:
-            for k in v.dom[q, e]:
-                for j in v.dom[q, e, k]:
-                    for i in v.dom[q, e, k, j]:
-                        v[q, e, k, j, i] = reduce_sum(
-                            Fr[q, i, a] * w[q, e, k, j, a] for a in Fr.dom[q, i]
-                        )
+    for q, e, k, j, i in v.dom:
+        v[q, e, k, j, i] = reduce_sum(
+            Fr[q, i, a] * w[q, e, k, j, a] for a in Fr.dom[q, i]
+        )
 
 
 @kernel
@@ -230,14 +221,10 @@ def along_s(
     vs: Arr[Fin[nq], Fin[ne], Fin[n], Fin[n], Fin[n], Real],
 ):
     """Each field's own matrix applied along ``s``, the second reference axis."""
-    for q in vs.dom:
-        for e in vs.dom[q]:
-            for k in vs.dom[q, e]:
-                for j in vs.dom[q, e, k]:
-                    for i in vs.dom[q, e, k, j]:
-                        vs[q, e, k, j, i] = reduce_sum(
-                            Fs[q, j, b] * v[q, e, k, b, i] for b in Fs.dom[q, j]
-                        )
+    for q, e, k, j, i in vs.dom:
+        vs[q, e, k, j, i] = reduce_sum(
+            Fs[q, j, b] * v[q, e, k, b, i] for b in Fs.dom[q, j]
+        )
 
 
 @kernel
@@ -247,18 +234,14 @@ def gradient_along_t(
     grad: Arr[Fin[3], Fin[ne], Fin[n], Fin[n], Fin[n], Real],
 ):
     """Along ``t``, the three directions of each component ``x`` summed."""
-    for x in grad.dom:
-        for e in grad.dom[x]:
-            for k in grad.dom[x, e]:
-                for j in grad.dom[x, e, k]:
-                    for i in grad.dom[x, e, k, j]:
-                        grad[x, e, k, j, i] = reduce_sum(
-                            reduce_sum(
-                                Ft[3 * x + d, k, c] * vs[3 * x + d, e, c, j, i]
-                                for c in Ft.dom[3 * x + d, k]
-                            )
-                            for d in Fin[3]
-                        )
+    for x, e, k, j, i in grad.dom:
+        grad[x, e, k, j, i] = reduce_sum(
+            reduce_sum(
+                Ft[3 * x + d, k, c] * vs[3 * x + d, e, c, j, i]
+                for c in Ft.dom[3 * x + d, k]
+            )
+            for d in Fin[3]
+        )
 
 
 @kernel
@@ -268,16 +251,13 @@ def divergence_along_t(
     div: Arr[Fin[ne], Fin[n], Fin[n], Fin[n], Real],
 ):
     """Along ``t``, the three directions summed."""
-    for e in div.dom:
-        for k in div.dom[e]:
-            for j in div.dom[e, k]:
-                for i in div.dom[e, k, j]:
-                    div[e, k, j, i] = reduce_sum(
-                        reduce_sum(
-                            Ft[d, k, c] * vs[d, e, c, j, i] for c in Ft.dom[d, k]
-                        )
-                        for d in Fin[3]
-                    )
+    for e, k, j, i in div.dom:
+        div[e, k, j, i] = reduce_sum(
+            reduce_sum(
+                Ft[d, k, c] * vs[d, e, c, j, i] for c in Ft.dom[d, k]
+            )
+            for d in Fin[3]
+        )
 
 
 @program(uses=[sum_factorization])
@@ -354,16 +334,16 @@ def weak_div(G, f, Fr, Fs, Ft, div) -> all(
 
 # {{{ the schedules
 
-#: The metric with the pass along r, on every loop but the row's; then the two
-#: passes on (q, e, k), a slab at a time.
+#: The metric with the pass along r, on every loop but the row's, down to j;
+#: then the two passes on (q, e, k), a slab at a time.
 fused = (
     Schedule(weak_grad)
-    .fuse("metric", "along_r", loops=4)
-    .fuse("along_r", "along_s", loops=3)
+    .fuse(weak_grad.metric.j, weak_grad.along_r.j)
+    .fuse(weak_grad.along_r.k, weak_grad.along_s.k)
 )
 
 #: The same, with w kept one row at a time and v one slab at a time.
-contracted = fused.contract("w").contract("v")
+contracted = fused.contract(weak_grad.w).contract(weak_grad.v)
 
 
 @program
@@ -388,23 +368,27 @@ def passes_on_a_device(operator: str = "grad", target: str = "c") -> list[Schedu
     The element is the work group, ``e`` on ``g.0``, and its nodes the work
     items, ``k, j, i`` on ``l.2, l.1, l.0``; the fields run in sequence on
     each. The metric is computed where the pass along ``r`` reads it,
-    ``substitute("w")``, so nothing is stored between them (the program names
-    ``along_r``'s loops ``q_0, e_0, ...``, as it names each call's). Each
-    launch finishes before the next starts, so a pass may read what another
-    work item of the last one stored. ``benchmarks/hexahedra.py`` times them,
-    and other shapes of them, retargeted onto OpenCL.
+    ``substitute(first.w)``, so nothing is stored between them, and the
+    loops of the first launch are the pass's, ``first.along_r.e`` and so
+    on. Each launch finishes before the next starts, so a pass may read
+    what another work item of the last one stored. ``benchmarks/hexahedra.py``
+    times them, and other shapes of them, retargeted onto OpenCL.
     """
     first, last = {
         "grad": (metric_along_r, gradient_along_t),
         "div": (contravariant_along_r, divergence_along_t),
     }[operator]
-    nodes = {"e": "g.0", "k": "l.2", "j": "l.1", "i": "l.0"}
+
+    def on_nodes(schedule: Schedule, loops: Any) -> Schedule:
+        """Each element a work group, each node of it a work item."""
+        return schedule.tag(
+            {loops.e: "g.0", loops.k: "l.2", loops.j: "l.1", loops.i: "l.0"}
+        )
+
     return [
-        Schedule(first, target=target)
-        .substitute("w")
-        .tag(**{f"{loop}_0": axis for loop, axis in nodes.items()}),
-        Schedule(along_s, target=target).tag(**nodes),
-        Schedule(last, target=target).tag(**nodes),
+        on_nodes(Schedule(first, target=target).substitute(first.w), first.along_r),
+        on_nodes(Schedule(along_s, target=target), along_s),
+        on_nodes(Schedule(last, target=target), last),
     ]
 
 
@@ -589,7 +573,7 @@ def main() -> int:
     print()
 
     try:
-        Schedule(weak_grad).fuse("along_r", "along_s")
+        Schedule(weak_grad).fuse(weak_grad.along_r.i, weak_grad.along_s.i)
     except IllegalCast as exc:
         print(f"refused: {exc}")
     print()

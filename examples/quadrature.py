@@ -69,17 +69,16 @@ def mass_action(
     yl: Arr[Fin[nc], Fin[3], Real],
 ):
     """Each cell's P1 mass matrix applied to the field at its nodes."""
-    for c in yl.dom:
-        for j in yl.dom[c]:
-            dx1 = X[cell[c, 1]] - X[cell[c, 0]]
-            dy1 = Y[cell[c, 1]] - Y[cell[c, 0]]
-            dx2 = X[cell[c, 2]] - X[cell[c, 0]]
-            dy2 = Y[cell[c, 2]] - Y[cell[c, 0]]
-            yl[c, j] = abs(dx1 * dy2 - dx2 * dy1) * reduce_sum(
-                W[q] * PHI[q, j] * PHI[q, k] * u[cell[c, k]]
-                for q in W.dom
-                for k in PHI.dom[q]
-            )
+    for c, j in yl.dom:
+        dx1 = X[cell[c, 1]] - X[cell[c, 0]]
+        dy1 = Y[cell[c, 1]] - Y[cell[c, 0]]
+        dx2 = X[cell[c, 2]] - X[cell[c, 0]]
+        dy2 = Y[cell[c, 2]] - Y[cell[c, 0]]
+        yl[c, j] = abs(dx1 * dy2 - dx2 * dy1) * reduce_sum(
+            W[q] * PHI[q, j] * PHI[q, k] * u[cell[c, k]]
+            for q in W.dom
+            for k in PHI.dom[q]
+        )
 
 
 # {{{ meshes
@@ -134,7 +133,9 @@ def closed_form(mesh: tuple[np.ndarray, np.ndarray, np.ndarray]) -> np.ndarray:
 #: PyOP2's GPU schedule splits the cells by 32 (Kulkarni's ``snpt``); on the C
 #: target the split stays in sequence.
 split_cells = (
-    Schedule(mass_action, target="c").split("c", 32).example(**inputs_on(square_mesh()))
+    Schedule(mass_action, target="c")
+    .split(mass_action.c, 32)
+    .example(**inputs_on(square_mesh()))
 )
 
 

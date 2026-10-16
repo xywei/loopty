@@ -39,15 +39,16 @@ What is worth reading here
 --------------------------
 
 *How deep a fusion goes is a choice, and each choice is checked.*
-``fuse("along_r", "along_s", loops=2)`` fuses the element and the row and
-leaves the inner loops one after the other; the refusal of the deeper fusion
+``fuse(weak_derivative.along_r.a, weak_derivative.along_s.a)`` fuses each
+pass's loops down to the row, ``a``, the element and the row, and leaves the
+inner loops one after the other; the refusal of the deeper fusion
 names the pair it would run backwards and the shallower fusion it checked.
 grudge's three-dimensional passes fuse the same way: on the element and the
 row for ``r`` then ``s``, deeper for ``s`` then ``t``.
 
 *What passes between the passes is one row.* Fused on the element and the
 row, ``along_s`` reads only the row of ``v`` that ``along_r`` has just stored,
-so ``contract("v")`` keeps one row, ``lambda e, a, b: b``, in ``double
+so ``contract(weak_derivative.v)`` keeps one row, ``lambda e, a, b: b``, in ``double
 v_window[n]``, where the program stored ``ne * n * n`` cells; its
 ``no-clobber`` fact says no read sees its row overwritten, and putting the
 elements on a group axis after it is refused, since every element would
@@ -76,10 +77,8 @@ def along_r(
     v: Arr[Fin[ne], Fin[n], Fin[n], Real],
 ):
     """``F`` applied along the first reference axis of every element."""
-    for e in v.dom:
-        for a in v.dom[e]:
-            for b in v.dom[e, a]:
-                v[e, a, b] = reduce_sum(F[a, m] * u[e, m, b] for m in F.dom[a])
+    for e, a, b in v.dom:
+        v[e, a, b] = reduce_sum(F[a, m] * u[e, m, b] for m in F.dom[a])
 
 
 @kernel
@@ -89,10 +88,8 @@ def along_s(
     w: Arr[Fin[ne], Fin[n], Fin[n], Real],
 ):
     """``G`` applied along the second reference axis of every element."""
-    for e in w.dom:
-        for a in w.dom[e]:
-            for b in w.dom[e, a]:
-                w[e, a, b] = reduce_sum(G[b, m] * v[e, a, m] for m in G.dom[b])
+    for e, a, b in w.dom:
+        w[e, a, b] = reduce_sum(G[b, m] * v[e, a, m] for m in G.dom[b])
 
 
 @program
@@ -104,10 +101,12 @@ def weak_derivative(D, M, u, w):
 
 
 #: The element and the row fused, the inner loops one after the other.
-fused = Schedule(weak_derivative).fuse("along_r", "along_s", loops=2)
+fused = Schedule(weak_derivative).fuse(
+    weak_derivative.along_r.a, weak_derivative.along_s.a
+)
 
 #: The same, with v kept one row at a time.
-contracted = fused.contract("v")
+contracted = fused.contract(weak_derivative.v)
 
 
 def gll(nodes: int = NODES) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -174,15 +173,17 @@ def main() -> int:
     print()
 
     try:
-        Schedule(weak_derivative).fuse("along_r", "along_s")
+        Schedule(weak_derivative).fuse(
+            weak_derivative.along_r.b, weak_derivative.along_s.b
+        )
     except IllegalCast as exc:
         print(f"refused: {exc}")
     print()
 
     print(f"accepted: {fused!r}")
-    zeroing = set(weak_derivative.term.stmt("v.zeros").inames)
-    passes = [name for name in fused.order if name not in zeroing]
-    print(f"  the passes' loops, outermost first: {', '.join(passes)}")
+    # no loop zeroes v: no read sees the zeros it is made with, so every
+    # schedule of the program runs without them, the first fact below
+    print(f"  the passes' loops, outermost first: {', '.join(fused.nest)}")
     for fact in fused.facts():
         print(f"  {fact.status.value:8} {fact.decided_by:4} {fact.statement}")
     fact = LoopyExecutor().differential(weak_derivative, fused, inputs())
@@ -197,8 +198,13 @@ def main() -> int:
     window = contracted.windows["v"]
     print(f"accepted: {contracted!r}")
     print(f"  v kept in {window.extents[0]} cells, {window.placement}")
-    for storage in contracted.facts()[-2:]:
-        print(f"  {storage.status.value:8} {storage.decided_by:4} {storage.statement}")
+    # the window's own fact; the definedness it rests on is fused's, above
+    shown = {fact.id for fact in fused.facts()}
+    for storage in contracted.facts():
+        if storage.id not in shown:
+            print(
+                f"  {storage.status.value:8} {storage.decided_by:4} {storage.statement}"
+            )
     kept = LoopyExecutor().differential(weak_derivative, contracted, inputs())
     print(f"  w: agrees with the native run -> {kept.status.value}")
     tested = fact.status.value == "tested" and kept.status.value == "tested"

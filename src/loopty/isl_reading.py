@@ -21,18 +21,18 @@ its readings were wrong for what loopty writes (note 23 in
   (:mod:`loopty.promotion`), failed in loopy's bounds check, and so did a
   substitution that carried a store's conversion into a subscript, ``x[p[i]]``
   (#129, #145);
-* a constant is read by ``int()``, so the ``0.5`` of ``when(i * 0.5 < 2)``
+* a constant is read by ``int()``, so the ``0.5`` of ``if i * 0.5 < 2:``
   read as ``0``: the guard read as true everywhere, and the bounds check
-  refused an access that was in bounds, and ``when(i * 0.5 >= 1)`` read as
+  refused an access that was in bounds, and ``if i * 0.5 >= 1:`` read as
   false everywhere, so the check passed an access past the end of the array
   that it never looked at (#137). A float that is an integer was read as the
   integer, though the guard is computed in floating point, which rounds:
-  ``when(i * 2.0**52 + 1.0 <= i * 2.0**52)`` read as false everywhere, and
+  ``if i * 2.0**52 + 1.0 <= i * 2.0**52:`` read as false everywhere, and
   holds from ``i = 2`` in double, and ``np.float32(1.0) * i <= 2**24`` holds
   at ``i = 2**24 + 1`` in single precision;
 * a value argument is a parameter of the domain the guards are read over,
-  an integer, whatever its dtype: a ``Real`` scalar ``a`` in ``when((i < a) &
-  (i > a - 1))`` was an integer, for which the guard holds nowhere, and the
+  an integer, whatever its dtype: a ``Real`` scalar ``a`` in ``if (i < a) &
+  (i > a - 1):`` was an integer, for which the guard holds nowhere, and the
   guard holds at ``i = 1`` for ``a = 1.5``.
 
 loopty's readings decline all three: a conversion, a constant whose type is

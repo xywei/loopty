@@ -262,3 +262,80 @@ def test_upstream_takes_a_kernel() -> None:
         pass
 
     assert isinstance(upstream(fill)(lambda y: {"y": 0}), Upstream)
+
+
+#: A kernel in a file of its own, whose example inputs are ones.
+DOUBLING = (
+    "from __future__ import annotations\n"
+    "import numpy as np\n"
+    "from lanky.prelude import Fin, Real\n"
+    "from loopty import Arr, kernel\n"
+    "@kernel\n"
+    "def double(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):\n"
+    "    for i in y.dom:\n"
+    "        y[i] = 2 * x[i]\n"
+    "def example_inputs():\n"
+    "    return {'double': {'x': Arr.from_numpy(np.ones(4)), 'y': Arr.zeros((4,))}}\n"
+)
+
+#: A comparison in a file of its own: what was recorded on 0, 1, 2, 3.
+COMPARED = (
+    "from __future__ import annotations\n"
+    "import numpy as np\n"
+    "from loopty import Arr, upstream\n"
+    "from {kernel} import double\n"
+    "{inputs}"
+    "@upstream(double)\n"
+    "def recorded(x, y):\n"
+    "    return {{'y': [0.0, 2.0, 4.0, 6.0]}}\n"
+)
+
+#: The comparison file's own inputs, which the recording is of.
+COUNTING = (
+    "def example_inputs():\n"
+    "    x = Arr.from_numpy(np.arange(4.0))\n"
+    "    return {'double': {'x': x, 'y': Arr.zeros((4,))}}\n"
+)
+
+
+def test_a_comparison_in_a_file_of_its_own_runs_on_that_files_inputs(
+    tmp_path, monkeypatch
+) -> None:
+    # #262: the inputs were the kernel's module's, so a comparison declared
+    # beside an import of the kernel compared on inputs it did not mean, or
+    # read assumed where the kernel's file has none
+    monkeypatch.syspath_prepend(str(tmp_path))
+    (tmp_path / "doubling_262.py").write_text(DOUBLING)
+    (tmp_path / "bare_262.py").write_text(
+        DOUBLING.split("def example_inputs")[0].replace("double", "twice")
+    )
+    own = tmp_path / "doubling_vs_262.py"
+    own.write_text(COMPARED.format(kernel="doubling_262", inputs=COUNTING))
+    (row,) = [fact for fact in check_path(own) if fact.kind == KIND]
+    assert row.status is Status.TESTED, row.provenance
+    assert row.provenance["inputs"] == "example_inputs() of doubling_vs_262.py"
+    # a kernel's file without inputs: the comparison's own are enough
+    alone = tmp_path / "bare_vs_262.py"
+    alone.write_text(
+        COMPARED.format(kernel="bare_262", inputs=COUNTING).replace("double", "twice")
+    )
+    (row,) = [fact for fact in check_path(alone) if fact.kind == KIND]
+    assert row.status is Status.TESTED, row.provenance
+    # without its own, the comparison runs on the kernel's file's, and says so
+    theirs = tmp_path / "doubling_theirs_262.py"
+    theirs.write_text(COMPARED.format(kernel="doubling_262", inputs=""))
+    (row,) = [fact for fact in check_path(theirs) if fact.kind == KIND]
+    assert row.status is Status.REFUTED
+    assert row.provenance["inputs"] == "example_inputs() of doubling_262.py"
+    assert row.provenance["reason"].startswith("y: cell 0 is 2.0 natively and 0.0 ")
+    # neither has any
+    neither = tmp_path / "bare_theirs_262.py"
+    neither.write_text(
+        COMPARED.format(kernel="bare_262", inputs="").replace("double", "twice")
+    )
+    (row,) = [fact for fact in check_path(neither) if fact.kind == KIND]
+    assert row.status is Status.ASSUMED
+    assert row.provenance["reason"] == (
+        "neither bare_theirs_262.py nor bare_262.py has an example_inputs() to run "
+        "twice and recorded on"
+    )

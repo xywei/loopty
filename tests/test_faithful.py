@@ -18,9 +18,9 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 from lanky.ledger import Status
-from lanky.prelude import Nat, Real
+from lanky.prelude import Bool, Nat, Real
 
-from loopty import Arr, Fin, reduce_sum, when
+from loopty import Arr, Fin, reduce_sum
 from loopty.faithful import KIND, SIZES, sample_arguments
 from loopty.kernel import Kernel
 from loopty.tolerance import disagreement
@@ -171,7 +171,7 @@ def test_a_guard_against_a_real_scalar_is_tested() -> None:
     # value that is not an integer, so the fact was left assumed.
     def below(a: Real, y: Arr[Fin[n], Real]):  # noqa: F821
         for i in y.dom:
-            with when(i < a):
+            if i < a:
                 y[i] = 1.0
 
     fact = faithful(below)
@@ -179,21 +179,21 @@ def test_a_guard_against_a_real_scalar_is_tested() -> None:
     assert fact.provenance["compared"] == 3
 
 
-def test_a_guard_whose_native_value_is_an_integer_is_refuted() -> None:
+def test_a_truth_value_whose_native_value_is_an_integer_is_refuted() -> None:
     # ~ on the Python bool i > 0 is -2 or -1 natively, and 'not' in the trace.
-    # The native run refuses the spelling, whatever the input, so the fact is
-    # refuted with the refusal, which names the fix, and not skipped.
-    def flipped(y: Arr[Fin[n], Real]):  # noqa: F821
+    # The native run refuses to store it into an array of truth values,
+    # whatever the input, so the fact is refuted with the refusal, which
+    # names the fix, and not skipped.
+    def flipped(y: Arr[Fin[n], Bool]):  # noqa: F821
         for i in y.dom:
-            with when(~(i > 0)):
-                y[i] = 1.0
+            y[i] = ~(i > 0)
 
     fact = faithful(flipped)
     assert fact.status is Status.REFUTED, fact.provenance
     assert fact.decided_by == "interpreter"
     counterexample = fact.provenance["counterexample"]
     assert counterexample["input"].startswith("sample 1 (")
-    assert counterexample["body raised"].startswith("TraceError: the guard of")
+    assert counterexample["body raised"].startswith("TraceError: the value stored")
     reason = fact.provenance["reason"]
     assert "the body, run natively, is refused" in reason
     assert "'i <= 0' for '~(i > 0)'" in reason
@@ -204,20 +204,23 @@ def test_a_guard_whose_native_value_is_an_integer_is_refuted() -> None:
 
 def test_a_native_refusal_refutes_where_the_term_raised_too() -> None:
     # The interpreted term reads x[n] in the second loop, and the body never
-    # gets there: its first guard is refused at i = 0. The refusal is about
+    # gets there: its first store is refused at i = 0. The refusal is about
     # the spelling, so the fact is refuted, and the reason does not claim that
     # the term ran.
-    def flipped_then_shifted(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+    def flipped_then_shifted(
+        x: Arr[Fin[n], Real],  # noqa: F821
+        b: Arr[Fin[n], Bool],  # noqa: F821
+        y: Arr[Fin[n], Real],  # noqa: F821
+    ):
         for i in y.dom:
-            with when(~(i > 0)):
-                y[i] = 1.0
+            b[i] = ~(i > 0)
         for i in y.dom:
             y[i] = x[i + 1]
 
     fact = faithful(flipped_then_shifted)
     assert fact.status is Status.REFUTED, fact.provenance
     counterexample = fact.provenance["counterexample"]
-    assert counterexample["body raised"].startswith("TraceError: the guard of")
+    assert counterexample["body raised"].startswith("TraceError: the value stored")
     assert counterexample["term raised"].startswith("IndexError")
     reason = fact.provenance["reason"]
     assert "the body, run natively, is refused" in reason

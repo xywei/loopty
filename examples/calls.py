@@ -125,9 +125,8 @@ def element_mass(
 ) -> all(Me[j, k] == Me[k, j] for j in Fin[3] for k in Fin[3]):
     """The P1 mass matrix of the triangle with corners ``(X, Y)``."""
     area = abs((X[1] - X[0]) * (Y[2] - Y[0]) - (X[2] - X[0]) * (Y[1] - Y[0]))
-    for j in Me.dom:
-        for k in Me.dom[j]:
-            Me[j, k] = area * integrate(lambda q: PHI[q, j] * PHI[q, k])
+    for j, k in Me.dom:
+        Me[j, k] = area * integrate(lambda q: PHI[q, j] * PHI[q, k])
 
 
 @kernel
@@ -143,7 +142,7 @@ def mass_matrices(
 
 
 #: The rows of ``matvec`` split by 4, a schedule of the kernel with the call.
-split_rows = Schedule(matvec).split("i", 4)
+split_rows = Schedule(matvec).split(matvec.i, 4)
 
 
 # {{{ inputs
@@ -256,7 +255,7 @@ def main() -> int:
     print()
     print(f"the term of matvec, with {call.callee} inlined at {call.where}:")
     print(
-        f"  {stmt.id} over {', '.join(stmt.inames)}: y[i] = sum over "
+        f"  for every {', '.join(stmt.spelled)}: y[i] = sum over "
         f"{', '.join(stmt.expr.inames)} of {stmt.expr.body}"
     )
     for argument in call.arguments:

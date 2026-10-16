@@ -26,7 +26,6 @@ from loopty import (
     kernel,
     program,
     reduce_sum,
-    when,
 )
 from loopty.executor import LoopyExecutor, emit_code
 from loopty.flow import dependences
@@ -95,7 +94,7 @@ def flux(u: Arr[Fin[n], Real], f: Arr[Fin[n], Real]):  # noqa: F821
 def divergence(f: Arr[Fin[n], Real], rhs: Arr[Fin[n], Real]):  # noqa: F821
     """Centred divergence of the flux, inside the boundary."""
     for i in rhs.dom:
-        with when((i > 0) & (i + 1 < rhs.dom.size)):
+        if (i > 0) & (i + 1 < rhs.dom.size):
             rhs[i] = -(f[i + 1] - f[i - 1]) / 2
 
 
@@ -249,7 +248,7 @@ def keep_unmarked(
 ):
     """Copy the entries ``mark`` did not mark."""
     for i in u.dom:
-        with when(~b[i]):
+        if ~b[i]:
             y[i] = u[i]
 
 
@@ -532,8 +531,8 @@ def test_an_exact_temporary_is_as_exact_as_an_exact_argument() -> None:
         copy(t, y)
 
     assert not lower_generic(exact_sum.term).contraction
-    with pytest.raises(IllegalCast, match="the accumulation into t is exact"):
-        Schedule(exact_sum).realize("t", tree=True)
+    with pytest.raises(IllegalCast, match="the accumulation into exact_sum.t is exact"):
+        Schedule(exact_sum).realize(exact_sum.t, tree=True)
     # And the compiled program agrees with the native one bit for bit.
     x = Arr.from_numpy(np.array([0.1, 0.2, 0.3]))
     fact = LoopyExecutor().differential(
@@ -759,12 +758,77 @@ def test_an_array_from_outside_the_program_is_refused() -> None:
 
 
 def test_one_array_for_two_parameters_of_a_call_is_refused() -> None:
+    # flux writes its f, so natively its contract refuses u for both.
     @program
     def aliased(u):
         flux(u, u)
 
-    with pytest.raises(TraceError, match="may not share storage"):
+    with pytest.raises(ValueError, match="share storage"):
+        aliased(Arr.from_numpy(np.ones(3)))
+    with pytest.raises(TraceError, match="it writes f: two array parameters") as no:
         aliased.trace()
+    assert "may not share storage where it writes either" in str(no.value)
+
+
+@kernel
+def outer_product(
+    a: Arr[Fin[n], Real],  # noqa: F821
+    b: Arr[Fin[m], Real],  # noqa: F821
+    z: Arr[Fin[n], Fin[m], Real],  # noqa: F821
+):
+    """``z[i, j] = a[i] b[j]``, which reads ``a`` and ``b`` and writes neither."""
+    for i in z.dom:
+        for j in z.dom[i]:
+            z[i, j] = a[i] * b[j]
+
+
+@kernel
+def sum_counts(
+    c: Arr[Fin[n], Nat],  # noqa: F821
+    d: Arr[Fin[n], Nat],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """``c + d`` as reals: a requirement on each, which one array owes once."""
+    for i in y.dom:
+        y[i] = 1.0 * (c[i] + d[i])
+
+
+def test_one_array_for_two_parameters_a_call_only_reads() -> None:
+    # #221: natively outer_product(u, u, z) runs, since reads do not race,
+    # and the program's term names u once, its n and m the one length of u.
+    @program
+    def gram(u, z):
+        outer_product(u, u, z)
+
+    def make() -> dict:
+        return {"u": Arr.from_numpy(np.arange(1.0, 5.0)), "z": Arr.zeros((4, 4))}
+
+    native = make()
+    gram(**native)
+    u = np.arange(1.0, 5.0)
+    np.testing.assert_allclose(native["z"].numpy(), np.outer(u, u))
+    params = dict(gram.term.params)
+    assert [str(axis) for axis in params["z"].axes] == [str(params["u"].axes[0])] * 2
+    assert len(gram.term.sizes) == 1
+    compiled = make()
+    LoopyExecutor().run(gram, **compiled)
+    np.testing.assert_allclose(compiled["z"].numpy(), np.outer(u, u))
+    fact = LoopyExecutor().differential(gram, Schedule(gram), make())
+    assert fact.status.value == "tested", fact.provenance
+
+    # An array an earlier call wrote owes what the call's contract checks of
+    # it once, however many parameters it is given for.
+    @program
+    def doubled(u, y):
+        c = Arr.zeros_like(u, dtype=np.int64)
+        truncate(u, c)
+        sum_counts(c, c, y)
+
+    wants = [r for r in doubled.term.requirements if r.call == "sum_counts"]
+    assert [(r.param, r.array, r.kind) for r in wants] == [("c", "c", "nat")]
+    counts = {"u": Arr.from_numpy(np.array([1.0, 2.5, 3.0])), "y": Arr.zeros(3)}
+    fact = LoopyExecutor().differential(doubled, Schedule(doubled), counts)
+    assert fact.status.value == "tested", fact.provenance
 
 
 def test_an_array_passed_as_a_scalar_is_refused() -> None:
@@ -788,17 +852,17 @@ def test_a_parameter_no_kernel_is_given_is_refused() -> None:
 
 def test_a_callee_that_cannot_be_traced_is_named() -> None:
     @kernel
-    def branchy(u: Arr[Fin[n], Real]):  # noqa: F821
+    def looping(u: Arr[Fin[n], Real]):  # noqa: F821
         for i in u.dom:
-            if i > 0:
-                u[i] = 1.0
+            while u[i] < 1.0:
+                u[i] = u[i] + 1.0
 
     @program
-    def calls_branchy(u):
-        branchy(u)
+    def calls_looping(u):
+        looping(u)
 
-    with pytest.raises(TraceError, match="calls branchy at .*cannot be traced"):
-        calls_branchy.trace()
+    with pytest.raises(TraceError, match="calls looping at .*cannot be traced"):
+        calls_looping.trace()
 
 
 @pytest.mark.parametrize(
@@ -1543,7 +1607,11 @@ def test_a_map_per_statement_names_a_program_statement_as_isl_spells_it() -> Non
         "[n] -> { flux_S0[j] -> [jj] : jj = n - 1 - j }"
     )
     assert "jj" in schedule.order
-    assert {fact.kind for fact in schedule.facts()} == {"bijective", "monotone"}
+    assert {fact.kind for fact in schedule.facts()} == {
+        "definedness",
+        "bijective",
+        "monotone",
+    }
     assert {fact.status.value for fact in schedule.facts()} == {"decided"}
     fact = LoopyExecutor().differential(burgers, schedule, burgers_inputs())
     assert fact.status.value == "tested", fact.provenance
@@ -1583,7 +1651,7 @@ def clear_next(
     """Sum a row, then clear the length of the next one."""
     for r in y.dom:
         y[r] = reduce_sum(val[r, j] for j in val.dom[r])
-        with when(r + 1 < y.dom.size):
+        if r + 1 < y.dom.size:
             cnt[r + 1] = 0
 
 
@@ -1606,8 +1674,7 @@ def test_a_program_whose_call_rewrites_a_layout_has_its_layout_fact() -> None:
         line=clears_next.line,
         detail="cnt",
     )
-    (loop,) = clears_next.term.stmts[0].inames
-    schedule = Schedule(clears_next).split(loop, 2)
+    schedule = Schedule(clears_next).split(clears_next.clear_next.r, 2)
     (monotone,) = [fact for fact in schedule.facts() if fact.kind == "monotone"]
     assert monotone.rests_on == (layout.id,)
     assert not [fact for fact in burgers.facts() if fact.kind == "layout"]

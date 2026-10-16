@@ -20,6 +20,7 @@ from __future__ import annotations
 import importlib.util
 import itertools
 import os
+import re
 import sys
 from collections.abc import Iterator
 from pathlib import Path
@@ -30,18 +31,17 @@ import numpy as np
 import pytest
 
 pytest.importorskip("loopy")
-lanky_obligations = pytest.importorskip(
-    "lanky.obligations", reason="this lanky states no obligations for Lean"
-)
 
 #: Lean is left on for these, where it is installed (tests/conftest.py).
 pytestmark = pytest.mark.lean
 
+from lanky import obligations as lanky_obligations  # noqa: E402
 from lanky.lean import statement_of  # noqa: E402
 from lanky.ledger import Status  # noqa: E402
 from lanky.prelude import Int, Real  # noqa: E402
 from lanky.terms import Var, evaluate, render  # noqa: E402
 
+from lines import named, said, where  # noqa: E402
 from loopty import Arr, Fin, Schedule, kernel, program, reduce_sum  # noqa: E402
 from loopty.description import (  # noqa: E402
     Unstatable,
@@ -50,6 +50,7 @@ from loopty.description import (  # noqa: E402
     map_text_of,
     parse,
 )
+from loopty.handles import scope  # noqa: E402
 from loopty.obligations import (  # noqa: E402
     cast_obligation,
     lexicographically_before,
@@ -61,35 +62,9 @@ ROOT = Path(__file__).resolve().parent.parent
 EXAMPLES = ROOT / "examples"
 KERNELS = ROOT / "tests" / "kernels"
 
-#: The examples whose theorems index families at several indices,
-#: ``Fn[Nat, Nat, Real]`` applied as ``D[a, b]``, which lanky main has and the
-#: 0.2.0 release, which the released-lanky job installs, does not: they do
-#: not import there.
-NEEDS_SEVERAL_INDICES = frozenset({"l2p.py"})
-
-
-def _imports_here(path: Path) -> bool:
-    """Whether this lanky can import the file ``path``."""
-    from lanky.prelude import FnType
-
-    return not (
-        path.parent == EXAMPLES
-        and path.name in NEEDS_SEVERAL_INDICES
-        and not hasattr(FnType, "indices")
-    )
-
-
-def _files(*directories: Path) -> list[Any]:
-    """The ``.py`` files of ``directories``, those this lanky cannot import skipped."""
-    out: list[Any] = []
-    for directory in directories:
-        for path in sorted(directory.glob("*.py")):
-            if _imports_here(path):
-                out.append(path)
-            else:
-                reason = "its theorems index families at several indices (lanky main)"
-                out.append(pytest.param(path, marks=pytest.mark.skip(reason=reason)))
-    return out
+def _files(*directories: Path) -> list[Path]:
+    """The ``.py`` files of ``directories``."""
+    return [path for where in directories for path in sorted(where.glob("*.py"))]
 
 
 def load(path: Path) -> Any:
@@ -362,7 +337,7 @@ def test_the_time_vectors_are_compared_with_their_constants_settled() -> None:
 def test_a_step_keeps_its_map_as_written() -> None:
     schedule = stencil().skewed()
     skew, tile = schedule._records
-    assert skew.text == "skew(i, by='t')"
+    assert skew.text == "skew(jacobi.i, by=jacobi.t)"
     written = skew.maps["S0"]
     assert written.inputs == ("t", "i") and written.outputs == ("t", "i")
     assert written.constraints == ("b0 = a0", "b1 = a1 + 1 * a0")
@@ -410,13 +385,18 @@ def test_a_size_called_like_a_coordinate_stays_a_size() -> None:
 
 
 def test_a_cast_is_stated_one_part_per_dependence_class() -> None:
-    schedule = stencil().skewed()
+    module = stencil()
+    schedule = module.skewed()
     monotone = schedule.facts()[-1]
     obligation = monotone.term.lean_obligation()
     labels = [part.label for part in obligation.parts]
     # jacobi writes u[t + 1, i] and reads u[t, i - 1] and u[t, i + 1]
     assert len(labels) == 5
-    assert "u[t, i - 1] read by S0 after u[t + 1, i] is written by S0" in labels
+    stmt = named(module.jacobi.term, "S0")
+    assert (
+        f"u[t, i - 1] read by {stmt} after u[t + 1, i] is written by the same "
+        "statement"
+    ) in labels
     bijective = schedule.facts()[-2]
     names = [part.name for part in bijective.term.lean_obligation().parts]
     assert names == ["S0_total", "S0_single_valued", "S0_injective"]
@@ -452,8 +432,14 @@ def _device_launches() -> list[tuple[str, Any]]:
         (
             "libParanumal's lift, atomic",
             Schedule(advection.lift_on_faces)
-            .atomic("rhs")
-            .tag(e="g.0", a="l.1", b="l.0"),
+            .atomic(advection.lift_on_faces.rhs)
+            .tag(
+                {
+                    advection.lift_on_faces.e: "g.0",
+                    advection.lift_on_faces.a: "l.1",
+                    advection.lift_on_faces.b: "l.0",
+                }
+            ),
         )
     )
     return out
@@ -469,9 +455,10 @@ def test_a_cast_on_a_hardware_axis_keeps_each_class_on_one_work_item() -> None:
     names = [part.name for part in obligation.parts]
     assert names == ["dependence_0", "dependence_0_work_item"]
     together = obligation.parts[1]
+    stmt = named(hexahedra.along_s.term, "S0")
     assert together.label == (
-        "vs[q, e, k, j, i] written again by S0 after vs[q, e, k, j, i] is written "
-        "by S0, on one work item"
+        f"vs[q, e, k, j, i] written again by {stmt} after vs[q, e, k, j, i] is "
+        "written by the same statement, on one work item"
     )
     # each axis's loop, less where loopy starts it, is the work item
     assert render(together.term.body) == (
@@ -479,16 +466,88 @@ def test_a_cast_on_a_hardware_axis_keeps_each_class_on_one_work_item() -> None:
     )
 
 
+def test_a_programs_cast_names_each_cell_by_the_loops_the_source_names() -> None:
+    # A program renames its calls' loops apart (box_0, a_0); a part's label
+    # names each cell with the loops the source writes (#307), as a fact does
+    l2p = load(EXAMPLES / "l2p.py")
+    labels = []
+    for schedule in (l2p.fused, l2p.contracted):
+        for fact in schedule.facts():
+            if fact.kind == "monotone":
+                labels += [part.label for part in cast_obligation(fact.term).parts]
+    assert labels
+    renamed = [label for label in labels if re.search(r"\b[a-z]+_[0-9]+\b", label)]
+    assert not renamed, renamed
+    assert any(label.startswith("R[box, a, b] written again by ") for label in labels)
+    # no read sees the zeros R and C are made with, so the schedules run
+    # without them (#290), and no part names them
+    assert not any("zeros" in label for label in labels), labels
+
+
+@kernel
+def doubled_inner(x: Arr[Fin[n], Real], f: Arr[Fin[n], Real]):  # noqa: F821
+    """Each cell but the first twice ``x``'s; the first keeps its zero."""
+    for i in f.dom:
+        if i > 0:
+            f[i] = 2.0 * x[i]
+
+
+@kernel
+def one_more(f: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+    """Each cell one more than ``f``'s, the zero at ``f[0]`` included."""
+    for i in y.dom:
+        y[i] = f[i] + 1.0
+
+
+@program
+def padded_once_more(x, y):
+    """``f[0]`` is the zero ``f`` is made with, which ``one_more`` reads."""
+    f = Arr.zeros_like(x)
+    doubled_inner(x, f)
+    one_more(f, y)
+
+
+def test_a_cast_names_the_zeros_a_read_sees_by_the_array_they_zero() -> None:
+    # one_more reads the zero at f[0], so the zeros are kept (#290); they run
+    # in loops the program made, and a part names them as what they are, the
+    # cell they write as a cell of f, and the cell the other statement
+    # reaches as the same cell (#307)
+    fused = Schedule(padded_once_more).fuse(
+        padded_once_more.doubled_inner.i, padded_once_more.one_more.i
+    )
+    labels = [
+        part.label
+        for fact in fused.facts()
+        if fact.kind == "monotone"
+        for part in cast_obligation(fact.term).parts
+    ]
+    zeros = (
+        "the zeros of padded_once_more.f "
+        f"({where(padded_once_more, 'f = Arr.zeros_like')})"
+    )
+    stored = said(doubled_inner, "f[i] = 2.0 * x[i]")
+    assert (
+        f"a cell of f written again by {zeros} after f[i] is written by {stored}"
+    ) in labels, labels
+    assert (
+        f"f[i] written again by {stored} after the same cell is written by {zeros}"
+    ) in labels, labels
+
+
 def test_a_refused_cast_is_stated_with_isls_pair() -> None:
     module = stencil()
     with pytest.raises(IllegalCast) as refused:
         Schedule(module.jacobi, target="c", sizes={"nt": 16, "nx": 16}).tile(
-            "t", "i", 8, 8
+            module.jacobi.t, module.jacobi.i, 8, 8
         )
     obligation = refused.value.fact.term.lean_obligation()
     counter = obligation.counterexample
     assert counter is not None
-    assert counter.text == "S0[t=0, i=8] and S0[t=1, i=7] at nt=16, nx=16"
+    # the pair as the refusal names it
+    assert counter.text == (
+        f"{named(module.jacobi.term, 'S0')} at t=0, i=8 and the same statement at "
+        "t=1, i=7, where nt=16, nx=16"
+    )
     assert counter.point["t_a"] == 0 and counter.point["i_b"] == 7
     assert counter.point["t_outer_a1"] == 0 and counter.point["i_outer_a1"] == 1
 
@@ -508,8 +567,9 @@ def test_a_refused_cast_with_no_pair_is_not_offered_to_lean_as_a_claim() -> None
     fact = refused.value.fact
     assert fact.kind == "bijective" and fact.term.refuted
     assert fact.term.lean_obligation().declined == REFUTED_UNSTATED
+    jacobi = stencil().jacobi
     with pytest.raises(IllegalCast) as reversed_:
-        Schedule(stencil().jacobi, sizes={"nt": 8, "nx": 8}).tile("t", "i", 4, 4)
+        Schedule(jacobi, sizes={"nt": 8, "nx": 8}).tile(jacobi.t, jacobi.i, 4, 4)
     cast = reversed_.value.fact.term
     assert cast.refuted and cast.lean_obligation().counterexample is not None
     unattributed = replace(cast, refusal=None)
@@ -526,18 +586,22 @@ def test_a_cast_after_a_substitution_states_the_reads_it_computes_again() -> Non
     obligation = cast_obligation(monotone.term)
     assert not obligation.declined
     carried = [part for part in obligation.parts if part.name.startswith("carried_")]
+    term = windows.bumped_after.term
+    bump, divergence, flux = (
+        named(term, stmt_id) for stmt_id in ("bump.S0", "divergence.S0", "flux.S0")
+    )
     assert [part.label for part in carried] == [
-        "u[k] overwritten by bump.S0 after u[i + 1] is read by divergence.S0, "
-        "through flux.S0",
-        "u[i + 1] read by divergence.S0 after u[k] is written by bump.S0, "
-        "through flux.S0",
-        "u[k] overwritten by bump.S0 after u[i - 1] is read by divergence.S0, "
-        "through flux.S0",
-        "u[i - 1] read by divergence.S0 after u[k] is written by bump.S0, "
-        "through flux.S0",
+        f"u[k] overwritten by {bump} after u[i + 1] is read by {divergence}, "
+        f"through {flux}",
+        f"u[i + 1] read by {divergence} after u[k] is written by {bump}, "
+        f"through {flux}",
+        f"u[k] overwritten by {bump} after u[i - 1] is read by {divergence}, "
+        f"through {flux}",
+        f"u[i - 1] read by {divergence} after u[k] is written by {bump}, "
+        f"through {flux}",
     ]
     assert not any(
-        "flux.S0" in part.label or "f.zeros" in part.label
+        flux in part.label or "the zeros of" in part.label
         for part in obligation.parts
         if not part.name.startswith("carried_")
     )
@@ -647,9 +711,12 @@ def test_a_mixed_subscript_is_in_bounds_by_type_and_isl() -> None:
     """
     from loopty.oracle import IslOracle
 
-    fact = next(f for f in gather.facts() if "X[cell[c, k], d]" in f.statement)
+    fact = next(
+        f for f in gather.facts() if f.statement.startswith("X[cell[c, k], d]")
+    )
     assert fact.statement == (
-        "X[cell[c, k], d] is in bounds for every instance of S0 "
+        "X[cell[c, k], d] is in bounds for every instance of "
+        f"{said(gather, 'g[c, k, d] = X[cell[c, k], d]')} "
         "(cell[c, k] : Fin(nv), by type)"
     )
     decided = IslOracle().establish(fact)
@@ -684,7 +751,8 @@ def test_a_mixed_subscript_read_twice_in_a_statement_is_one_place() -> None:
 
     (fact,) = [f for f in gather_twice.facts() if f.statement.startswith("u[")]
     assert fact.statement == (
-        "u[e, face[f, k]] is in bounds for every instance of S0 "
+        "u[e, face[f, k]] is in bounds for every instance of "
+        f"{said(gather_twice, 'g[e, f, k] = ...', 'g[e, f, k] =')} "
         "(face[f, k] : Fin(n), by type)"
     )
     decided = IslOracle().establish(fact)
@@ -718,8 +786,8 @@ def test_a_mixed_subscript_a_statement_reads_twice_is_one_place() -> None:
     from loopty.oracle import IslOracle
 
     statement = (
-        "X[cell[c, 0], 0] is in bounds for every instance of S0 "
-        "(cell[c, 0] : Fin(nv), by type)"
+        "X[cell[c, 0], 0] is in bounds for every instance of "
+        f"{said(jacobian, 'J[c] = ...', 'J[c] =')} (cell[c, 0] : Fin(nv), by type)"
     )
     (fact,) = [f for f in jacobian.facts() if f.statement == statement]
     decided = IslOracle().establish(fact)
@@ -733,8 +801,10 @@ def test_a_mixed_subscript_a_statement_reads_twice_is_one_place() -> None:
 def test_an_array_the_kernel_reads_where_it_wrote_it_has_a_definedness_fact() -> None:
     spmv = load(EXAMPLES / "spmv.py")
     facts = [f for f in spmv.scan.facts() if f.kind == "definedness"]
+    term = spmv.scan.term
     assert [f.statement for f in facts] == [
-        "every cell of off that S1 reads, S0 or S1 wrote before the read"
+        f"every cell of off that {named(term, 'S1')} reads was written before the "
+        f"read, by {named(term, 'S0')} or itself"
     ]
     assert decide(facts[0].term).ok
     obligation = facts[0].term.lean_obligation()
@@ -749,13 +819,13 @@ GUARDED = """
 from __future__ import annotations
 
 from lanky.prelude import Real
-from loopty import Arr, Fin, kernel, when
+from loopty import Arr, Fin, kernel
 
 
 @kernel
 def guarded(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real], z: Arr[Fin[n], Real]):
     for i in y.dom:
-        with when(x[i] > 0):
+        if x[i] > 0:
             y[i] = 1.0
     for j in z.dom:
         z[j] = y[j]
@@ -878,37 +948,53 @@ def axpy(a: Real, x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
 
 
 def test_an_assumption_is_a_fact_the_casts_rest_on() -> None:
-    schedule = Schedule(axpy).assume("n % 4 == 0").split("i", 4)
+    schedule = Schedule(axpy).assume(axpy.n % 4 == 0).split(axpy.i, 4)
     assumption, bijective, monotone = schedule.facts()
     assert assumption.kind == "assumption"
     assert assumption.status is Status.ASSUMED
-    assert assumption.statement == "n % 4 == 0, which axpy is scheduled assuming"
+    assert assumption.statement == (
+        "axpy.n % 4 == 0, which axpy is scheduled assuming"
+    )
     assert bijective.rests_on == (assumption.id,)
     assert monotone.rests_on == (assumption.id,)
     (part, *_rest) = monotone.term.lean_obligation().parts
     assert "n % 4 == 0" in render(part.term)
-    assert schedule.history == ("assume('n % 4 == 0')", "split(i, 4)")
-    # the casts' status names it shortly, ``decided under assume('n % 4 == 0')``
-    assert assumption.provenance["label"] == "assume('n % 4 == 0')"
+    assert schedule.history == ("assume(axpy.n % 4 == 0)", "split(axpy.i, 4)")
+    # the casts' status names it shortly, ``decided under assume(axpy.n % 4 == 0)``
+    assert assumption.provenance["label"] == "assume(axpy.n % 4 == 0)"
 
 
 @pytest.mark.parametrize(
     ("condition", "why"),
     [
-        ("m > 2", "m is not a size of the kernel"),
-        ("n * n > 4", "isl states affine expressions"),
-        ("n != 4", "an assumption is a comparison of sizes"),
+        (lambda: axpy.n * axpy.n > 4, "isl states affine expressions"),
+        (lambda: axpy.n != 4, "an assumption is a comparison of sizes"),
     ],
 )
-def test_an_assumption_isl_cannot_state_is_refused(condition: str, why: str) -> None:
+def test_an_assumption_isl_cannot_state_is_refused(condition, why: str) -> None:
     with pytest.raises(ValueError, match=why):
-        Schedule(axpy).assume(condition)
+        Schedule(axpy).assume(condition())
+
+
+def test_an_assumption_is_of_the_kernels_sizes_written_with_their_handles() -> None:
+    with pytest.raises(AttributeError, match="axpy has no loop, array, call or size"):
+        axpy.m  # noqa: B018
+    with pytest.raises(TypeError) as caught:
+        Schedule(axpy).assume("n % 4 == 0")
+    assert str(caught.value) == (
+        "assume() takes a condition of the sizes, written with their handles, "
+        "such as axpy.n % 4 == 0, not the string 'n % 4 == 0'"
+    )
+    both = Schedule(axpy).assume((axpy.n % 4 == 0) & (axpy.n >= 8))
+    assert both.history == ("assume((axpy.n % 4 == 0) & (axpy.n >= 8))",)
+    with pytest.raises(TypeError, match="Join two with &"):
+        Schedule(axpy).assume(4 <= axpy.n <= 8)
 
 
 def test_a_call_that_breaks_the_assumption_is_refused() -> None:
     from loopty.executor import LoopyExecutor
 
-    schedule = Schedule(axpy).assume("n % 4 == 0").split("i", 4)
+    schedule = Schedule(axpy).assume(axpy.n % 4 == 0).split(axpy.i, 4)
     run = LoopyExecutor().run
     out = run(schedule, a=2.0, x=np.arange(8.0), y=np.ones(8))
     assert np.allclose(out["y"], 2.0 * np.arange(8.0) + 1)
@@ -1045,12 +1131,12 @@ def _refused_casts() -> list[tuple[str, IllegalCast]]:
             "the stencil's rectangular tile",
             lambda: Schedule(
                 stencil_module.jacobi, target="c", sizes={"nt": 16, "nx": 16}
-            ).tile("t", "i", 8, 8),
+            ).tile(stencil_module.jacobi.t, stencil_module.jacobi.i, 8, 8),
         ),
         (
             "the wavefront's rectangular tile",
             lambda: Schedule(wave.acoustic, target="c", sizes=sizes).tile(
-                "t", "i", 4, 8
+                wave.acoustic.t, wave.acoustic.i, 4, 8
             ),
         ),
         (
@@ -1061,17 +1147,17 @@ def _refused_casts() -> list[tuple[str, IllegalCast]]:
         ),
         (
             "the diamond's tile",
-            lambda: wave.diamond_schedule().tile("a", "b", 4, 4),
+            lambda: _diamond_tile(wave),
         ),
         (
             "a fusion one step early",
             lambda: Schedule(fusion.burgers_rhs, sizes={"n": fusion.N}).fuse(
-                "flux", "divergence"
+                fusion.burgers_rhs.flux.j, fusion.burgers_rhs.divergence.i
             ),
         ),
         (
             "a window of two cells",
-            lambda: windows.fused.contract("f", lambda j: j % 2),
+            lambda: windows.fused.contract(windows.burgers.f, lambda j: j % 2),
         ),
         (
             "a step after the window, past the slot it reads",
@@ -1081,9 +1167,15 @@ def _refused_casts() -> list[tuple[str, IllegalCast]]:
         ),
         (
             "a window one cell short of the second reader",
-            lambda: Schedule(windows.two_readers, sizes=windows.SIZES)
-            .fuse("flux", "divergence_and_lag", shift=1)
-            .contract("f", lambda j: j % 3),
+            lambda: (
+                Schedule(windows.two_readers, sizes=windows.SIZES)
+                .fuse(
+                    windows.two_readers.flux.j,
+                    windows.two_readers.divergence_and_lag.i,
+                    shift=1,
+                )
+                .contract(windows.two_readers.f, lambda j: j % 3)
+            ),
         ),
         (
             "the loop run backwards after the window",
@@ -1091,7 +1183,7 @@ def _refused_casts() -> list[tuple[str, IllegalCast]]:
         ),
         (
             "a row of the triangle, which the recurrence reads two rows up",
-            lambda: windows.boxed.contract("R", lambda i, a, b: b),
+            lambda: windows.boxed.contract(windows.triangles.R, lambda i, a, b: b),
         ),
     ]
     out = []
@@ -1119,7 +1211,11 @@ def test_run_proves_the_casts_and_shows_their_lean(
     path = EXAMPLES / "stencil_skew.py"
     assert main(["run", str(path), "--show-lean", "tile("]) == 0
     out = capsys.readouterr().out
-    rows = [line for line in out.splitlines() if "tile(t,i,8,8)" in line]
+    rows = [
+        line
+        for line in out.splitlines()
+        if "tile(jacobi.t, jacobi.i, 8, 8)" in line
+    ]
     assert any(line.startswith("proved") and " lean " in line for line in rows)
     assert not any(line.startswith("decided") for line in rows)
     assert "LEAN proved" in out
@@ -1148,8 +1244,8 @@ def scale_rows(a: Arr[Fin[n], Fin[m], Real], s: Arr[Fin[n], Real]):
 
 tiled = (
     Schedule(scale_rows, sizes={"n": 4, "m": 4})
-    .tile("i", "j", 2, 2)
-    .interchange("i_inner", "j_outer")
+    .tile(scale_rows.i, scale_rows.j, 2, 2)
+    .interchange(scale_rows.i.inner, scale_rows.j.outer)
 )
 """
 
@@ -1175,8 +1271,9 @@ def test_run_names_a_cast_lean_was_not_asked_about_when_verbose(
     out = capsys.readouterr().out
     assert "NOT PROVED scale_rows" in out
     assert (
-        "isl decided it; Lean was not asked: tile(i,j,2,2) moves S0 by the part "
-        "of its map over the loops S0 runs in, which isl computed"
+        "isl decided it; Lean was not asked: tile(scale_rows.i, scale_rows.j, 2, "
+        "2) moves s[i] = 2.0 (tile_part.py:12) by the part of its map over the "
+        "loops it runs in, which isl computed"
     ) in out
 
 
@@ -1211,6 +1308,22 @@ def test_lean_confirms_a_layouts_refutation_at_isls_cell(lean: Any) -> None:
         assert said.startswith("Lean confirmed the counterexample"), said
 
 
+def test_lean_does_the_arithmetic_of_two_layouts_at_a_number(lean: Any) -> None:
+    # #275: grudge's DOFArray at N = 3 and #418's dim_tags, each address as
+    # written, 3 ^ 3 * e and 3 * 3 * 3 * e, where both used to read 27 * e
+    from loopty import IslOracle
+
+    layouts = load(EXAMPLES / "storage_layouts.py")
+    (same,) = layouts.as_dim_tags.facts()
+    proved = lean.establish(IslOracle().establish(same))
+    assert proved.status is Status.PROVED, proved.provenance
+    source = proved.provenance["lean_source"]
+    assert (
+        ": (3 : Int) ^ 3 * e + a + 3 * b + (3 : Int) ^ 2 * c = "
+        "((3 * 3) * 3) * e + a + 3 * b + (3 * 3) * c :="
+    ) in source
+
+
 def test_lean_proves_the_device_launches_of_the_demos(lean: Any) -> None:
     # every cast that puts a loop on a hardware axis: S1's three launches of
     # each operator, sumpy's tile in S2, Kulkarni's split in S3, and the
@@ -1236,8 +1349,9 @@ def test_lean_fails_where_a_dependence_joins_two_work_items(lean: Any) -> None:
 
     from lanky.ledger import Fact
 
+    jacobi = stencil().jacobi
     with pytest.raises(IllegalCast) as refused:
-        Schedule(stencil().jacobi, sizes={"nt": 8, "nx": 8}).tag(i="g.0")
+        Schedule(jacobi, sizes={"nt": 8, "nx": 8}).tag(jacobi.i, "g.0")
     planted = replace(refused.value.fact.term, refuted=False, refusal=None)
     parts = planted.lean_obligation().parts
     result = lean.establish(
@@ -1291,14 +1405,17 @@ def test_a_substituted_sum_reading_its_own_write_is_caught_apart(lean: Any) -> N
 
     from lanky.ledger import Fact
 
-    substituted = Schedule(doubled_then_scaled, sizes={"n": 8, "m": 4}).substitute("w")
+    substituted = Schedule(doubled_then_scaled, sizes={"n": 8, "m": 4}).substitute(
+        doubled_then_scaled.w
+    )
     with pytest.raises(IllegalCast) as refused:
-        substituted.tag(j="l.0")
+        substituted.tag(doubled_then_scaled.scaled_in_place.j, "l.0")
     planted = replace(refused.value.fact.term, refuted=False, refusal=None)
     parts = planted.lean_obligation().parts
+    scaled = named(doubled_then_scaled.term, "scaled_in_place.S0")
     assert parts[-1].label == (
-        "the sum of scaled_in_place.S0 reads x[i_0], which its instruction writes, "
-        "on another work item of l.0"
+        f"the sum of {scaled} reads x[i], which its instruction writes, on "
+        "another work item of l.0"
     )
     result = lean.establish(
         Fact(
@@ -1350,7 +1467,7 @@ VARIANT = """
 from __future__ import annotations
 
 from lanky.prelude import Real
-from loopty import Arr, Fin, kernel, when
+from loopty import Arr, Fin, kernel
 
 
 @kernel
@@ -1359,7 +1476,7 @@ def variant(u: Arr[Fin[nt], Fin[nx], Real]):
     for t in steps:
         row = u.dom[t]
         for i in row:
-            with when({guard}):
+            if {guard}:
                 u[{write}] = (u[{first}] + u[{second}]) / 2
 """
 
@@ -1397,12 +1514,20 @@ PIECEWISE_SPREAD = (
     "[t, i] -> [a, b] : a = t and b = i + 100 and i >= 4 }"
 )
 
+def _diamond_tile(wave: Any) -> Any:
+    """The diamond of ``wavefront_acoustic.py`` tiled, by the loops its map names."""
+    diamond = wave.diamond_schedule()
+    return diamond.tile(diamond.loops.a, diamond.loops.b, 4, 4)
+
+
 #: Schedules, legal for some variants and refused for others.
 SCHEDULES = {
-    "tile": lambda s: s.tile("t", "i", 4, 4),
-    "skew_tile": lambda s: s.skew("i", by="t").tile("t", "i", 4, 4),
-    "interchange": lambda s: s.interchange("i", "t"),
-    "split": lambda s: s.split("t", 2),
+    "tile": lambda s: s.tile(scope(s).t, scope(s).i, 4, 4),
+    "skew_tile": lambda s: (
+        s.skew(scope(s).i, by=scope(s).t).tile(scope(s).t, scope(s).i, 4, 4)
+    ),
+    "interchange": lambda s: s.interchange(scope(s).i, scope(s).t),
+    "split": lambda s: s.split(scope(s).t, 2),
     "reverse_i": lambda s: s.affine("{ [t, i] -> [t2, i2] : t2 = t and i2 = -i }"),
     "reverse_t": lambda s: s.affine("{ [t, i] -> [t2, i2] : t2 = -t and i2 = i }"),
     "wavefront": lambda s: s.affine("{ [t, i] -> [a, b] : a = 2 t + i and b = t }"),
@@ -1514,7 +1639,7 @@ MUTANT = """
 from __future__ import annotations
 
 from lanky.prelude import Real
-from loopty import Arr, Fin, kernel, when
+from loopty import Arr, Fin, kernel
 
 
 @kernel
@@ -1531,12 +1656,12 @@ def mutant(u: Arr[Fin[nt], Fin[nx], Real]):
     "body",
     [
         # the stencil as written: every access in bounds
-        "with when((t + 1 < steps.size) & (i > 0) & (i + 1 < row.size)):\n"
+        "if (t + 1 < steps.size) & (i > 0) & (i + 1 < row.size):\n"
         "                u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2",
         # its guard dropped: u[t + 1, i] and u[t, i - 1] leave the array
         "u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2",
         # one subscript moved a cell further than the guard allows
-        "with when((t + 1 < steps.size) & (i > 0) & (i + 1 < row.size)):\n"
+        "if (t + 1 < steps.size) & (i > 0) & (i + 1 < row.size):\n"
         "                u[t + 1, i] = (u[t, i - 1] + u[t, i + 2]) / 2",
     ],
     ids=["as written", "guard dropped", "subscript moved"],
@@ -1741,8 +1866,6 @@ def test_every_hypothesis_set_isl_can_sample_is_not_vacuous_in_lean(lean: Any) -
     checked = 0
     arrays = 0
     for path in [*sorted(EXAMPLES.glob("*.py")), *sorted(KERNELS.glob("*.py"))]:
-        if not _imports_here(path):
-            continue
         # one Lean command per file, each theorem again alone to name a failure
         sources: list[tuple[str, str]] = []
         for fact in _isl_facts(path):

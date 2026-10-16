@@ -41,7 +41,7 @@ from loopy.symbolic import (
 from namedisl import Aff, Space
 from pymbolic.mapper import UnsupportedExpressionError
 
-from loopty import Arr, Fin, Schedule, isl_reading, kernel, when
+from loopty import Arr, Fin, Schedule, isl_reading, kernel
 from loopty.executor import LoopyExecutor, emit_code
 from loopty.isl_reading import (
     ReadingsInactive,
@@ -164,7 +164,7 @@ def test_running_a_kernel_leaves_loopys_own_readings_in_place() -> None:
         index_square,
         lambda: {"x": np.arange(9, dtype=np.float64), "y": np.zeros(9)},
     )
-    emit_code(Schedule(index_square).split("i", 2))
+    emit_code(Schedule(index_square).split(index_square.i, 2))
     loopys_own()
     loopys_own_reading_of(over("i"), prim.Variable("i"))
 
@@ -490,7 +490,7 @@ def test_an_affine_subscript_with_a_division_is_computed_in_64_bits() -> None:
 def doubled_index(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
     """Every other cell, while there is one."""
     for i in y.dom:
-        with when(2 * i < x.dom.size):
+        if 2 * i < x.dom.size:
             y[i] = x[i * 2]
 
 
@@ -527,7 +527,7 @@ def far_remainder(
 ):
     """A cell found by the remainder of a loop variable plus a size."""
     for i in y.dom:
-        with when(i < e.dom.size):
+        if i < e.dom.size:
             y[i] = x[(i + e.dom.size) % x.dom.size] + e[i]
 
 
@@ -539,7 +539,7 @@ def far_half(
 ):
     """A cell found by half a loop variable plus a size, wrapped round ``m``."""
     for i in y.dom:
-        with when(i < e.dom.size):
+        if i < e.dom.size:
             y[i] = x[((i + e.dom.size) // 2) % x.dom.size] + e[i]
 
 
@@ -612,7 +612,7 @@ def far_pairs(
     """A cell found by the remainder of two loop variables plus a size."""
     for i in y.dom:
         for j in y.dom[i]:
-            with when(i < e.dom.size):
+            if i < e.dom.size:
                 y[i, j] = x[(i + j + e.dom.size) % x.dom.size] + e[i]
 
 
@@ -625,7 +625,7 @@ def far_shifted(
 ):
     """A cell found by the remainder of an index sum plus a 64-bit scalar."""
     for i in y.dom:
-        with when(i < e.dom.size):
+        if i < e.dom.size:
             y[i] = x[(i + e.dom.size + s) % x.dom.size] + e[i]
 
 
@@ -684,7 +684,7 @@ def test_an_index_sum_loopy_reads_with_a_division_runs_past_2_to_the_31(
             import numpy as np
             from lanky.prelude import Real
 
-            from loopty import Arr, Fin, kernel, when
+            from loopty import Arr, Fin, kernel
             from loopty.executor import LoopyExecutor
 
             @kernel
@@ -692,7 +692,7 @@ def test_an_index_sum_loopy_reads_with_a_division_runs_past_2_to_the_31(
                 e: Arr[Fin[k], np.int8], x: Arr[Fin[m], Real], y: Arr[Fin[p], Real]
             ):
                 for i in y.dom:
-                    with when(i < e.dom.size):
+                    if i < e.dom.size:
                         y[i] = x[(i + e.dom.size) // 2 - e.dom.size // 2] + e[i]
 
             def make():
@@ -729,7 +729,7 @@ def test_an_index_sum_loopy_reads_with_a_division_runs_past_2_to_the_31(
 def half_guard(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
     """The cells four on, for the first four."""
     for i in y.dom:
-        with when(i * 0.5 < 2):
+        if i * 0.5 < 2:
             y[i] = x[i + 4]
 
 
@@ -737,7 +737,7 @@ def half_guard(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
 def half_guard_past(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
     """The cells four on, from the third on: past the end."""
     for i in y.dom:
-        with when(i * 0.5 >= 1):
+        if i * 0.5 >= 1:
             y[i] = x[i + 4]
 
 
@@ -745,7 +745,7 @@ def half_guard_past(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
 def below_one_and_a_half(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
     """The last cell and the one past it."""
     for i in y.dom:
-        with when(i < 1.5):
+        if i < 1.5:
             y[i] = x[i + y.dom.size - 1]
 
 
@@ -753,7 +753,7 @@ def below_one_and_a_half(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F
 def twice_under(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
     """Every other cell, with the bound written in double."""
     for i in y.dom:
-        with when(i * 2.0 < x.dom.size):
+        if i * 2.0 < x.dom.size:
             y[i] = x[2 * i]
 
 
@@ -761,7 +761,7 @@ def twice_under(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
 def rounded_away(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
     """A hundred cells on, where a double sum past 2**53 rounds the one away."""
     for i in y.dom:
-        with when(i * 4503599627370496.0 + 1.0 <= i * 4503599627370496.0):
+        if i * 4503599627370496.0 + 1.0 <= i * 4503599627370496.0:
             y[i] = x[i + 100]
 
 
@@ -769,7 +769,7 @@ def rounded_away(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
 def between_reals(a: Real, x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
     """A hundred cells on, at the loop variable strictly between a - 1 and a."""
     for i in y.dom:
-        with when((i < a) & (i > a - 1)):
+        if (i < a) & (i > a - 1):
             y[i] = x[i + 100]
 
 
@@ -781,7 +781,7 @@ def below_an_integer(
 ):
     """The cells of x below k, where k is no more than its size."""
     for i in y.dom:
-        with when((i < k) & (k <= x.dom.size)):
+        if (i < k) & (k <= x.dom.size):
             y[i] = x[i]
 
 
@@ -852,7 +852,7 @@ def test_a_guard_computed_in_floating_point_is_not_read() -> None:
 def squared_guard(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
     """The cells four on, for the first four, by a product of the loop variable."""
     for i in y.dom:
-        with when(i * i < 16):
+        if i * i < 16:
             y[i] = x[i + 4]
 
 
@@ -864,7 +864,7 @@ def entry_guard(
 ):
     """The cells four on, where an array's entry says so."""
     for i in y.dom:
-        with when(m[i] > 0.5):
+        if m[i] > 0.5:
             y[i] = x[i + 4]
 
 
@@ -873,7 +873,7 @@ def corner_guard(m: Arr[Fin[n], Fin[k], Real], y: Arr[Fin[n], Fin[k], Real]):  #
     """The cell one row down and one column left, where an entry says so."""
     for i in y.dom:
         for j in y.dom[i]:
-            with when(m[i, j] > 0.5):
+            if m[i, j] > 0.5:
                 y[i, j] = m[i + 1, j - 1]
 
 
@@ -882,8 +882,8 @@ def corner_guard_fixed(m: Arr[Fin[n], Fin[k], Real], y: Arr[Fin[n], Fin[k], Real
     """corner_guard with the integer guard its refusal names, as it names it."""
     for i in y.dom:
         for j in y.dom[i]:
-            with when(m[i, j] > 0.5):
-                with when((j >= 1) & (i <= y.dom.size - 2)):
+            if m[i, j] > 0.5:
+                if (j >= 1) & (i <= y.dom.size - 2):
                     y[i, j] = m[i + 1, j - 1]
 
 
@@ -891,7 +891,7 @@ def corner_guard_fixed(m: Arr[Fin[n], Fin[k], Real], y: Arr[Fin[n], Fin[k], Real
 def half_guard_fixed(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
     """half_guard with the integer guard its refusal names."""
     for i in y.dom:
-        with when((i * 0.5 < 2) & (i <= y.dom.size - 5)):
+        if (i * 0.5 < 2) & (i <= y.dom.size - 5):
             y[i] = x[i + 4]
 
 
@@ -899,7 +899,7 @@ def half_guard_fixed(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
 def past_on_the_loops(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
     """The cells four on, from the second on: past the end, under a read guard."""
     for i in y.dom:
-        with when(i >= 1):
+        if i >= 1:
             y[i] = x[i + 4]
 
 
@@ -913,9 +913,9 @@ def test_loopys_refusal_under_a_guard_it_does_not_read_names_the_fix() -> None:
     from loopty.refusal import GuardNotRead
 
     for kern, guard, fix in (
-        (half_guard, "'i*0.5 < 2'", "'with when(i <= y.dom.size - 5):'"),
-        (twice_under, "'i*2.0 < n'", "'with when(2 * i <= y.dom.size - 1):'"),
-        (squared_guard, "'i*i < 16'", "'with when(i <= y.dom.size - 5):'"),
+        (half_guard, "'i*0.5 < 2'", "'if i <= y.dom.size - 5:'"),
+        (twice_under, "'i*2.0 < n'", "'if 2 * i <= y.dom.size - 1:'"),
+        (squared_guard, "'i*i < 16'", "'if i <= y.dom.size - 5:'"),
     ):
         with pytest.raises(GuardNotRead) as refused:
             LoopyExecutor().run(kern, **inputs(9)())
@@ -926,15 +926,16 @@ def test_loopys_refusal_under_a_guard_it_does_not_read_names_the_fix() -> None:
         assert "could not establish" in message
     with pytest.raises(GuardNotRead) as refused:
         emit_code(half_guard)
-    assert "S0 of half_guard at test_isl_reading.py:" in str(refused.value)
-    assert "'with when(i <= y.dom.size - 5):'" in str(refused.value)
+    assert "an access of y[i] = x[i + 4] (test_isl_reading.py:" in str(refused.value)
+    assert ") in half_guard: it reads" in str(refused.value)
+    assert "'if i <= y.dom.size - 5:'" in str(refused.value)
     with pytest.raises(GuardNotRead, match=r"under the guard 'm\[i\] > 0.5'"):
         LoopyExecutor().run(entry_guard, m=np.zeros(9), **inputs(9)())
     with pytest.raises(GuardNotRead) as refused:
         emit_code(corner_guard)
     # A size is named as the body reads it, from an array's domain: the body
     # has no name n, and 'when(i <= n - 5)' was a NameError there.
-    assert "'with when((j >= 1) & (i <= y.dom.size - 2)):'" in str(refused.value)
+    assert "'if (j >= 1) & (i <= y.dom.size - 2):'" in str(refused.value)
     # The guard it names keeps the access in bounds, and loopy reads it.
     agrees(half_guard_fixed, inputs(9))
     agrees(corner_guard_fixed, lambda: {"m": np.ones((4, 5)), "y": np.zeros((4, 5))})

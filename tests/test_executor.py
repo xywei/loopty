@@ -10,13 +10,14 @@ widened by any accumulation the schedule reassociated.
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 import numpy as np
 import pytest
-from lanky.prelude import Nat, Real
+from lanky.prelude import Bool, Nat, Real
 
 import hand_terms as ht
-from loopty import Arr, Fin, kernel, when
+from loopty import Arr, Fin, kernel
 from loopty import sum as reduce_sum
 from loopty.executor import (
     TOLERANCE,
@@ -26,9 +27,19 @@ from loopty.executor import (
     emit_code,
     exactness_of_output,
 )
+from loopty.handles import scope
+from loopty.lower import pyopencl_installed
+from loopty.math import conj, log, real, sqrt
 from loopty.schedule import Schedule
 
+#: The handles of the hand-built terms (tests/hand_terms.py).
+AXPY = scope(ht.axpy_term())
+JACOBI = scope(ht.jacobi_term())
+SPMV_REASSOC = scope(ht.spmv_term(exactness="reassoc"))
+
 pytest.importorskip("loopy")
+
+EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
 
 
 def executor() -> LoopyExecutor:
@@ -40,10 +51,15 @@ def axpy_reference(a, x, y, z):
     z[...] = a * x + y
 
 
+@pytest.mark.skipif(
+    pyopencl_installed(),
+    reason="loopy imports pyopencl with itself where it is installed (#179)",
+)
 def test_importing_and_running_never_imports_pyopencl() -> None:
     # The opencl target belongs on a machine with a device. Nothing on the
     # default path may import pyopencl, so that loopty installs and runs without
-    # it.
+    # it. Where pyopencl is installed, ``import loopy`` imports it, so the
+    # claim is asked where it is not, as in CI.
     x = np.arange(4, dtype=np.float64)
     executor().run(ht.axpy_term(), a=1.0, x=x, y=np.zeros(4), z=np.zeros(4))
     assert "pyopencl" not in sys.modules
@@ -53,26 +69,75 @@ def test_a_device_schedule_is_checked_without_pyopencl_and_not_run(
     monkeypatch,
 ) -> None:
     # Where pyopencl is not installed, a schedule for "opencl" is built on
-    # loopy's plain OpenCL target: its facts are its own, and generating or
-    # running its code, pyopencl's, is refused with the reason.
+    # loopy's plain OpenCL target: its facts are its own, its code is the
+    # code a device runs (#291), and running it, pyopencl's, is refused with
+    # the reason.
     from loopty import lower
 
     installed = lower.pyopencl_installed()
     monkeypatch.setattr(lower, "pyopencl_installed", lambda: False)
-    schedule = Schedule(ht.axpy_term(), target="opencl").split("i", 2)
-    on_device = schedule.tag(i_outer="g.0")
+    schedule = Schedule(ht.axpy_term(), target="opencl").split(AXPY.i, 2)
+    on_device = schedule.tag(AXPY.i.outer, "g.0")
     assert isinstance(on_device.kernel.target, lower.CheckedOpenCLTarget)
     assert {fact.status.value for fact in on_device.facts()} == {"decided"}
     assert on_device.buildable == (True, "")
+    code = emit_code(on_device)
+    assert "__kernel void" in code and "gid(0)" in code, code
     x = np.arange(4, dtype=np.float64)
-    for attempt in (
-        lambda: emit_code(on_device),
-        lambda: executor().run(on_device, a=1.0, x=x, y=x, z=np.zeros(4)),
+    with pytest.raises(
+        ImportError, match="running OpenCL code needs pyopencl, which is not"
     ):
-        with pytest.raises(ImportError, match="needs pyopencl, which is not"):
-            attempt()
+        executor().run(on_device, a=1.0, x=x, y=x, z=np.zeros(4))
     if not installed:
         assert "pyopencl" not in sys.modules
+
+
+@kernel
+def complex_functions(
+    z: Arr[Fin[n], np.complex128],  # noqa: F821
+    w: Arr[Fin[n], np.complex128],  # noqa: F821
+    b: Arr[Fin[n], Bool],  # noqa: F821
+):
+    """Complex arithmetic, functions, powers and comparisons, cell by cell."""
+    for i in z.dom:
+        w[i] = sqrt(z[i]) * conj(z[i]) / (z[i] + 2.0) + z[i] ** 5 + log(z[i])
+        b[i] = (z[i] == w[i]) | (real(z[i]) > 0.5)
+
+
+def _device_schedule(name: str) -> Schedule:
+    """A schedule for a device: a program, complex arithmetic, atomic updates."""
+    from lanky.check import import_path
+
+    if name == "complex":
+        return Schedule(complex_functions, target="opencl").tag(
+            complex_functions.i, "g.0"
+        )
+    module = import_path(str(EXAMPLES / f"{name}.py"))
+    if name == "l2p":
+        return module.on_a_gpu
+    if name == "layer_potential":
+        return module.sumpy_tile("opencl")
+    return module.kulkarni(atomic=True, target="opencl")
+
+
+@pytest.mark.parametrize("name", ["l2p", "layer_potential", "assembly", "complex"])
+def test_a_device_schedules_code_is_the_same_where_pyopencl_is_not_installed(
+    monkeypatch, name: str
+) -> None:
+    # The code --emit-code prints where pyopencl is not installed is the code
+    # a device runs where it is (#291): numpy's arithmetic, pyopencl's complex
+    # numbers and functions, a program's own arrays, tables and atomics.
+    pytest.importorskip("pyopencl")
+    from loopty import lower
+
+    schedule = _device_schedule(name)
+    assert isinstance(schedule.kernel.target, lower.InKernelOpenCLTarget)
+    expected = emit_code(schedule)
+    monkeypatch.setattr(lower, "pyopencl_installed", lambda: False)
+    checked = Schedule(schedule)
+    assert isinstance(checked.kernel.target, lower.CheckedOpenCLTarget)
+    assert repr(checked) == repr(schedule)
+    assert emit_code(checked) == expected
 
 
 def test_the_executor_names_itself_and_its_trust_class() -> None:
@@ -183,11 +248,10 @@ def test_a_disagreement_is_refuted_rather_than_raised() -> None:
 
 
 @kernel
-def flipped(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
-    """``~`` on a Python bool is bitwise, so natively this guard is an integer."""
+def flipped(x: Arr[Fin[n], Real], y: Arr[Fin[n], Bool]):  # noqa: F821
+    """``~`` on a Python bool is bitwise, so natively this stores an integer."""
     for i in y.dom:
-        with when(~(i > 0)):
-            y[i] = x[i]
+        y[i] = (x[i] > 0.0) | ~(i > 0)
 
 
 @pytest.mark.filterwarnings("ignore:Bitwise inversion:DeprecationWarning")
@@ -196,20 +260,23 @@ def test_a_native_refusal_is_a_refuted_agreement_rather_than_raised() -> None:
     # nothing, while the faithfulness fact counts the same refusal as a
     # disagreement (#44). Python warns about ~ on a bool, which this suite
     # makes an error, and a user's run does not.
-    arrays = {"x": Arr.from_numpy(np.arange(4.0)), "y": Arr.zeros(4)}
+    arrays = {
+        "x": Arr.from_numpy(np.arange(4.0)),
+        "y": Arr.zeros(4, dtype=np.bool_),
+    }
     schedule = Schedule(flipped)
     fact = executor().differential(flipped, schedule, arrays)
     assert fact.kind == "agreement"
     assert fact.status.value == "refuted"
     assert fact.id == schedule.fact_id("agreement")
     assert fact.id == f"agreement:{flipped.definition}:[c]"
-    assert fact.provenance["error"].startswith("TraceError: the guard of")
+    assert fact.provenance["error"].startswith("TraceError: the value stored")
     reason = fact.provenance["reason"]
     assert reason.startswith("the body, run natively, is refused")
     assert "'i <= 0' for '~(i > 0)'" in reason
     assert fact.provenance["outputs"] == {}
     # The caller's arrays are untouched: neither run wrote into them.
-    assert np.array_equal(arrays["y"].numpy(), np.zeros(4))
+    assert np.array_equal(arrays["y"].numpy(), np.zeros(4, dtype=np.bool_))
 
 
 def test_a_kernel_run_on_opencl_records_opencl(plain_opencl, monkeypatch) -> None:
@@ -238,7 +305,10 @@ def test_a_kernel_run_on_opencl_records_opencl(plain_opencl, monkeypatch) -> Non
 def test_a_refused_kernel_run_on_opencl_records_opencl(plain_opencl) -> None:
     # The same for the refusal a native TraceError makes: no run is made, and
     # the fact names the target the run would have been made on.
-    arrays = {"x": Arr.from_numpy(np.arange(4.0)), "y": Arr.zeros(4)}
+    arrays = {
+        "x": Arr.from_numpy(np.arange(4.0)),
+        "y": Arr.zeros(4, dtype=np.bool_),
+    }
     fact = LoopyExecutor(target="opencl").differential(flipped, flipped, arrays)
     assert fact.status.value == "refuted"
     assert fact.provenance["target"] == "opencl"
@@ -264,10 +334,10 @@ def test_an_agreement_fact_is_named_after_the_schedule_that_ran() -> None:
         "y": np.ones(4),
         "z": np.zeros(4),
     }
-    split = Schedule(ht.axpy_term()).split("i", 2)
+    split = Schedule(ht.axpy_term()).split(AXPY.i, 2)
     fact = executor().differential(axpy_reference, split, arrays)
     assert fact.id == split.fact_id("agreement")
-    steps = "[c].split('i', 2, inner='i_inner', outer='i_outer')"
+    steps = "[c].split(axpy.i, 2)"
     assert fact.id == f"agreement:axpy:{steps}"
     assert fact.id != executor().differential(
         axpy_reference, Schedule(ht.axpy_term()), arrays
@@ -278,8 +348,8 @@ def test_a_schedule_of_a_schedule_names_the_kernel_by_its_definition() -> None:
     # ``Schedule`` takes a schedule too, and starts from its term. Its facts
     # name the kernel behind it, as the first schedule's do, and not the
     # term's name, which two kernels can share (#75).
-    split = Schedule(Schedule(doubled)).split("i", 2)
-    steps = "split('i', 2, inner='i_inner', outer='i_outer')"
+    split = Schedule(Schedule(doubled)).split(doubled.i, 2)
+    steps = "split(doubled.i, 2)"
     assert split.fact_id("agreement") == f"agreement:{doubled.definition}:[c].{steps}"
     assert [fact.id for fact in split.facts()] == [
         f"cast:{doubled.definition}:{steps}:bijective",
@@ -305,7 +375,9 @@ def test_the_exactness_class_of_an_output_is_the_weakest_of_three() -> None:
     )
     assert exactness_of_output(integer, Schedule(integer), "y") == "exact"
 
-    reassociated = Schedule(ht.spmv_term(exactness="reassoc")).realize("y", tree=True)
+    reassociated = Schedule(ht.spmv_term(exactness="reassoc")).realize(
+        SPMV_REASSOC.y, tree=True
+    )
     assert exactness_of_output(integer, reassociated, "y") == "reassoc"
 
 
@@ -563,7 +635,7 @@ def test_outputs_of_different_integer_widths_still_agree_by_value() -> None:
 
 
 def test_emit_code_returns_something_a_person_can_read() -> None:
-    code = emit_code(Schedule(ht.jacobi_term()).skew("i", by="t"))
+    code = emit_code(Schedule(ht.jacobi_term()).skew(JACOBI.i, by=JACOBI.t))
     assert "void jacobi" in code
     assert "for (int32_t t" in code
 

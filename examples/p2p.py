@@ -17,15 +17,13 @@ what a near-field kernel is handed on a device, one list per target.
 
 Two things are on show beyond the ragged shape.
 
-*The self-interaction is a guard, not an ``if``.* A target's own box is in its
-interaction list, so the list contains the target itself, and the Coulomb kernel
-is singular there. ``with when(lst[t, j] != t)`` records the condition: under
-tracing it becomes the statement's predicate, and under plain ``python`` it
-masks the write. Masking is on the write and not on the arithmetic, so the self
-pair is still evaluated natively and produces an infinity that is thrown away.
-That is why the contribution is zeroed first by its own statement, and why
-:func:`coulomb` tells numpy not to warn about the division it is about to throw
-away.
+*The self-interaction is an ``if``.* A target's own box is in its interaction
+list, so the list contains the target itself, and the Coulomb kernel is
+singular there. ``if lst[t, j] != t:`` is a condition on the list's entries,
+which the trace follows both ways: each branch's statement is recorded under
+its side of the condition, the statement's predicate in the compiled kernel,
+and under plain ``python`` the self pair takes the ``else`` and computes no
+infinity.
 
 *The indirection is in bounds by type.* ``lst: Arr[Fin[n], Fin[cnt], Fin[n]]``
 says the entries of the list are points of ``Fin[n]``, which is exactly the
@@ -50,7 +48,7 @@ from __future__ import annotations
 import numpy as np
 from lanky.prelude import Nat, Real
 
-from loopty import Arr, Fin, Schedule, kernel, reduce_sum, when
+from loopty import Arr, Fin, Schedule, kernel, reduce_sum
 from loopty.math import sqrt
 
 #: A four by four grid of boxes over the unit square, and this many points in
@@ -63,12 +61,10 @@ def coulomb(r2: float) -> float:
 
     ``loopty.math.sqrt`` is numpy's on numbers, and a call of the target's
     ``sqrt`` when the body is traced, so the helper is written once for both
-    runs. The masked self pair reaches it with ``r2 == 0`` (see the module
-    docstring): the infinity is discarded by the mask, so numpy's warning
-    would be about a number nobody reads.
+    runs. The self pair never reaches it: it takes the ``else`` (see the
+    module docstring).
     """
-    with np.errstate(divide="ignore"):
-        return 1.0 / sqrt(r2)
+    return 1.0 / sqrt(r2)
 
 
 @kernel
@@ -78,25 +74,24 @@ def p2p(
     x: Arr[Fin[n], Real],
     y: Arr[Fin[n], Real],
     q: Arr[Fin[n], Real],
-    term: Arr[Fin[n], Fin[cnt], Real],
+    contribution: Arr[Fin[n], Fin[cnt], Real],
     pot: Arr[Fin[n], Real],
 ):
     """The near-field potential at every target, over its interaction list.
 
-    ``term`` is the per-pair contribution, written out rather than accumulated:
-    a guarded contribution has to be zero where the guard is false, and a
-    separate statement saying so is both what the native mask needs and what
-    lets the sum over the row stay a reduction instead of a loop-carried
-    accumulation.
+    ``contribution`` is each pair's, written out rather than accumulated, so
+    that the sum over the row stays a reduction instead of a loop-carried
+    accumulation: the pair's term, and zero for the target itself.
     """
     for t in pot.dom:
         for j in lst.dom[t]:
-            term[t, j] = 0.0
-            with when(lst[t, j] != t):
+            if lst[t, j] != t:
                 dx = x[t] - x[lst[t, j]]
                 dy = y[t] - y[lst[t, j]]
-                term[t, j] = q[lst[t, j]] * coulomb(dx * dx + dy * dy)
-        pot[t] = reduce_sum(term[t, j] for j in lst.dom[t])
+                contribution[t, j] = q[lst[t, j]] * coulomb(dx * dx + dy * dy)
+            else:
+                contribution[t, j] = 0.0
+        pot[t] = reduce_sum(contribution[t, j] for j in lst.dom[t])
 
 
 # {{{ the boxes and their interaction lists
@@ -151,7 +146,7 @@ def scene(points: int = POINTS, seed: int = 0) -> dict:
         "x": Arr.from_numpy(xs),
         "y": Arr.from_numpy(ys),
         "q": Arr.from_numpy(charges),
-        "term": Arr.ragged(counts),
+        "contribution": Arr.ragged(counts),
         "pot": Arr.zeros(points),
     }
 
@@ -178,8 +173,8 @@ def direct(data: dict) -> np.ndarray:
 #: reindexing, the second is a reassociation, and both are checked.
 split_targets = (
     Schedule(p2p, target="c")
-    .split("t", 4, inner="t_in", outer="t_out")
-    .realize("pot", tree=True)
+    .split(p2p.t, 4)
+    .realize(p2p.pot, tree=True)
     .example(**scene())
 )
 
@@ -201,7 +196,7 @@ def main() -> int:
         data["x"],
         data["y"],
         data["q"],
-        data["term"],
+        data["contribution"],
         data["pot"],
     )
     print(f"{POINTS} points in a {BOXES} by {BOXES} grid of boxes")

@@ -19,18 +19,11 @@ from lanky.ledger import Status
 from lanky.plugins import registry
 from lanky.terms import render
 
+from lines import said
 from loopty.summands import KIND, series_applications
 
 ROOT = Path(__file__).resolve().parent.parent
 
-obligations = pytest.importorskip("lanky.obligations")
-
-#: A rewrite by an identity among a part's hints is lanky main's, not the
-#: 0.2.0 release's, which the released-lanky job installs.
-needs_rewrites = pytest.mark.skipif(
-    "rewrites" not in getattr(obligations.Hints, "__dataclass_fields__", {}),
-    reason="this lanky rewrites by no identity a hypothesis of a part is (lanky main)",
-)
 
 
 def load(path: Path) -> Any:
@@ -52,7 +45,30 @@ with registry.collecting():
 
 
 def rows(kernel: Any) -> list[Any]:
-    return [fact for fact in kernel.facts() if fact.kind == KIND]
+    return [
+        fact
+        for fact in kernel.facts()
+        if fact.kind == KIND and fact.status is not Status.ASSUMED
+    ]
+
+
+def nothing(kernel: Any) -> dict[str, str]:
+    """Why each theorem ``kernel`` cites gives it nothing, as its row says (#234)."""
+    return {
+        fact.statement.split(",")[0]: fact.provenance["unapplied"]
+        for fact in kernel.facts()
+        if fact.kind == KIND and fact.status is Status.ASSUMED
+    }
+
+
+#: What a kernel that adds no series of ``halves`` is told of the two it cites.
+NO_SERIES = {
+    "halves": "no sum of {k} adds the terms of its series c(n)",
+    "halved": (
+        "it is an identity, which puts a series theorem's terms in the kernel's "
+        "spelling, and no series {k} adds is read with it"
+    ),
+}
 
 
 def test_the_terms_a_kernel_adds_are_the_theorems_through_the_identity() -> None:
@@ -68,20 +84,32 @@ def test_the_terms_a_kernel_adds_are_the_theorems_through_the_identity() -> None
     assert row.provenance["terms"][2] == "(x[i]*0.5)**2"
     assert row.rests_on == (kernels.halves.fact_id, kernels.halved.fact_id)
     assert row.where == f"series.py:{row.where.rsplit(':', 1)[1]}"
+    # the statement by its text and line, as a message names it (#307)
+    stmt = said(
+        kernels.power_sum,
+        "y[i] = reduce_sum((x[i] * 0.5) ** k for k in Fin[ORDER + 1])",
+    )
+    assert row.provenance["rule"].startswith(f"{stmt} adds (x[i]*0.5)**0 and ")
 
 
 def test_a_kernel_that_adds_other_terms_gets_no_row() -> None:
     assert rows(kernels.quarter_sum) == []
+    # but each theorem it cites says that it gives nothing, and why (#234)
+    assert nothing(kernels.quarter_sum) == {
+        name: words.format(k="quarter_sum") for name, words in NO_SERIES.items()
+    }
 
 
 def test_a_term_inside_another_is_not_one_the_kernel_adds() -> None:
     """``1 / (x[i] * 0.5) ** 2`` divides by ``c(2)`` and adds nothing (Codex)."""
     assert rows(kernels.inverse_square) == []
+    assert set(nothing(kernels.inverse_square)) == {"halves", "halved"}
 
 
 def test_a_theorem_about_reals_is_not_applied_to_complex_numbers() -> None:
     """The same powers of a complex ``x[i]`` match the term, not the sort (Codex)."""
     assert rows(kernels.complex_sum) == []
+    assert set(nothing(kernels.complex_sum)) == {"halves", "halved"}
 
 
 def test_an_identitys_premise_is_named_in_the_row() -> None:
@@ -103,7 +131,6 @@ def test_a_term_the_theorems_guard_leaves_out_is_not_claimed() -> None:
     assert row.rests_on == (kernels.from_one.fact_id,)
 
 
-@needs_rewrites
 def test_each_term_is_a_part_lean_rewrites_and_applies_the_theorem_to() -> None:
     """One part per order: the identity rewritten in the goal, the theorem applied."""
     from lanky.obligations import attempts, obligation_of, part_statement, theorem_name
@@ -135,7 +162,6 @@ def test_series_are_found_in_the_term_and_not_in_its_spelling() -> None:
 
 
 @pytest.mark.lean
-@needs_rewrites
 def test_with_mathlib_each_term_is_proved_to_be_the_theorems() -> None:
     from lanky.oracles.lean import LeanOracle
 

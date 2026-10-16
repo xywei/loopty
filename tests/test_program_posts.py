@@ -20,10 +20,9 @@ from typing import Any
 
 import numpy as np
 import pytest
-from lanky import terms as lanky_terms
 from lanky.ledger import Status
 from lanky.plugins import registry
-from lanky.prelude import FinType, FnType
+from lanky.prelude import FinType
 from lanky.terms import Comparison, Forall, Subscript, Var, render
 
 from loopty.dataflow import KIND, program_stores
@@ -50,22 +49,11 @@ def load(path: Path) -> Any:
     return module
 
 
-#: ``examples/hexahedra.py`` needs lanky main: its theorem applies families at
-#: several indices, ``Fr[i, a]``, and its operators claim over ``x in Fin[3]``
-#: beside ``e in Fin[ne]``, which lanky reads as two binders (lanky#144).
-HEXAHEDRA = hasattr(FnType, "indices") and hasattr(lanky_terms, "literal_binders")
-
-needs_hexahedra = pytest.mark.skipif(
-    not HEXAHEDRA,
-    reason="examples/hexahedra.py needs lanky main (families at several indices, "
-    "a literal domain beside a symbolic one)",
-)
-
 # imported with what they register released again, so that the registry other
 # test modules read is the one they made
 with registry.collecting():
     programs = load(KERNELS / "program_posts.py")
-    hexahedra = load(EXAMPLES / "hexahedra.py") if HEXAHEDRA else None
+    hexahedra = load(EXAMPLES / "hexahedra.py")
 
 
 def facts(program: Any, kind: str) -> list[Any]:
@@ -123,8 +111,9 @@ def test_what_a_later_call_writes_over_is_no_equation() -> None:
     values, compared at the class of ``c``.
     """
     stored = program_stores(programs.last_wins.term, "last_wins")
-    assert [hypothesis.source.split(" at ")[0] for hypothesis in stored.equations] == [
-        "what plus.S0 stores in c"
+    plus = programs.last_wins.term.stmt("plus.S0")
+    assert [hypothesis.source for hypothesis in stored.equations] == [
+        f"what {plus.text} ({plus.where}) stores in c"
     ]
     (post,) = facts(programs.last_wins, "postcondition")
     assert (post.status, post.decided_by) == (Status.DECIDED, "isl")
@@ -187,7 +176,6 @@ def test_a_cited_theorem_is_used_at_the_sections_of_the_arrays() -> None:
     assert programs.two_passes.fact_id in post.term.rests_on
 
 
-@needs_hexahedra
 def test_the_hexahedra_operators_cite_sum_factorization_backwards() -> None:
     """Three passes unfolded, then the theorem at each direction's sections, then ``w``.
 
@@ -230,7 +218,6 @@ def test_the_hexahedra_operators_cite_sum_factorization_backwards() -> None:
     ]
 
 
-@needs_hexahedra
 def test_the_hexahedra_claims_read_a_literal_domain_as_a_binder() -> None:
     """``for x in Fin[3] for e in Fin[ne]``: one universal, ``x`` over ``Fin(3)``."""
     post = hexahedra.weak_grad.term.post
@@ -313,7 +300,6 @@ def _without_lean(reason: str) -> None:
 @pytest.fixture(scope="module")
 def lean(tmp_path_factory: pytest.TempPathFactory) -> Any:
     """A Lean oracle with an open session and a proof cache of its own."""
-    pytest.importorskip("lanky.obligations", reason="this lanky states no obligations")
     from lanky.oracles.lean import LeanOracle, ProofCache
 
     if os.environ.get("LANKY_LEAN_DISABLE"):
@@ -371,7 +357,6 @@ def test_with_mathlib_an_unfolded_claim_is_proved_resting_on_what_it_used(
     assert programs.two_passes.fact_id in proved.rests_on
 
 
-@needs_hexahedra
 @pytest.mark.lean
 def test_with_mathlib_the_hexahedra_operators_are_proved(lean: Any) -> None:
     """``weak_grad`` and ``weak_div``: the dense operators, by ``sum_factorization``."""

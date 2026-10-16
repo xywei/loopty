@@ -375,10 +375,10 @@ def sumpy_tile(target: str = "opencl") -> Schedule:
     """
     return (
         Schedule(single_layer, target=target)
-        .split("t", 16)
-        .tag(t_outer="g.0", t_inner="l.0")
-        .split("s", 256)
-        .prioritize("s_outer", "t_inner")
+        .split(single_layer.t, 16)
+        .tag({single_layer.t.outer: "g.0", single_layer.t.inner: "l.0"})
+        .split(single_layer.s, 256)
+        .prioritize(single_layer.s.outer, single_layer.t.inner)
     )
 
 
@@ -386,20 +386,20 @@ def sumpy_tile(target: str = "opencl") -> Schedule:
 #: each an accumulator of its own.
 tiled = (
     Schedule(single_layer, target="c")
-    .split("t", 16)
-    .tag(t_inner="ilp")
-    .split("s", 256)
-    .prioritize("s_outer", "t_inner")
+    .split(single_layer.t, 16)
+    .tag(single_layer.t.inner, "ilp")
+    .split(single_layer.s, 256)
+    .prioritize(single_layer.s.outer, single_layer.t.inner)
     .example(**example_inputs()["single_layer"])
 )
 
 #: The double layer on the same tile, which the accuracy rows run as well.
 tiled_double = (
     Schedule(double_layer, target="c")
-    .split("t", 16)
-    .tag(t_inner="ilp")
-    .split("s", 256)
-    .prioritize("s_outer", "t_inner")
+    .split(double_layer.t, 16)
+    .tag(double_layer.t.inner, "ilp")
+    .split(double_layer.s, 256)
+    .prioritize(double_layer.s.outer, double_layer.t.inner)
     .example(**example_inputs()["double_layer"])
 )
 

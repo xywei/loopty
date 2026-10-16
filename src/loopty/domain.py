@@ -1,7 +1,7 @@
 """Polyhedral domains: array arguments over a set of index tuples that is not a box.
 
 loopty's index types are isl sets, and inside a kernel much of that universe is
-already used: ``when`` restricts a statement's domain, a ragged loop iterates a
+already used: an ``if`` restricts a statement's domain, a ragged loop iterates a
 dependent sum, and dependences are exact per instance. This module brings the
 same sets to the *interface*, as the domain of an array argument:
 

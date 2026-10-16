@@ -119,7 +119,7 @@ def test_an_exact_output_pins_contraction_off() -> None:
     # schedule holds: the pin has to survive the steps.
     from loopty.schedule import Schedule
 
-    scheduled = Schedule(fused_exact).split("i", 2).kernel
+    scheduled = Schedule(fused_exact).split(fused_exact.i, 2).kernel
     assert NO_CONTRACTION_FLAG in scheduled.default_entrypoint.options.build_options
     with declining():
         code = lp.generate_code_v2(scheduled).device_code()

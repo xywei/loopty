@@ -26,10 +26,8 @@ from typing import Any
 import islpy as isl
 import numpy as np
 import pytest
-from lanky import terms as lanky_terms
-from lanky.prelude import FnType
 
-from lines import where
+from lines import said, where
 
 pytest.importorskip("loopy")
 
@@ -58,59 +56,6 @@ NAMES = (
     "hexahedra",
     "advection",
 )
-
-#: The families with several indices, ``Fn[Nat, Nat, Real]`` applied as
-#: ``D[a, b]``, that ``examples/l2p.py`` writes its theorems with, and
-#: ``Fn[Fin[n], Fin[n], Real]`` applied as ``Fr[i, a]``, that
-#: ``examples/hexahedra.py`` and ``examples/advection.py`` write their theorems
-#: with, are lanky main's and not the 0.2.0 release's, which the released-lanky
-#: job installs.
-SEVERAL_INDICES = hasattr(FnType, "indices")
-
-#: The demos that need them.
-NEEDS_SEVERAL_INDICES = {"l2p", "hexahedra", "advection"}
-
-needs_several_indices = pytest.mark.skipif(
-    not SEVERAL_INDICES,
-    reason="the demo's theorems index families at several indices (lanky main)",
-)
-
-#: ``examples/hexahedra.py``'s operators claim over ``x in Fin[3]`` beside
-#: ``e in Fin[ne]``, which lanky reads as two binders since lanky#144.
-LITERAL_BINDERS = hasattr(lanky_terms, "literal_binders")
-
-#: The demos that need that.
-NEEDS_LITERAL_BINDERS = {"hexahedra"}
-
-needs_literal_binders = pytest.mark.skipif(
-    not LITERAL_BINDERS,
-    reason="the demo's claims put a literal domain beside a symbolic one (lanky main)",
-)
-
-#: The parts of a complex number, ``real``, ``imag`` and ``conj``, that
-#: ``examples/layer_potential.py``'s identity is written with, are lanky
-#: main's and not the 0.2.0 release's.
-PARTS = "conj" in getattr(lanky_terms, "ELEMENTARY_FUNCTIONS", ())
-
-#: The demos that need that.
-NEEDS_PARTS = {"layer_potential"}
-
-needs_parts = pytest.mark.skipif(
-    not PARTS, reason="the demo's identity takes complex numbers apart (lanky main)"
-)
-
-#: Every demo, as a parameter: those that need lanky main skip without it.
-DEMOS = [
-    pytest.param(
-        name,
-        marks=[
-            *([needs_several_indices] if name in NEEDS_SEVERAL_INDICES else []),
-            *([needs_literal_binders] if name in NEEDS_LITERAL_BINDERS else []),
-            *([needs_parts] if name in NEEDS_PARTS else []),
-        ],
-    )
-    for name in NAMES
-]
 
 _RESULTS: dict[tuple[str, str], tuple[Any, list[dict]]] = {}
 _MODULES: dict[str, Any] = {}
@@ -185,14 +130,14 @@ def _statuses(facts: list[dict], **fields: Any) -> list[str]:
 # {{{ every demo, the three commands
 
 
-@pytest.mark.parametrize("name", DEMOS)
+@pytest.mark.parametrize("name", NAMES)
 def test_a_demo_runs_under_plain_python(name: str) -> None:
     result, _ = _invoke(name, "python")
     assert result.returncode == 0, result.stdout + result.stderr
     assert result.stdout.strip(), "a demo that prints nothing demonstrates nothing"
 
 
-@pytest.mark.parametrize("name", DEMOS)
+@pytest.mark.parametrize("name", NAMES)
 def test_a_demo_states_obligations_and_none_is_refuted(name: str) -> None:
     result, facts = _invoke(name, "check")
     assert result.returncode == 0, result.stdout + result.stderr
@@ -271,7 +216,7 @@ KERNELS = {
 REFUSES_DRAWS = {("travel", "weigh"), ("travel", "flat")}
 
 
-@pytest.mark.parametrize("name", DEMOS)
+@pytest.mark.parametrize("name", NAMES)
 def test_every_kernel_of_a_demo_computes_what_its_body_computes(name: str) -> None:
     # The traced term, interpreted, against the native body: on the demo's
     # own example inputs first, then on inputs drawn from the declared types.
@@ -295,7 +240,7 @@ def test_every_kernel_of_a_demo_computes_what_its_body_computes(name: str) -> No
         assert outcomes == ["agreed"] * 4
 
 
-@pytest.mark.parametrize("name", DEMOS)
+@pytest.mark.parametrize("name", NAMES)
 def test_a_demo_compiles_and_agrees_with_the_native_run(name: str) -> None:
     result, facts = _invoke(name, "run")
     assert result.returncode == 0, result.stdout + result.stderr
@@ -378,7 +323,7 @@ def test_the_device_schedule_of_spmv_is_legal_and_not_buildable() -> None:
 
     module = _module("spmv")
     schedule = module.device_schedule()
-    assert schedule.tags == {"r": "g.0", "j_in": "l.0"}
+    assert schedule.tags == {"r": "g.0", "j_inner": "l.0"}
     assert schedule.reassociated == frozenset({"y"})
 
     casts = [fact for fact in schedule.facts() if fact.kind != "buildable"]
@@ -414,7 +359,7 @@ def test_one_row_per_group_is_the_schedule_that_does_build(plain_opencl) -> None
     on_c = module.rows_parallel(target="c")
     ok, reason = on_c.buildable
     assert not ok
-    assert reason.startswith("the tag r='g.0' puts a loop on a hardware axis")
+    assert reason.startswith("the loop spmv.r on g.0 is on a hardware axis")
     assert "Retarget to opencl" in reason
 
 
@@ -426,12 +371,24 @@ def test_one_row_per_group_is_the_schedule_that_does_build(plain_opencl) -> None
 
 def test_the_rectangular_tiling_is_refuted_with_a_witness_pair() -> None:
     module = _module("stencil_skew")
-    message, witness = module.rejected_tiling()
+    refused = module.rejected_tiling()
+    message, witness = str(refused), refused.witness
     assert "illegal" in message
     assert "scheduled earlier" in message
 
     (source_id, source), (sink_id, sink), params = witness
     assert source_id == sink_id
+    # the pair as the message names it, each statement by its text and line
+    stmt = said(
+        module.jacobi,
+        "u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2",
+        "u[t + 1, i] = (",
+    )
+    assert refused.instances == (
+        f"{stmt} at t={source['t']}, i={source['i']}",
+        f"the same statement at t={sink['t']}, i={sink['i']}",
+    )
+    assert all(instance in message for instance in refused.instances)
     # The two instances are one time step apart and one space step apart: the
     # (1, 1) and (1, -1) dependences a rectangular tile cuts.
     assert sink["t"] == source["t"] + 1
@@ -445,7 +402,7 @@ def test_the_refused_tiling_leaves_a_refuted_fact_behind() -> None:
 
     schedule = Schedule(module.jacobi, target="c", sizes={"nt": 16, "nx": 16})
     with pytest.raises(IllegalCast) as refused:
-        schedule.tile("t", "i", 8, 8)
+        schedule.tile(module.jacobi.t, module.jacobi.i, 8, 8)
     assert refused.value.fact.status.value == "refuted"
     assert refused.value.fact.kind == "monotone"
     assert refused.value.fact.provenance["witness"] == refused.value.witness
@@ -457,7 +414,10 @@ def test_the_refused_tiling_leaves_a_refuted_fact_behind() -> None:
 def test_skewing_first_makes_the_same_tiling_decided() -> None:
     module = _module("stencil_skew")
     schedule = module.skewed()
-    assert schedule.history == ("skew(i, by='t')", "tile(t,i,8,8)")
+    assert schedule.history == (
+        "skew(jacobi.i, by=jacobi.t)",
+        "tile(jacobi.t, jacobi.i, 8, 8)",
+    )
     assert [fact.status.value for fact in schedule.facts()] == ["decided"] * 4
     assert schedule.order == ("t_outer", "i_outer", "t_inner", "i_inner")
 
@@ -482,7 +442,8 @@ def test_the_stencil_in_diamond_coordinates_agrees_with_the_native_run() -> None
     diamond = Schedule(module.jacobi, sizes={"nt": 16, "nx": 16}).affine(
         "{ [t, i] -> [a, b] : a = t + i and b = t - i }"
     )
-    for schedule in (diamond, diamond.tile("a", "b", 4, 4)):
+    loops = diamond.loops
+    for schedule in (diamond, diamond.tile(loops.a, loops.b, 4, 4)):
         assert [f.status.value for f in schedule.facts()] == ["decided"] * len(
             schedule.facts()
         )
@@ -503,10 +464,19 @@ def test_the_wave_example_has_cross_instruction_time_dependence() -> None:
     module = _module("wavefront_acoustic")
     assert [stmt.id for stmt in module.acoustic.term.stmts] == ["S0", "S1"]
 
-    message, witness = module.rejected_tiling()
+    refused = module.rejected_tiling()
+    message, witness = str(refused), refused.witness
     assert "illegal" in message
     assert "writes pressure[" in message
     (source_id, source), (sink_id, sink), params = witness
+    pressure, velocity = (
+        said(module.acoustic, f"{array}[t + 1, i] = ...", f"{array}[t + 1, i] =")
+        for array in ("pressure", "velocity")
+    )
+    assert refused.instances == (
+        f"{pressure} at t={source['t']}, i={source['i']}",
+        f"{velocity} at t={sink['t']}, i={sink['i']}",
+    )
 
     # Unlike stencil_skew, the cut dependence crosses the two instructions:
     # pressure from S1 at the previous time level feeds velocity in S0. It is
@@ -543,7 +513,7 @@ def test_every_rectangular_wave_tile_cuts_the_same_dependence(
     nt, nx = sizes
     schedule = Schedule(module.acoustic, target="c", sizes={"nt": nt, "nx": nx})
     with pytest.raises(IllegalCast) as refused:
-        schedule.tile("t", "i", *tile)
+        schedule.tile(module.acoustic.t, module.acoustic.i, *tile)
     assert ("as hinted" in str(refused.value)) is hinted
     (source_id, source), (sink_id, sink), _params = refused.value.witness
     assert (source_id, sink_id) == ("S1", "S0")
@@ -553,7 +523,10 @@ def test_every_rectangular_wave_tile_cuts_the_same_dependence(
 def test_skewing_the_coupled_wave_makes_the_tile_legal() -> None:
     module = _module("wavefront_acoustic")
     schedule = module.wavefront_schedule()
-    assert schedule.history == ("skew(i, by='t')", "tile(t,i,4,8)")
+    assert schedule.history == (
+        "skew(acoustic.i, by=acoustic.t)",
+        "tile(acoustic.t, acoustic.i, 4, 8)",
+    )
     assert [fact.status.value for fact in schedule.facts()] == ["decided"] * 4
     assert schedule.order == ("t_outer", "i_outer", "t_inner", "i_inner")
 
@@ -599,12 +572,22 @@ def test_the_wave_demo_prints_the_rejections_then_every_agreement() -> None:
     # tiling, and two fields each.
     result, _ = _invoke("wavefront_acoustic", "python")
     assert result.stdout.count("IllegalCast") == 3
-    assert "witness: S1" in result.stdout
+    # the witness as the refusal names it, and not by the statements' ids
+    pressure = said(
+        _module("wavefront_acoustic").acoustic,
+        "pressure[t + 1, i] = ...",
+        "pressure[t + 1, i] =",
+    )
+    assert f"witness: {pressure} at t=" in result.stdout
+    assert "witness: S" not in result.stdout
     assert "pressure: difference" in result.stdout
     assert "velocity: difference" in result.stdout
     assert result.stdout.count("-> tested") == 6
     assert "[a, b_step]" in result.stdout
-    assert "S1[t, i] -> [a = t + i, b = 1 + t - i] }).tile(a,b,4,4)" in result.stdout
+    assert (
+        "S1[t, i] -> [a = t + i, b = 1 + t - i] })"
+        ".tile(acoustic.loops.a, acoustic.loops.b, 4, 4)"
+    ) in result.stdout
     assert "matches the hand-written recurrence: True" in result.stdout
 
 
@@ -615,12 +598,12 @@ def test_loopty_run_keeps_the_facts_of_every_wave_schedule() -> None:
     _result, facts = _invoke("wavefront_acoustic", "run")
     agreements = [fact for fact in facts if fact["kind"] == "agreement"]
     assert [fact["provenance"]["schedule"] for fact in agreements] == [
-        ["skew(i, by='t')", "tile(t,i,4,8)"],
+        ["skew(acoustic.i, by=acoustic.t)", "tile(acoustic.t, acoustic.i, 4, 8)"],
         ["affine({ [t, i] -> [a = t + i, b = t - i] })"],
         [
             "affine({ S0[t, i] -> [a = t + i, b = t - i]; "
             "S1[t, i] -> [a = t + i, b = 1 + t - i] })",
-            "tile(a,b,4,4)",
+            "tile(acoustic.loops.a, acoustic.loops.b, 4, 4)",
         ],
     ]
     assert {fact["status"] for fact in agreements} == {"tested"}
@@ -633,7 +616,8 @@ def test_the_space_first_diamond_runs_the_cross_statement_dependence_backwards()
     # a = i + t and b = i - t: S1 at (t, i) feeds S0 at (t + 1, i - 1), which
     # has the same a and a b two lower, so the order runs it the wrong way.
     module = _module("wavefront_acoustic")
-    message, witness = module.rejected_diamond()
+    refused = module.rejected_diamond()
+    message, witness = str(refused), refused.witness
     assert message.startswith("affine(")
     assert "writes pressure[" in message
     (source_id, source), (sink_id, sink), _params = witness
@@ -692,8 +676,9 @@ def test_tiling_the_wave_diamond_cuts_the_same_step_dependence() -> None:
     # (t, i + 1) reads, a distance of (0, 1), which t - i runs backwards. A
     # diamond tiling of this pair needs a time offset between the statements.
     module = _module("wavefront_acoustic")
-    message, witness = module.rejected_diamond_tiling()
-    assert message.startswith("tile(a,b,4,4) illegal")
+    refused = module.rejected_diamond_tiling()
+    message, witness = str(refused), refused.witness
+    assert message.startswith("tile(acoustic.loops.a, acoustic.loops.b, 4, 4) illegal")
     assert "writes velocity[" in message
     (source_id, source), (sink_id, sink), _params = witness
     assert (source_id, sink_id) == ("S0", "S1")
@@ -808,7 +793,7 @@ def test_the_guarded_self_interaction_is_left_out_of_the_sum() -> None:
         data["x"],
         data["y"],
         data["q"],
-        data["term"],
+        data["contribution"],
         data["pot"],
     )
 
@@ -840,7 +825,12 @@ def test_every_in_bounds_obligation_of_the_pairs_is_decided_by_isl() -> None:
     assert {fact["status"] for fact in in_bounds} == {"decided"}
     assert {fact["decided_by"] for fact in in_bounds} == {"isl"}
     statements = {fact["statement"] for fact in in_bounds}
-    assert "f[k, p] is in bounds for every instance of S1" in statements
+    summed = said(
+        _module("pairs").pairs,
+        "e[p] = reduce_sum(...) + reduce_sum(...)",
+        "e[p] = reduce_sum(",
+    )
+    assert f"f[k, p] is in bounds for every instance of {summed}" in statements
 
 
 def test_the_pairs_run_in_both_layouts_and_both_agree() -> None:
@@ -854,7 +844,7 @@ def test_the_pairs_run_in_both_layouts_and_both_agree() -> None:
     assert definition.startswith("pairs.pairs@")
     assert agreements == [
         f"agreement:{definition}:[c]",
-        f"agreement:{definition}:[c].pack('f')",
+        f"agreement:{definition}:[c].pack(pairs.f)",
     ]
 
 
@@ -932,13 +922,15 @@ def test_the_fusion_demo_decides_the_fusion_the_substitution_and_the_window() ->
         for fact in facts
         if fact["owner"] == "burgers_rhs" and fact["kind"] != "agreement"
     ]
+    # every schedule of the program runs without the zeros of f, which no
+    # read sees, and the substitution and the window rest on that fact
+    # (#290)
     assert casts == [
-        ("bijective", "decided", "isl"),
-        ("monotone", "decided", "isl"),
         ("definedness", "decided", "isl"),
         ("bijective", "decided", "isl"),
         ("monotone", "decided", "isl"),
-        ("definedness", "decided", "isl"),
+        ("bijective", "decided", "isl"),
+        ("monotone", "decided", "isl"),
         ("no-clobber", "decided", "isl"),
     ]
     agreements = [
@@ -952,29 +944,34 @@ def test_the_fusion_demo_decides_the_fusion_the_substitution_and_the_window() ->
 def test_the_fusion_demo_prints_the_refusals_and_three_kernels() -> None:
     result, _ = _invoke("fusion", "python")
     assert result.returncode == 0, result.stdout + result.stderr
+    module = _module("fusion")
+    flux = where(module.flux, "f[j] = 0.5 * u[j] * u[j]")
+    divergence = where(module.divergence, "rhs[i] = -(f[i + 1] - f[i - 1]) / 2")
     assert (
-        "refused: fuse(flux, divergence) illegal: f[j] = 0.5 * u[j] * u[j] "
-        "(fusion.py:81) at j=2 writes f[2], read by rhs[i] = -(f[i + 1] - "
-        "f[i - 1]) / 2 (fusion.py:89) at i=1, scheduled earlier (at n=16, as "
-        "hinted); fuse('flux', 'divergence', shift=1) runs every dependence "
-        "between them forward"
+        "refused: fuse(burgers_rhs.flux.j, burgers_rhs.divergence.i) illegal: "
+        f"f[j] = 0.5 * u[j] * u[j] ({flux}) at j=2 writes f[2], read by "
+        f"rhs[i] = -(f[i + 1] - f[i - 1]) / 2 ({divergence}) at i=1, scheduled "
+        "earlier (at n=16, as hinted); fuse(burgers_rhs.flux.j, "
+        "burgers_rhs.divergence.i, shift=1) runs every dependence between them "
+        "forward"
     ) in result.stdout
     assert (
-        "refused: contract('f', lambda j: j % 2) illegal: rhs[i] = -(f[i + 1] - "
-        "f[i - 1]) / 2 (fusion.py:89) at i=14 reads f[13], which f[j] = 0.5 * "
-        "u[j] * u[j] (fusion.py:81) at j=13 stored in slot 1, after the same "
-        "statement at j=15 stored f[15] there (at n=16, as hinted)"
+        "refused: contract(burgers_rhs.f, lambda j: j % 2) illegal: rhs[i] = "
+        f"-(f[i + 1] - f[i - 1]) / 2 ({divergence}) at i=14 reads f[13], which "
+        f"f[j] = 0.5 * u[j] * u[j] ({flux}) at j=13 stored in slot 1, after "
+        "the same statement at j=15 stored f[15] there (at n=16, as hinted)"
     ) in result.stdout
     fused, substituted, windowed = result.stdout.split("accepted: ")[1:]
-    # Fused, f is stored, and the executor allocates it (#62); substituted,
-    # it is gone; kept in a window, it is three cells on the stack (#132).
+    # Fused, f is stored, and the executor allocates it (#62), with no loop
+    # that zeroes it, since no read sees the zeros (#290); substituted, it
+    # is gone; kept in a window, it is three cells on the stack (#132).
     assert "double *__restrict__ f)" in fused
     assert "__restrict__ f" not in substituted
     assert "double f[" not in substituted
     assert "0.5 * u[j] * u[j]" in substituted
     assert "double f_window[3];" in windowed
     assert "__restrict__ f" not in windowed
-    assert fused.count("for (") == 2
+    assert fused.count("for (") == 1
     assert substituted.count("for (") == 1
     assert windowed.count("for (") == 1
     assert result.stdout.count("-> tested") == 3
@@ -982,12 +979,15 @@ def test_the_fusion_demo_prints_the_refusals_and_three_kernels() -> None:
 
 def test_the_fusion_demo_states_the_definedness_of_its_intermediate() -> None:
     _result, facts = _invoke("fusion", "check")
-    # the substitution's own definedness, a cast of the file's schedule, is
-    # listed too (#191)
+    # the substitution's own definedness, a cast of the file's schedule, was
+    # listed too (#191); it is the one the schedules are made with now, which
+    # they run without the zeros of f on (#290)
     (fact,) = [
         fact
         for fact in facts
-        if fact["kind"] == "definedness" and not fact["id"].startswith("cast:")
+        if fact["kind"] == "definedness"
+        and not fact["id"].startswith("cast:")
+        and not fact["id"].endswith(":zeros:f")
     ]
     assert (fact["status"], fact["decided_by"]) == ("decided", "isl")
     assert fact["owner"] == "burgers_rhs"
@@ -1034,8 +1034,6 @@ def test_the_storage_layouts_demo_refutes_the_wrong_nesting() -> None:
 # {{{ hexahedra
 
 
-@needs_several_indices
-@needs_literal_binders
 def test_the_hexahedra_demo_decides_its_layouts_and_its_programs() -> None:
     result, facts = _invoke("hexahedra", "check")
     assert result.returncode == 0, result.stdout + result.stderr
@@ -1100,9 +1098,15 @@ def test_the_hexahedra_demo_decides_its_layouts_and_its_programs() -> None:
     along_t = [
         fact["statement"] for fact in facts if fact["owner"] == "gradient_along_t"
     ]
+    module = _module("hexahedra")
+    summed = said(
+        module.gradient_along_t,
+        "grad[x, e, k, j, i] = reduce_sum(...)",
+        "grad[x, e, k, j, i] = reduce_sum(",
+    )
     assert (
         "Ft[3*x + d, k, c] is in bounds for every d in Fin(3) and every instance "
-        "of S0"
+        f"of {summed}"
     ) in along_t
     assert not [line for line in along_t if "3*x + 0" in line]
     assert [line for line in along_t if line.startswith("the accumulation")] == [
@@ -1112,14 +1116,17 @@ def test_the_hexahedra_demo_decides_its_layouts_and_its_programs() -> None:
     contravariant = [
         fact["statement"] for fact in facts if fact["owner"] == "contravariant"
     ]
+    summed = said(
+        module.contravariant,
+        "w[d, e, k, j, i] = reduce_sum(...)",
+        "w[d, e, k, j, i] = reduce_sum(",
+    )
     assert (
         "G[3*x + d, e, k, j, i] is in bounds for every x in Fin(3) and every "
-        "instance of S0"
+        f"instance of {summed}"
     ) in contravariant
 
 
-@needs_several_indices
-@needs_literal_binders
 def test_the_hexahedra_layouts_are_loopys_strides_and_modepys_reshape() -> None:
     # The layout facts are about loopty's reading of the dim_tags and of the
     # DOFArray. This ties each reading to the code it stands for: the strides
@@ -1158,8 +1165,6 @@ def test_the_hexahedra_layouts_are_loopys_strides_and_modepys_reshape() -> None:
             assert stored == row_major[e, k, j, i] == module.row_major(e, i, j, k, n=n)
 
 
-@needs_several_indices
-@needs_literal_binders
 def test_the_hexahedra_theorem_holds_at_exact_matrices() -> None:
     from fractions import Fraction
 
@@ -1180,7 +1185,6 @@ def test_the_hexahedra_theorem_holds_at_exact_matrices() -> None:
                 assert claim.holds, (k, j, i)
 
 
-@needs_several_indices
 @pytest.mark.parametrize("order", [1, 2, 3, 4, 5, 6])
 def test_the_hexahedra_factors_are_the_stiffness_and_the_mass(order: int) -> None:
     # sum_j S^T[i, j] is the integral of the i-th basis function's derivative,
@@ -1195,8 +1199,6 @@ def test_the_hexahedra_factors_are_the_stiffness_and_the_mass(order: int) -> Non
     assert np.all(np.linalg.eigvalsh(mass) > 0)
 
 
-@needs_several_indices
-@needs_literal_binders
 def test_the_hexahedra_demo_refuses_the_deeper_fusion_and_keeps_the_windows() -> None:
     result, _ = _invoke("hexahedra", "python")
     assert result.returncode == 0, result.stdout + result.stderr
@@ -1207,19 +1209,19 @@ def test_the_hexahedra_demo_refuses_the_deeper_fusion_and_keeps_the_windows() ->
     along_r = where(module.along_r, "v[q, e, k, j, i] = reduce_sum(")
     along_s = where(module.along_s, "vs[q, e, k, j, i] = reduce_sum(")
     assert (
-        "refused: fuse(along_r, along_s) illegal: v[q, e, k, j, i] = "
-        f"reduce_sum(...) ({along_r}) at q="
+        "refused: fuse(weak_grad.along_r.i, weak_grad.along_s.i) illegal: "
+        f"v[q, e, k, j, i] = reduce_sum(...) ({along_r}) at q="
     ) in out
     assert f"read by vs[q, e, k, j, i] = reduce_sum(...) ({along_s}) at q=" in out
-    assert "fuse('along_r', 'along_s', loops=3) runs every dependence" in out
+    assert (
+        "fuse(weak_grad.along_r.k, weak_grad.along_s.k) runs every dependence" in out
+    )
     assert "w kept in n cells" in out
     assert "v kept in n*n cells" in out
     assert "grad: difference" in out and "-> tested" in out
     assert out.count("all decided by isl") == 3
 
 
-@needs_several_indices
-@needs_literal_binders
 def test_the_hexahedra_launches_are_legal_and_build_on_opencl(plain_opencl) -> None:
     module = _module("hexahedra")
     for operator in ("grad", "div"):
@@ -1240,7 +1242,6 @@ def test_the_hexahedra_launches_are_legal_and_build_on_opencl(plain_opencl) -> N
 # {{{ advection
 
 
-@needs_several_indices
 def test_the_advection_demo_decides_every_access_and_every_launch() -> None:
     result, facts = _invoke("advection", "check")
     assert result.returncode == 0, result.stdout + result.stderr
@@ -1251,10 +1252,18 @@ def test_the_advection_demo_decides_every_access_and_every_launch() -> None:
         for fact in facts
         if fact["owner"] == "upwind" and fact["statement"].startswith("u[")
     }
+    flux = said(
+        _module("advection").upwind,
+        "flux[e, f, a, b] = upwind_flux(...)",
+        "flux[e, f, a, b] = upwind_flux(",
+    )
     assert gathers == {
         "u[e, inside[f, a, b, 0], inside[f, a, b, 1], inside[f, a, b, 2]] is in "
-        "bounds for every instance of S0 (inside[f, a, b, 0] : Fin(n), inside[f, "
-        "a, b, 1] : Fin(n), inside[f, a, b, 2] : Fin(n), by type)": ("decided", "isl"),
+        f"bounds for every instance of {flux} (inside[f, a, b, 0] : Fin(n), "
+        "inside[f, a, b, 1] : Fin(n), inside[f, a, b, 2] : Fin(n), by type)": (
+            "decided",
+            "isl",
+        ),
         "u[nbr[e, f], outside[f, a, b, 0], outside[f, a, b, 1], outside[f, a, b, "
         "2]] is in bounds by type (nbr[e, f] : Fin(ne), outside[f, a, b, 0] : "
         "Fin(n), outside[f, a, b, 1] : Fin(n), outside[f, a, b, 2] : Fin(n))": (
@@ -1273,7 +1282,6 @@ def test_the_advection_demo_decides_every_access_and_every_launch() -> None:
     assert "assumed" not in {fact["status"] for fact in facts}
 
 
-@needs_several_indices
 @pytest.mark.parametrize("order", [1, 2, 3, 4, 5, 6])
 def test_the_advection_tables_are_grudges_operators_with_the_inverse_mass_in(
     order: int,
@@ -1298,7 +1306,6 @@ def test_the_advection_tables_are_grudges_operators_with_the_inverse_mass_in(
         assert np.allclose(lifted, np.einsum("i,kj->kji", L[side], g), atol=1e-11)
 
 
-@needs_several_indices
 @pytest.mark.parametrize("order", [1, 3, 6])
 def test_the_gll_tables_are_the_quadratures_and_conserve(order: int) -> None:
     module = _module("advection")
@@ -1316,7 +1323,6 @@ def test_the_gll_tables_are_the_quadratures_and_conserve(order: int) -> None:
     assert np.isclose(weights.sum(), 2.0)
 
 
-@needs_several_indices
 def test_the_lift_onto_the_face_nodes_is_the_lift_with_the_gll_tables() -> None:
     from loopty import Arr
 
@@ -1334,7 +1340,6 @@ def test_the_lift_onto_the_face_nodes_is_the_lift_with_the_gll_tables() -> None:
     assert gap <= 1e-14 * np.abs(expected).max()
 
 
-@needs_several_indices
 def test_the_face_maps_are_modepys_faces_and_the_box_is_periodic() -> None:
     module = _module("advection")
     n = module.N
@@ -1356,7 +1361,6 @@ def test_the_face_maps_are_modepys_faces_and_the_box_is_periodic() -> None:
         assert (nbr[across, f ^ 1] == np.arange(27)).all()
 
 
-@needs_several_indices
 def test_the_advection_right_hand_side_conserves_on_the_periodic_box() -> None:
     # integrated with the mass, the right-hand side of a periodic problem is
     # zero: what leaves an element through a face enters its neighbor
@@ -1371,7 +1375,6 @@ def test_the_advection_right_hand_side_conserves_on_the_periodic_box() -> None:
     assert abs(total) <= 1e-13 * scale
 
 
-@needs_several_indices
 def test_the_advection_demo_refuses_the_deeper_fusion_and_runs_every_split() -> None:
     result, _ = _invoke("advection", "python")
     assert result.returncode == 0, result.stdout + result.stderr
@@ -1380,24 +1383,29 @@ def test_the_advection_demo_refuses_the_deeper_fusion_and_runs_every_split() -> 
     assert "M^-1 M is the identity: True" in out
     assert "the transpose of the face gather on these maps: True" in out
     assert (
-        "refused: fuse(upwind, volume) illegal: flux[e, f, a, b] = upwind_flux(...) "
-        "(advection.py:"
+        "refused: fuse(advection_rhs.upwind.b, advection_rhs.volume.i) illegal: "
+        "flux[e, f, a, b] = upwind_flux(...) (advection.py:"
     ) in out
-    assert "fuse('upwind', 'volume', loops=1) runs every dependence" in out
+    assert (
+        "fuse(advection_rhs.upwind.f, advection_rhs.volume.k, shift=(0, 5)) runs "
+        "every dependence"
+    ) in out
     assert "flux kept in lambda" in out and "-> tested" in out
     # libParanumal's lift onto the face nodes races on an edge without its
     # barriers, and is legal once the updates are atomic
     # each update by its statement, shortened to what it writes into
-    assert "refused: tag(e='g.0', a='l.1', b='l.0') illegal: rhs[e, " in out
+    assert (
+        "refused: tag({lift_on_faces.e: 'g.0', lift_on_faces.a: 'l.1', "
+        "lift_on_faces.b: 'l.0'}) illegal: rhs[e, "
+    ) in out
     assert " -= ... (advection.py:" in out
-    assert "both update rhs[" in out and "atomic('rhs')" in out
-    assert "accepted: atomic('rhs').tag(" in out
+    assert "both update rhs[" in out and "atomic(lift_on_faces.rhs)" in out
+    assert "accepted: atomic(lift_on_faces.rhs).tag(" in out
     for split in _module("advection").SPLITS:
         assert f"  {split}: " in out, split
     assert "all decided" in out and "refuted" not in out
 
 
-@needs_several_indices
 def test_the_advection_launches_are_legal_and_build_on_opencl(plain_opencl) -> None:
     module = _module("advection")
     for split in module.SPLITS:
@@ -1535,14 +1543,17 @@ def test_the_assembly_demo_names_the_node_two_cells_share() -> None:
     ) in result.stdout
     scatter = where(_module("assembly").mass_action, "y[cell[c, a]] += reduce_sum(")
     assert (
-        f"IllegalCast: tag(c_outer='g.0', c_inner='l.0') illegal: y[cell[c, a]] "
-        f"+= reduce_sum(...) ({scatter}) at c=0, a=2 and at c=1, a=1 both "
+        "IllegalCast: tag({mass_action.c.outer: 'g.0', mass_action.c.inner: "
+        f"'l.0'}}) illegal: y[cell[c, a]] += reduce_sum(...) ({scatter}) at c=0, "
+        "a=2 and at c=1, a=1 both "
         "update y[3] on example_inputs() (nc=2, nv=4), where cell[0, 2] = 3 and "
         "cell[1, 1] = 3"
     ) in result.stdout
     accepted = result.stdout.split("accepted: ")[1]
-    assert "atomic updates of y run at the same time after tag(" in accepted
-    assert "atomic('y') renames" not in accepted
+    assert "atomic updates of mass_action.y run at the same time after tag(" in (
+        accepted
+    )
+    assert "atomic(mass_action.y) renames" not in accepted
     assert "-> tested" in result.stdout
 
 
@@ -1632,15 +1643,13 @@ def test_the_assembly_schedules_facts_are_at_the_lines_of_its_steps() -> None:
         and fact["kind"] in ("assumption", "bijective")
     }
     assert placed == {
-        "nc % 4 == 0, which mass_action is scheduled assuming": line_of(
-            '.assume("nc % 4 == 0")'
+        "mass_action.nc % 4 == 0, which mass_action is scheduled assuming": (
+            line_of(".assume(mass_action.nc % 4 == 0)")
         ),
-        "split(c, 4) renames the instances of mass_action one for one": line_of(
-            '.split("c", 4)'
-        ),
-        "tag(c_inner='ilp') renames the instances of mass_action one for one": (
-            line_of('.tag(c_inner="ilp")')
-        ),
+        "split(mass_action.c, 4) renames the instances of mass_action one for "
+        "one": line_of(".split(mass_action.c, 4)"),
+        "tag(mass_action.c.inner, 'ilp') renames the instances of mass_action "
+        "one for one": (line_of('.tag(mass_action.c.inner, "ilp")')),
     }
 
 
@@ -1660,7 +1669,6 @@ def test_the_assembly_theorems_are_in_its_ledger() -> None:
 # {{{ l2p
 
 
-@needs_several_indices
 def test_the_l2p_demo_applies_its_theorem_to_what_reconstruct_stores() -> None:
     """The postcondition decided from the stores, and the theorem applied to it."""
     _result, facts = _invoke("l2p", "check")
@@ -1695,15 +1703,16 @@ def test_the_l2p_demo_applies_its_theorem_to_what_reconstruct_stores() -> None:
     assert defined == [
         "every cell of C that reconstruct reads, unpack stored before it",
         "every cell of R that evaluate reads, reconstruct stored before it",
-        # and what each window keeps, the zeros the program made it with gone
-        "for contract('R'), every cell of R that l2p reads, reconstruct.S0 or "
-        "reconstruct.S1 has stored by the time it is read",
-        "for contract('C'), every cell of C that l2p reads, unpack.S0 or unpack.S1 "
-        "has stored by the time it is read",
+        # and that no read of the two arrays the program makes sees the zeros
+        # it makes them with, which every schedule of it runs without, and
+        # each window rests on (#290)
+        "every cell of l2p.C that l2p reads, l2p.unpack has stored by the time "
+        "it is read, so l2p runs without the zeros l2p.C is made with",
+        "every cell of l2p.R that l2p reads, l2p.reconstruct has stored by the "
+        "time it is read, so l2p runs without the zeros l2p.R is made with",
     ]
 
 
-@needs_several_indices
 def test_the_l2p_demo_agrees_with_sumpys_own_kernel() -> None:
     """The row the recording of sumpy's E2PFromSingleBox gives, tested."""
     _result, facts = _invoke("l2p", "check")
@@ -1713,17 +1722,20 @@ def test_the_l2p_demo_agrees_with_sumpys_own_kernel() -> None:
         "upstream",
         "l2p",
     )
+    # round-off, far inside the class's allowance: the row states its own (#278)
     assert row["statement"] == (
-        "the native run of l2p agrees with sumpy_l2p in pot, on its example inputs"
+        "the native run of l2p agrees with sumpy_l2p in pot within 1e-14 of the "
+        "largest value, on its example inputs"
     )
     assert row["provenance"]["uncompared"] == []
+    assert row["provenance"]["inputs"] == "example_inputs() of l2p.py"
     detail = row["provenance"]["outputs"]["pot"]
     assert detail["agree"] and detail["exactness"] == "approx"
-    # round-off, far inside the class's allowance
-    assert detail["difference"] < 1e-14 * detail["largest"]
+    assert detail["within"] == 1e-14
+    assert detail["tolerance"] == 1e-14 * detail["largest"], detail
+    assert detail["difference"] <= detail["tolerance"], detail
 
 
-@needs_several_indices
 def test_the_l2p_demo_refuses_the_interchange_and_fuses_box_by_box() -> None:
     result, _ = _invoke("l2p", "python")
     assert result.returncode == 0, result.stdout + result.stderr
@@ -1731,37 +1743,38 @@ def test_the_l2p_demo_refuses_the_interchange_and_fuses_box_by_box() -> None:
     refusal = result.stdout.split("refused: ")[1].splitlines()[0]
     # the copy and the recurrence, each by its text and line
     reconstruct = _module("l2p").reconstruct
-    copy = where(reconstruct, "R[i, a, b] = C[i, a, b]")
-    recurrence = where(reconstruct, "R[i, a, b] = -R[i, a - 2, b + 2]")
+    copy = where(reconstruct, "R[box, a, b] = C[box, a, b]")
+    recurrence = where(reconstruct, "R[box, a, b] = -R[box, a - 2, b + 2]")
     assert refusal.startswith(
-        f"interchange(b, a) illegal: R[i, a, b] = C[i, a, b] ({copy}) at i="
+        "interchange(reconstruct.b, reconstruct.a) illegal: R[box, a, b] = "
+        f"C[box, a, b] ({copy}) at box="
     )
     assert " writes R[" in refusal
-    assert f" read by R[i, a, b] = -R[i, a - 2, b + 2] ({recurrence}) at i=" in refusal
+    assert (
+        f" read by R[box, a, b] = -R[box, a - 2, b + 2] ({recurrence}) at box="
+    ) in refusal
     module = _module("l2p")
     steps = [fact.statement for fact in module.fused.facts()]
-    assert steps == [
-        "fuse(unpack, reconstruct, loops=1) renames the instances of l2p one for one",
-        "the order after fuse(unpack, reconstruct, loops=1) runs every dependence "
-        "of l2p forward",
-        "fuse(reconstruct, evaluate, loops=1) renames the instances of l2p one for "
-        "one",
-        "the order after fuse(reconstruct, evaluate, loops=1) runs every dependence "
-        "of l2p forward",
+    fusion = "fuse(l2p.unpack.box, l2p.reconstruct.box, l2p.evaluate.box)"
+    assert steps[2:] == [
+        f"{fusion} renames the instances of l2p one for one",
+        f"the order after {fusion} runs every dependence of l2p forward",
     ]
+    # made without the zeros of C and R, which no read sees (#290)
+    assert [fact.kind for fact in module.fused.facts()[:2]] == ["definedness"] * 2
     assert {fact.status.value for fact in module.fused.facts()} == {"decided"}
     assert "pot: difference 0 within" in result.stdout
     # sumpy's own GPU schedule, each box a work group, with the file's names:
     # the tag's two facts, the fusions' being fused's, above
     device = result.stdout.split("on a GPU, each box a work group, as sumpy's: ")[1]
     assert device.splitlines()[1:] == [
-        "  decided  isl  tag(i='g.0') renames the instances of l2p one for one",
-        "  decided  isl  the order after tag(i='g.0') runs every dependence of l2p "
-        "forward, within one work item",
+        "  decided  isl  on_groups(l2p.unpack.box) renames the instances of l2p "
+        "one for one",
+        "  decided  isl  the order after on_groups(l2p.unpack.box) runs every "
+        "dependence of l2p forward, within one work item",
     ]
 
 
-@needs_several_indices
 def test_the_l2p_demo_keeps_one_triangle_per_box_and_refuses_one_row() -> None:
     # One box's triangle of R, over a domain (#244), stored by a copy and by
     # the recurrence that reads it (#213): the window is found along the
@@ -1769,42 +1782,46 @@ def test_the_l2p_demo_keeps_one_triangle_per_box_and_refuses_one_row() -> None:
     module = _module("l2p")
     windows = module.contracted.windows
     assert {name: repr(window.placement) for name, window in windows.items()} == {
-        "R": "lambda i, a, b: (a, b)",
-        "C": "lambda i, a, b: (a, b)",
+        "R": "lambda box, a, b: (a, b)",
+        "C": "lambda box, a, b: (a, b)",
     }
     assert windows["R"].extents == (11, 11) and windows["C"].extents == (2, 11)
     added = module.contracted.facts()[len(module.fused.facts()) :]
     assert [(fact.kind, fact.status.value) for fact in added] == [
-        ("definedness", "decided"),
         ("no-clobber", "decided"),
     ] * 2
-    assert [fact.statement for fact in added][:2] == [
-        "for contract('R'), every cell of R that l2p reads, reconstruct.S0 or "
-        "reconstruct.S1 has stored by the time it is read",
-        "no read of R sees its slot overwritten after contract('R', lambda i, a, "
-        "b: (a, b)): R kept in 121 cells, R[i, a, b] in slot (a, b)",
+    assert added[0].statement == (
+        "no read of l2p.R sees its slot overwritten after contract(l2p.R, lambda "
+        "box, a, b: (a, b)): l2p.R kept in 121 cells, R[box, a, b] in slot (a, b)"
+    )
+    # each window rests on the fact the schedule was made with: no read of
+    # the array sees the zeros it is made with, which a window does not keep
+    # (#290)
+    made = {fact.provenance["array"]: fact for fact in module.fused.facts()[:2]}
+    assert [fact.rests_on for fact in added] == [
+        (made["R"].id,),
+        (made["C"].id,),
     ]
     result, _ = _invoke("l2p", "python")
     assert result.returncode == 0, result.stdout + result.stderr
-    recurrence = where(module.reconstruct, "R[i, a, b] = -R[i, a - 2, b + 2]")
+    recurrence = where(module.reconstruct, "R[box, a, b] = -R[box, a - 2, b + 2]")
     assert (
-        "refused: contract('R', lambda i, a, b: b) illegal: R[i, a, b] = -R[i, a "
-        f"- 2, b + 2] ({recurrence}) at i=0, a=9, b=0 reads R[0, 7, 2], which the "
-        "same statement at i=0, a=7, b=2 stored in slot 2, after the same "
-        "statement at i=0, a=8, b=2 stored R[0, 8, 2] there (at nb=1, isl's "
-        "choice); contract('R') finds the smallest window that keeps every read, "
-        "lambda i, a, b: (a, b)\n"
+        "refused: contract(l2p.R, lambda box, a, b: b) illegal: R[box, a, b] = "
+        f"-R[box, a - 2, b + 2] ({recurrence}) at box=0, a=9, b=0 reads "
+        "R[0, 7, 2], which the same statement at box=0, a=7, b=2 stored in slot "
+        "2, after the same statement at box=0, a=8, b=2 stored R[0, 8, 2] there "
+        "(at nb=1, isl's choice); contract(l2p.R) finds the smallest window that "
+        "keeps every read, lambda box, a, b: (a, b)\n"
     ) in result.stdout
     assert (
-        "on a device, each box a work group keeping its windows: tag(i='g.0'): 2 "
-        "facts, all decided by isl\n"
+        "on a device, each box a work group keeping its windows: "
+        "on_groups(l2p.unpack.box): 2 facts, all decided by isl\n"
     ) in result.stdout
 
 
 # {{{ the QBX layer potential
 
 
-@needs_parts
 def test_the_qbx_demo_states_the_fact_sumpy_silences_for_both_layers() -> None:
     # sumpy silences loopy's write_race(write_lpot*) on its LayerPotential;
     # the fact in its place is that each target's cell is written once.
@@ -1815,14 +1832,15 @@ def test_the_qbx_demo_states_the_fact_sumpy_silences_for_both_layers() -> None:
             for fact in facts
             if fact["owner"] == owner and fact["kind"] == "disjoint-writes"
         ]
+        kernel = getattr(_module("layer_potential"), owner)
+        summed = said(kernel, "out[t] = SCALE * reduce_sum(...)", "out[t] =")
         assert writes["statement"] == (
-            "distinct instances of S0 write distinct cells of out"
+            f"distinct instances of {summed} write distinct cells of out"
         )
         assert writes["status"] in ("decided", "proved"), writes
         assert writes["decided_by"] in ("isl", "lean"), writes
 
 
-@needs_parts
 def test_the_qbx_demo_agrees_with_what_sumpy_returned_at_the_pinned_commit() -> None:
     _result, facts = _invoke("layer_potential", "check")
     rows = {fact["owner"]: fact for fact in facts if fact["kind"] == "upstream"}
@@ -1851,7 +1869,6 @@ def test_the_qbx_demo_agrees_with_what_sumpy_returned_at_the_pinned_commit() -> 
     assert len(recorded["single_layer"]) == len(recorded["double_layer"]) == size
 
 
-@needs_parts
 def test_the_qbx_demo_measures_pytentials_identity_and_the_jumps() -> None:
     _result, facts = _invoke("layer_potential", "check")
     rows = {fact["owner"]: fact for fact in facts if fact["kind"] == "tested"}
@@ -1863,7 +1880,6 @@ def test_the_qbx_demo_measures_pytentials_identity_and_the_jumps() -> None:
         assert order > 5 - 1.6, fact
 
 
-@needs_parts
 def test_the_line_taylor_theorem_is_in_the_qbx_ledger_and_not_refuted() -> None:
     _result, facts = _invoke("layer_potential", "check")
     statuses = {
@@ -1874,7 +1890,6 @@ def test_the_line_taylor_theorem_is_in_the_qbx_ledger_and_not_refuted() -> None:
     assert statuses <= {"assumed", "tested", "proved"}
 
 
-@needs_parts
 def test_the_qbx_ledger_says_single_layer_adds_line_taylors_terms() -> None:
     """The theorem and the kernel in one row: its terms are line_taylor's c(n) (#252).
 
@@ -1912,7 +1927,6 @@ def test_the_qbx_ledger_says_single_layer_adds_line_taylors_terms() -> None:
     assert "single(c[t] - y[s], z[t] - c[t])" in source[line]
 
 
-@needs_parts
 def test_the_kernels_ratio_is_the_theorems() -> None:
     # The kernels add coefficient(ratio, k) with the ratio multiplied out by
     # the conjugate; the theorem's is -beta / alpha. They agree to rounding,
@@ -1936,7 +1950,6 @@ def test_the_kernels_ratio_is_the_theorems() -> None:
             assert abs(series - np.log(abs(alpha + beta))) <= truncation
 
 
-@needs_parts
 def test_sumpys_tile_is_legal_and_c_cannot_build_its_axes() -> None:
     module = _module("layer_potential")
     tile = module.sumpy_tile("c")
@@ -1945,25 +1958,35 @@ def test_sumpys_tile_is_legal_and_c_cannot_build_its_axes() -> None:
     assert all(fact.status.value == "decided" for fact in casts)
     buildable, reason = tile.buildable
     assert not buildable
-    assert "puts a loop on a hardware axis, and the C target has none" in reason
+    assert reason.startswith(
+        "the loops single_layer.t.outer on g.0 and single_layer.t.inner on l.0 are "
+        "on hardware axes, and the C target has none"
+    )
 
 
-@needs_parts
 def test_the_qbx_demo_prints_the_tile_the_fact_and_the_rows() -> None:
     result, _ = _invoke("layer_potential", "python")
     assert result.returncode == 0, result.stdout + result.stderr
     out = result.stdout
     assert (
-        "decided  isl  prioritize(s_outer, t_inner) renames the instances of "
-        "single_layer one for one"
+        "decided  isl  prioritize(single_layer.s.outer, single_layer.t.inner) "
+        "renames the instances of single_layer one for one"
     ) in out
-    assert "decided  isl  distinct instances of S0 write distinct cells of out" in out
+    summed = said(
+        _module("layer_potential").single_layer,
+        "out[t] = SCALE * reduce_sum(...)",
+        "out[t] =",
+    )
+    assert (
+        f"decided  isl  distinct instances of {summed} write distinct cells of out"
+    ) in out
     # the tile is shown as sumpy writes it, without the target its casts were
     # decided on, which cannot build its hardware axes
     assert (
-        "sumpy's tile, get_optimized_kernel(is_cpu=True): split(t, 16)"
-        ".tag(t_outer='g.0', t_inner='l.0').split(s, 256)"
-        ".prioritize(s_outer, t_inner)"
+        "sumpy's tile, get_optimized_kernel(is_cpu=True): "
+        "split(single_layer.t, 16).tag({single_layer.t.outer: 'g.0', "
+        "single_layer.t.inner: 'l.0'}).split(single_layer.s, 256)"
+        ".prioritize(single_layer.s.outer, single_layer.t.inner)"
     ) in out
     lines = [line for line in out.splitlines() if "sumpy's own kernel" in line]
     assert [line.split(":")[0].strip() for line in lines] == [

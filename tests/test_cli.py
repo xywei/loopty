@@ -24,6 +24,7 @@ import islpy as isl
 import numpy as np
 import pymbolic.primitives as prim
 
+from loopty.handles import scope
 from loopty.schedule import Schedule
 from loopty.term import Access, ArrType, Stmt, Term
 
@@ -69,7 +70,7 @@ class Scale:
 
 
 scale = Scale()
-sched = Schedule(scale).split("i", 4)
+sched = Schedule(scale).split(scope(scale).i, 4)
 
 
 def example_inputs():
@@ -136,8 +137,8 @@ def test_a_file_with_no_inputs_says_so_rather_than_guessing(tmp_path, capsys) ->
 
 def test_inputs_may_be_recorded_on_the_schedule(tmp_path, capsys) -> None:
     body = FIXTURE.replace(
-        "sched = Schedule(scale).split(\"i\", 4)",
-        "sched = Schedule(scale).split(\"i\", 4).example("
+        "sched = Schedule(scale).split(scope(scale).i, 4)",
+        "sched = Schedule(scale).split(scope(scale).i, 4).example("
         "x=np.arange(8, dtype=np.float64), y=np.zeros(8))",
     ).replace("def example_inputs()", "def unused_inputs()")
     path = write_fixture(tmp_path, body)
@@ -201,7 +202,7 @@ def scale(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):
         y[i] = 2.0 * x[i]
 
 
-sched = Schedule(scale).split("i", 4)
+sched = Schedule(scale).split(scale.i, 4)
 
 
 def example_inputs():
@@ -226,7 +227,7 @@ def test_run_on_a_decorated_kernel_file(tmp_path, capsys) -> None:
 
 
 def test_target_retargets_every_schedule_rather_than_ignoring_the_flag(
-    tmp_path, capsys
+    tmp_path, capsys, without_pyopencl
 ) -> None:
     """``--target opencl`` must not quietly run a C-pinned schedule on C.
 
@@ -235,7 +236,8 @@ def test_target_retargets_every_schedule_rather_than_ignoring_the_flag(
     so the ledger claimed a device run that never happened. Now the schedule is
     rebuilt for the target, which re-checks every cast; on a machine with no
     pyopencl that rebuild fails, and the failure is reported by name and turns
-    into a non-zero exit code.
+    into a non-zero exit code. pyopencl is hidden, so that the machine has
+    none whatever is installed (#179).
     """
     path = write_fixture(tmp_path)
     code = main(["run", str(path), "--target", "opencl"])
@@ -267,7 +269,7 @@ def scale(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):
         y[i] = 2.0 * x[i]
 
 
-sched = Schedule(scale, target="opencl").tag(i="g.0")
+sched = Schedule(scale, target="opencl").tag(scale.i, "g.0")
 
 
 def example_inputs():
@@ -293,10 +295,10 @@ def test_target_c_on_a_device_schedule_says_c_has_no_hardware_axes(
         for line in out.splitlines()
         if "not buildable for the c target: " in line
     ]
-    assert limit.startswith("the tag i='g.0' puts a loop on a hardware axis")
+    assert limit.startswith("the loop scale.i on g.0 is on a hardware axis")
     lines, header = refutation_block(out, "scale at fixture.py:")
     assert lines[header].endswith(
-        "c code can be generated for scale after tag(i='g.0')"
+        "c code can be generated for scale after tag(scale.i, 'g.0')"
     )
     assert lines[header + 1] == f"  {limit}"
     assert "difference" not in out
@@ -319,15 +321,38 @@ def test_a_files_device_schedule_is_checked_where_pyopencl_is_not_installed(
     out = capsys.readouterr().out
     assert code == 0, out
     assert (
-        "scale: Schedule(scale, target='opencl').tag(i='g.0')\n"
+        "scale: Schedule(scale, target='opencl').tag(scale.i, 'g.0')\n"
         "  not run here: running on a device needs pyopencl, which is not "
         "installed; its facts are checked all the same\n"
     ) in out
     assert "difference" not in out
-    assert "tag(i='g.0') renames the instances of scale one for one" in out
+    assert "tag(scale.i, 'g.0') renames the instances of scale one for one" in out
     # --target opencl keeps it, and says the same
     assert main(["run", str(path), "--target", "opencl"]) == 0
     assert "not run here" in capsys.readouterr().out
+
+
+def test_emit_code_prints_a_device_schedules_code_where_pyopencl_is_not_installed(
+    tmp_path, capsys, monkeypatch
+) -> None:
+    """``--emit-code`` prints the OpenCL C of a file's device schedule anywhere (#291).
+
+    The code needs neither pyopencl nor a device; the run does, and is left
+    to a machine with both, as without the flag.
+    """
+    from loopty import lower
+
+    monkeypatch.setattr(lower, "pyopencl_installed", lambda: False)
+    path = write_fixture(tmp_path, DEVICE)
+    code = main(["run", str(path), "--emit-code"])
+    out = capsys.readouterr().out
+    assert code == 0, out
+    header = "scale: Schedule(scale, target='opencl').tag(scale.i, 'g.0')\n"
+    assert header in out
+    printed = out[out.index(header) + len(header) : out.index("  not run here: ")]
+    assert "__kernel void" in printed, out
+    assert "y[gid(0)] = 2.0 * x[gid(0)];" in printed, out
+    assert "difference" not in out
 
 
 def test_without_target_a_schedule_keeps_the_one_it_was_written_for(
@@ -436,7 +461,9 @@ def test_check_prints_the_witness_of_an_isl_refutation_under_its_line(
     out = capsys.readouterr().out
     assert code == 1
     lines, header = refutation_block(out, "shift at ")
-    assert lines[header].endswith("u[i + 1] is in bounds for every instance of S0")
+    assert lines[header].endswith(
+        "u[i + 1] is in bounds for every instance of v[i] = u[i + 1] (fixture.py:14)"
+    )
     facts = json.loads(out_path.read_text(encoding="utf-8"))
     refuted = {fact["owner"]: fact for fact in facts if fact["status"] == "refuted"}
     assert [f["owner"] for f in facts if f["status"] == "refuted"] == [
@@ -450,9 +477,14 @@ def test_check_prints_the_witness_of_an_isl_refutation_under_its_line(
     assert f"  {reason}" in lines[header + 1 : header + 3]
 
     lines, header = refutation_block(out, "collide at ")
-    assert lines[header].endswith("distinct instances of S0 write distinct cells of y")
+    written = "y[0] = x[i] (fixture.py:20)"
+    assert lines[header].endswith(
+        f"distinct instances of {written} write distinct cells of y"
+    )
     reason = refuted["collide"]["provenance"]["reason"]
-    assert " is one of the pairs of S0 instances writing the same cell" in reason
+    assert f" is one of the pairs of instances of {written} writing the same cell" in (
+        reason
+    )
     assert reason.startswith("[s=0, d0=")
     assert f"  {reason}" in lines[header + 1 : header + 3]
 
@@ -513,7 +545,7 @@ def test_run_prints_what_refuted_a_run_under_its_line(tmp_path, capsys) -> None:
     out = capsys.readouterr().out
     assert code == 1
     # at the schedule's line, the run of which was refuted
-    lines, header = refutation_block(out, "scale at fixture.py:53: ")
+    lines, header = refutation_block(out, "scale at fixture.py:54: ")
     assert lines[header].endswith(
         "the scheduled run of scale agrees with the native run to the accuracy "
         "its types state"
@@ -554,9 +586,7 @@ def rowsum(
         y[r] = reduce_sum(val[r, j] for j in val.dom[r])
 
 
-sched = Schedule(rowsum).split("j", 32, inner="j_in", outer="j_out").tag(
-    j_in="l.0"
-)
+sched = Schedule(rowsum).split(rowsum.j, 32).tag(rowsum.j.inner, "l.0")
 '''
 
 
@@ -581,7 +611,7 @@ def test_run_prints_why_a_schedule_cannot_be_built_under_its_line(
     assert "ragged fiber" in limit
     lines, header = refutation_block(out, "rowsum at fixture.py:")
     assert lines[header].endswith(
-        "c code can be generated for rowsum after tag(j_in='l.0')"
+        "c code can be generated for rowsum after tag(rowsum.j.inner, 'l.0')"
     )
     assert lines[header + 1] == f"  {limit}"
     assert "no witness recorded" not in out
@@ -600,8 +630,8 @@ def test_every_schedule_of_one_kernel_keeps_its_facts_in_the_ledger(tmp_path) ->
     claims, and keeps its own agreement, since it ran on inputs of its own.
     """
     body = FIXTURE + (
-        '\nother = Schedule(scale).split("i", 2)\n'
-        'again = Schedule(scale).split("i", 4).example('
+        "\nother = Schedule(scale).split(scope(scale).i, 2)\n"
+        "again = Schedule(scale).split(scope(scale).i, 4).example("
         "x=np.ones(8), y=np.zeros(8))\n"
     )
     path = write_fixture(tmp_path, body)
@@ -611,8 +641,8 @@ def test_every_schedule_of_one_kernel_keeps_its_facts_in_the_ledger(tmp_path) ->
     kinds = [fact["kind"] for fact in facts]
     assert kinds.count("bijective") == kinds.count("monotone") == 2
     agreements = [fact["id"] for fact in facts if fact["kind"] == "agreement"]
-    four = "agreement:scale:[c].split('i', 4, inner='i_inner', outer='i_outer')"
-    two = "agreement:scale:[c].split('i', 2, inner='i_inner', outer='i_outer')"
+    four = "agreement:scale:[c].split(scale.i, 4)"
+    two = "agreement:scale:[c].split(scale.i, 2)"
     assert agreements == [four, two, f"{four}#2"]
     assert len({fact["id"] for fact in facts}) == len(facts) == 7
 
@@ -647,8 +677,8 @@ def double(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):
         y[i] = 3.0 * x[i]
 
 
-mine = Schedule(double).split("i", 2)
-theirs = Schedule(helper_double).split("i", 2)
+mine = Schedule(double).split(double.i, 2)
+theirs = Schedule(helper_double).split(helper_double.i, 2)
 
 
 def example_inputs():
@@ -676,7 +706,7 @@ def test_two_kernels_of_one_name_keep_their_schedules_facts_apart(tmp_path) -> N
     ids = [fact["id"] for fact in facts]
     assert len(set(ids)) == len(ids) == 6
     assert not [identifier for identifier in ids if "#" in identifier]
-    split = "split('i', 2, inner='i_inner', outer='i_outer')"
+    split = "split(double.i, 2)"
     steps = f"[c].{split}"
     by_where = {}
     for fact in facts:
@@ -720,9 +750,11 @@ def make(scale):
 
 first = make(2.0)
 second = make(3.0)
-s1 = Schedule(first).split("i", 2)
-s2 = Schedule(second).split("i", 2)
-s3 = Schedule(first).split("i", 2).example(x=Arr.from_numpy(np.ones(4)), y=Arr.zeros(4))
+s1 = Schedule(first).split(first.i, 2)
+s2 = Schedule(second).split(second.i, 2)
+s3 = Schedule(first).split(first.i, 2).example(
+    x=Arr.from_numpy(np.ones(4)), y=Arr.zeros(4)
+)
 
 
 def example_inputs():
@@ -752,10 +784,12 @@ def test_two_kernels_one_factory_makes_are_refused_as_lanky_check_refuses_them(
     assert out.count("  y: difference 0 ") == 3
     facts = json.loads(out_path.read_text(encoding="utf-8"))
     definition = "fixture.make.<locals>.double@11"
-    split = "split('i', 2, inner='i_inner', outer='i_outer')"
+    split = "split(double.i, 2)"
     steps = f"[c].{split}"
-    bijective = "split(i, 2) renames the instances of double one for one"
-    monotone = "the order after split(i, 2) runs every dependence of double forward"
+    bijective = "split(double.i, 2) renames the instances of double one for one"
+    monotone = (
+        "the order after split(double.i, 2) runs every dependence of double forward"
+    )
     (agreement,) = {
         fact["statement"] for fact in facts if fact["kind"] == "agreement"
     }
@@ -827,7 +861,7 @@ def test_a_claim_not_in_the_table_that_was_refuted_is_said_to_be(
         "\n\nclass Triple(Scale):\n"
         "    def __call__(self, x, y):\n"
         "        y[...] = 3.0 * x\n\n\n"
-        'tripled = Schedule(Triple()).split("i", 4)\n'
+        "tripled = Schedule(Triple()).split(scope(scale).i, 4)\n"
     )
     path = write_fixture(tmp_path, body)
     out_path = tmp_path / "ledger.json"
@@ -841,11 +875,11 @@ def test_a_claim_not_in_the_table_that_was_refuted_is_said_to_be(
     agreement += "accuracy its types state"
     block = out[out.index("DUPLICATE") :].splitlines()
     assert block[0] == (
-        "DUPLICATE scale at fixture.py:53: several claims have each of the 3 ids "
+        "DUPLICATE scale at fixture.py:54: several claims have each of the 3 ids "
         "below"
     )
     assert block[-5:] == [
-        "  agreement:scale:[c].split('i', 4, inner='i_inner', outer='i_outer')",
+        "  agreement:scale:[c].split(scale.i, 4)",
         f"    in the table: {agreement}",
         f"    not in the table, refuted: {agreement}",
         "      y differs from the native run: difference 7, allowed 2.2e-05 (approx)",
@@ -854,9 +888,11 @@ def test_a_claim_not_in_the_table_that_was_refuted_is_said_to_be(
     ]
     # The casts were decided for both, and are said to be no more than claims.
     assert [line for line in block if "not in the table" in line][:2] == [
-        "    not in the table: split(i, 4) renames the instances of scale one for "
+        "    not in the table: split(scale.i, 4) renames the instances of scale one "
+        "for "
         "one",
-        "    not in the table: the order after split(i, 4) runs every dependence "
+        "    not in the table: the order after split(scale.i, 4) runs every "
+        "dependence "
         "of scale forward",
     ]
 
@@ -875,7 +911,7 @@ def test_the_json_says_a_claim_not_in_the_table_was_refuted_and_why(
         "\n\nclass Triple(Scale):\n"
         "    def __call__(self, x, y):\n"
         "        y[...] = 3.0 * x\n\n\n"
-        'tripled = Schedule(Triple()).split("i", 4)\n'
+        "tripled = Schedule(Triple()).split(scope(scale).i, 4)\n"
     )
     path = write_fixture(tmp_path, body)
     out_path = tmp_path / "ledger.json"
@@ -939,8 +975,8 @@ def test_a_schedule_of_a_schedule_is_a_schedule_of_its_kernel(tmp_path, capsys) 
         "def double(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):\n"
         "    for i in x.dom:\n"
         "        y[i] = 2.0 * x[i]\n\n\n"
-        'plain = Schedule(double).split("i", 2)\n'
-        'nested = Schedule(Schedule(double)).split("i", 2)\n\n\n'
+        'plain = Schedule(double).split(double.i, 2)\n'
+        'nested = Schedule(Schedule(double)).split(double.i, 2)\n\n\n'
         "def example_inputs():\n"
         '    return {"x": Arr.from_numpy(np.arange(4.0)), "y": Arr.zeros(4)}\n'
     )
@@ -975,8 +1011,8 @@ def test_a_run_of_a_schedule_of_a_schedule_is_compared_with_its_kernel(
     of one schedule of one kernel is (#98).
     """
     body = NESTED.format(
-        schedules='plain = Schedule(double).split("i", 2)\n'
-        'nested = Schedule(Schedule(double)).split("i", 2)'
+        schedules='plain = Schedule(double).split(double.i, 2)\n'
+        'nested = Schedule(Schedule(double)).split(double.i, 2)'
     )
     path = write_fixture(tmp_path, body)
     out_path = tmp_path / "ledger.json"
@@ -985,7 +1021,7 @@ def test_a_run_of_a_schedule_of_a_schedule_is_compared_with_its_kernel(
     assert "ran double on the c target" not in out
     assert out.count("  y: difference 0 within 1e-06 (approx) -> tested") == 2
     facts = json.loads(out_path.read_text(encoding="utf-8"))
-    steps = "[c].split('i', 2, inner='i_inner', outer='i_outer')"
+    steps = "[c].split(double.i, 2)"
     agreements = [
         (fact["id"].split(":", 2)[2], fact["status"])
         for fact in facts
@@ -1000,17 +1036,19 @@ def test_a_kernel_only_a_schedule_of_a_schedule_names_is_scheduled(
     # The set of scheduled kernels was built from each schedule's source, the
     # inner schedule here, so double also ran through the identity, as if
     # nothing scheduled it (#98).
-    body = NESTED.format(schedules='nested = Schedule(Schedule(double)).split("i", 2)')
+    body = NESTED.format(
+        schedules="nested = Schedule(Schedule(double)).split(double.i, 2)"
+    )
     path = write_fixture(tmp_path, body)
     out_path = tmp_path / "ledger.json"
     assert main(["run", str(path), "--json", str(out_path)]) == 0
     out = capsys.readouterr().out
     assert [line for line in out.splitlines() if line.startswith("double: ")] == [
-        "double: Schedule(double, target='c').split(i, 2)"
+        "double: Schedule(double, target='c').split(double.i, 2)"
     ]
     facts = json.loads(out_path.read_text(encoding="utf-8"))
     (agreement,) = [fact for fact in facts if fact["kind"] == "agreement"]
-    steps = "[c].split('i', 2, inner='i_inner', outer='i_outer')"
+    steps = "[c].split(double.i, 2)"
     assert agreement["id"].endswith(f":{steps}")
     assert agreement["status"] == "tested"
 
@@ -1027,7 +1065,7 @@ from __future__ import annotations
 import numpy as np
 from lanky.prelude import Nat, Real
 
-from loopty import Arr, Fin, Schedule, kernel, reduce_sum, when
+from loopty import Arr, Fin, Schedule, kernel, reduce_sum
 
 
 @kernel
@@ -1038,11 +1076,11 @@ def clear_next(
 ):
     for r in y.dom:
         y[r] = reduce_sum(val[r, j] for j in val.dom[r])
-        with when(r + 1 < y.dom.size):
+        if r + 1 < y.dom.size:
             cnt[r + 1] = 0
 
 
-split = Schedule(clear_next).split("r", 2)
+split = Schedule(clear_next).split(clear_next.r, 2)
 
 
 def example_inputs():
@@ -1077,7 +1115,7 @@ def rescan(
         y[r] = reduce_sum(val[r, j] for j in val.dom[r])
 
 
-split = Schedule(rescan).split("r", 2)
+split = Schedule(rescan).split(rescan.r, 2)
 
 
 def example_inputs():
@@ -1129,7 +1167,10 @@ def test_run_lists_the_layout_fact_a_cast_rests_on(tmp_path, capsys) -> None:
     assert monotone["effective"] == "decided"
     assert [fact["kind"] for fact in facts.values()].count("layout") == 1
     out = capsys.readouterr().out
-    assert "stay inside their buffers and apart while S1 write cnt" in out
+    assert (
+        "stay inside their buffers and apart while cnt[r + 1] = 0 (fixture.py:19) "
+        "writes cnt"
+    ) in out
 
 
 MOVES_ROWS = (
@@ -1141,7 +1182,7 @@ MOVES_ROWS = (
         "    val:",
     )
     .replace(
-        "        with when(r + 1 < y.dom.size):\n            cnt[r + 1] = 0\n",
+        "        if r + 1 < y.dom.size:\n            cnt[r + 1] = 0\n",
         "        off[r] = s[r]\n",
     )
     .replace(
@@ -1203,8 +1244,8 @@ class Broken(Scale):
 
 broken = Broken()''',
 ).replace(
-    'sched = Schedule(scale).split("i", 4)',
-    'first = Schedule(broken)\nsched = Schedule(scale).split("i", 4)',
+    "sched = Schedule(scale).split(scope(scale).i, 4)",
+    "first = Schedule(broken)\nsched = Schedule(scale).split(scope(scale).i, 4)",
 )
 
 
@@ -1234,25 +1275,27 @@ def test_run_reports_an_example_inputs_that_raises(tmp_path, capsys) -> None:
 
 
 FLIPPED = '''
-"""A guard that is an integer natively: ~ on a Python bool is bitwise."""
+"""A truth value that is an integer natively: ~ on a Python bool is bitwise."""
 
 from __future__ import annotations
 
 import numpy as np
-from lanky.prelude import Real
+from lanky.prelude import Bool, Real
 
-from loopty import Arr, Fin, kernel, when
+from loopty import Arr, Fin, kernel
 
 
 @kernel
-def flipped(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):
+def flipped(x: Arr[Fin[n], Real], y: Arr[Fin[n], Bool]):
     for i in y.dom:
-        with when(~(i > 0)):
-            y[i] = x[i]
+        y[i] = (x[i] > 0.0) | ~(i > 0)
 
 
 def example_inputs():
-    return {"x": Arr.from_numpy(np.arange(4.0)), "y": Arr.zeros(4)}
+    return {
+        "x": Arr.from_numpy(np.arange(4.0)),
+        "y": Arr.zeros(4, dtype=np.bool_),
+    }
 '''
 
 
@@ -1295,20 +1338,20 @@ from __future__ import annotations
 
 from lanky.prelude import Real
 
-from loopty import Arr, Fin, kernel, when
+from loopty import Arr, Fin, kernel
 
 
 @kernel
 def clipped(a: Real, x: Arr[Fin[m], Real], y: Arr[Fin[n], Real]):
     for i in y.dom:
-        with when((i < a) & (a < x.dom.size)):
+        if (i < a) & (a < x.dom.size):
             y[i] = x[i]
 
 
 @kernel
 def stated(u: Arr[Fin[n], Real], v: Arr[Fin[n], Real]):
     for i in u.dom:
-        with when(i + 1 <= u.dom.size):
+        if i + 1 <= u.dom.size:
             v[i] = u[i + 1]
 '''
 
@@ -1329,7 +1372,9 @@ def test_check_says_a_witness_may_be_one_the_guard_masks(tmp_path, capsys) -> No
     out = capsys.readouterr().out
     assert code == 1
     lines, header = refutation_block(out, "clipped at ")
-    assert lines[header].endswith("x[i] is in bounds for every instance of S0")
+    assert lines[header].endswith(
+        "x[i] is in bounds for every instance of y[i] = x[i] (fixture.py:15)"
+    )
     block = lines[header + 1 : header + 6]
     assert block[0].startswith("  witness: ")
     assert block[1].startswith("  cells x[i] reaches are cells x has, except")
@@ -1342,7 +1387,9 @@ def test_check_says_a_witness_may_be_one_the_guard_masks(tmp_path, capsys) -> No
     assert block[4].startswith("    a < m, which compares with the scalar a")
 
     lines, header = refutation_block(out, "stated at ")
-    assert lines[header].endswith("u[i + 1] is in bounds for every instance of S0")
+    assert lines[header].endswith(
+        "u[i + 1] is in bounds for every instance of v[i] = u[i + 1] (fixture.py:22)"
+    )
     assert lines[header + 2].startswith("  cells u[i + 1] reaches are cells u has")
     assert "the domain is wider" not in "\n".join(lines[header:])
 

@@ -80,8 +80,15 @@ __all__ = [
     "exactness_of_output",
 ]
 
-def _resolve(obj: Any, target: str | None = None) -> tuple[Term, Any, Lowering, str]:
-    """The term, the loopy kernel, the lowering and the target of ``obj``."""
+def _resolve(
+    obj: Any, target: str | None = None, *, running: bool = True
+) -> tuple[Term, Any, Lowering, str]:
+    """The term, the loopy kernel, the lowering and the target of ``obj``.
+
+    ``running`` is false for code that is only printed (:func:`emit_code`),
+    which a device schedule checked where pyopencl is not installed has
+    too; running one is refused (:func:`loopty.lower.require_pyopencl`).
+    """
     from loopty.schedule import Schedule
 
     if isinstance(obj, Schedule):
@@ -95,21 +102,24 @@ def _resolve(obj: Any, target: str | None = None) -> tuple[Term, Any, Lowering, 
         # names the limit it hits instead of throwing from code generation.
         obj.require_buildable()
         # A device schedule built where pyopencl is not installed is checked,
-        # and its code is generated and run where pyopencl is.
-        from loopty.lower import require_pyopencl
+        # and its code generated, there, and run where pyopencl is.
+        if running:
+            from loopty.lower import require_pyopencl
 
-        require_pyopencl(obj.kernel)
+            require_pyopencl(obj.kernel)
         return obj.term, obj.kernel, obj.lowering, obj.target
     term = obj if isinstance(obj, Term) else getattr(obj, "term", None)
     if term is None and hasattr(obj, "trace"):
         term = obj.trace()
     if not isinstance(term, Term):
         raise TypeError(f"{obj!r} is neither a kernel, a schedule, nor a term")
+    from loopty.hoist import hoist_invariants
     from loopty.lower import lower_generic, require_pyopencl
 
     lowering = lower_generic(term, target or "c")
-    require_pyopencl(lowering.kernel)
-    return term, lowering.kernel, lowering, target or "c"
+    if running:
+        require_pyopencl(lowering.kernel)
+    return term, hoist_invariants(lowering.kernel), lowering, target or "c"
 
 
 def _off_the_stack(
@@ -481,7 +491,10 @@ class LoopyExecutor:
         (:func:`loopty.refusal.refuse_where_native_does`, #153), or, for a
         program's call after a checked point, once the run has shown the
         point passed: where it failed, the point's error is raised, as
-        natively.
+        natively. Such a run is of the program stopped where it reaches the
+        call (:func:`loopty.compose.stopped_at`, #176), so that the caller's
+        arrays hold what the calls before it wrote, as natively, and not what
+        the refused call and the calls after it computed.
         """
         term, kernel, lowering, target_name = _resolve(obj, self.target)
         names = [name for name, _ in term.params]
@@ -501,10 +514,13 @@ class LoopyExecutor:
         )
         if term.temporaries:
             # A program's own array whose length the sizes make negative,
-            # which numpy refuses natively when the program makes it.
-            from loopty.contract import made_extents, resolve_sizes
+            # which numpy refuses natively when the program makes it, or
+            # whose length is read off a fiber the sizes leave out.
+            from loopty.contract import made_extents, made_fibers, resolve_sizes
 
-            made_extents(term.temporaries, resolve_sizes(dict(term.params), supplied))
+            sizes = resolve_sizes(dict(term.params), supplied)
+            made_fibers(term.fibers, sizes)
+            made_extents(term.temporaries, sizes)
         # The differential runs on copies; this run writes in place.
         writeable_outputs(dict(term.params), supplied, lowering.results)
         inherited_storage(term.array_types, term.temporaries_like, supplied)
@@ -513,6 +529,17 @@ class LoopyExecutor:
         from loopty.refusal import naming_the_fix, refuse_where_native_does
 
         refused = refuse_where_native_does(term, supplied)
+        if refused is not None:
+            # A program's call refused after a checked point (#176): natively
+            # the program stops in it, with what the calls before it wrote,
+            # so what runs is the program stopped at the call by a flag of
+            # its own, unscheduled, and its checked points before it.
+            from loopty.compose import stopped_at
+
+            stopped, flag = stopped_at(term, refused.statement)
+            term, kernel, lowering, _target = _resolve(stopped, target_name)
+            supplied[flag] = np.ones(1, dtype=np.int64)
+            kwargs = {**kwargs, flag: supplied[flag]}
         layouts = _declared_layouts(term, lowering, supplied)
         call = _call_arguments(term, lowering, args, kwargs, layouts)
         call, empty = _pad_empty_arrays(call, lowering)
@@ -549,7 +576,7 @@ class LoopyExecutor:
         ):
             # The checked points before the refused call passed, so natively
             # it ran, and stopped where its arithmetic leaves its type, before
-            # any point after it.
+            # any point after it; the compiled program stopped before it.
             raise refused
         if failed:
             # A checked point of a program: the statements after it did not
@@ -675,7 +702,7 @@ class LoopyExecutor:
         A :class:`~loopty.trace.TraceError` from the native run is not raised
         but returned, as a ``refuted`` agreement fact with the refusal as its
         ``reason``, and the scheduled run is not made: the body is refused for
-        its spelling (a ``when`` guard whose native value is an integer, say),
+        its spelling (an integer stored into an array of truth values, say),
         whatever the input, so there is nothing to compare the compiled run
         with. The faithfulness fact counts the same refusal as a disagreement
         (:mod:`loopty.faithful`). Anything else the body raises is the input's
@@ -971,13 +998,16 @@ def emit_code(obj: Any, target: str | None = None) -> str:
     refusal of loopy's named as a run's is
     (:func:`loopty.refusal.naming_the_fix`), and, on a C target, with a
     program's arrays as the arguments a run allocates
-    (:func:`loopty.lower.heap_temporaries`).
+    (:func:`loopty.lower.heap_temporaries`). A device schedule's code needs
+    no pyopencl and no device: where pyopencl is not installed it is
+    generated on :class:`loopty.lower.CheckedOpenCLTarget`, and is the code
+    the device runs where it is (#291).
     """
     import loopy as lp
 
     from loopty.refusal import naming_the_fix
 
-    term, kernel, lowering, target = _resolve(obj, target)
+    term, kernel, lowering, target = _resolve(obj, target, running=False)
     if target != "opencl":
         kernel, _heap = _off_the_stack(kernel, term)
     with naming_the_fix(lowering):

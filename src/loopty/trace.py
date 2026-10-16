@@ -1,6 +1,6 @@
-"""Tracing: run the body once, record what it did.
+"""Tracing: run the body once per branch, record what it did.
 
-Kernel bodies are not parsed. They are executed once against symbolic arrays:
+Kernel bodies are not parsed. They are executed against symbolic arrays:
 indexing a proxy builds a pymbolic subscript, assigning to one records a
 :class:`~loopty.term.Stmt` tagged with the calling frame's file and line,
 iterating a proxy's ``.dom`` yields a single fresh iname and pushes its bound
@@ -9,28 +9,45 @@ a :class:`~loopty.term.Reduction`. Source maps are frame line numbers, so there 
 no AST pass and no span bookkeeping. The body that traces is the body that runs:
 the same source, given real arrays, is the reference implementation.
 
-Execution-based tracing needs two explicit symbolic constructs where ordinary
-Python syntax would otherwise force a concrete decision.
+``for box, a, b in R.dom:`` is the three loops ``for box in R.dom``, ``for a
+in R.dom[box]`` and ``for b in R.dom[box, a]`` in one line: the iterator reads
+the names off the ``for`` (:func:`loopty.bytecode.for_targets`) and opens a
+loop level for each, as it does natively (:class:`loopty.arr.Dom`).
 
-``with when(cond):`` is the guard, because a Python ``if`` on a symbolic value
-cannot be traced: tracing would have to pick a branch, and the value is not
-known until the kernel runs. A symbolic condition asked for its truth value
-raises :class:`TraceError` naming ``when`` as the fix. Under tracing ``when``
-pushes the condition onto the guard stack, and the statements recorded inside
-carry it and have it intersected into their domain where isl can state it, an
-affine comparison of integers (loop variables, sizes, scalars of an integral
-sort), so a guarded access is in bounds exactly where it is executed. Any other
-conjunct is left to the statement's guard, evaluated at run time, and the
-statement records it as leaving its domain wider than the instances that write
-(:attr:`loopty.term.Stmt.unnarrowed`). Under plain
-``python`` it masks the writes of the block rather than skipping them, which is
-what keeps one body serving as both the specification and the reference run.
+**Branches.** A Python ``if`` on a traced value, an ``elif``, ``and``, ``or``,
+``not``, a conditional expression ``a if c else b`` and an ``assert`` each ask
+a symbolic condition for its truth value. The answer comes from the tracer
+(:meth:`Tracer.decide`), which runs the body again until every condition it
+was asked has been answered both ways: one run per path through the body's
+branches. A condition asked twice in one run gets the answer it got first, as
+``x and y`` asks ``x`` twice when ``x`` is false. Each statement carries the
+answers on its path, its *path condition*, which is its guard: intersected into
+its domain where isl can state it, an affine comparison of integers (loop
+variables, sizes, scalars of an integral sort), so a guarded access is in
+bounds exactly where it is executed, and left to the statement's guard,
+evaluated at run time, otherwise (:attr:`loopty.term.Stmt.unnarrowed`): a
+condition on data, ``if x[i] > 0``, is such a guard. The native run executes
+the real ``if``, so a branch not taken computes nothing.
+
+Every run records the statements of its path, and the runs are joined into one
+term (:meth:`Tracer.joined`). A statement after an ``if``/``else`` runs on
+both paths and is recorded once: the two runs' records of it, with the paths
+``g and c`` and ``g and not c``, are one statement under ``g``. A statement
+whose value two paths choose between, ``f[i] = vn[i] * (a[i] if vn[i] > 0 else
+b[i])``, is one statement too where the condition is on data, its value a
+select, pymbolic's ``If``, which C computes with ``?:`` (#266). A path isl
+shows to be empty (``a < 2 and a == 3``) is left at the condition that
+emptied it, and records nothing. The runs are capped (:data:`MAX_RUNS`), since
+``k`` conditions in sequence make ``2^k`` paths, and a ``while`` on a traced
+condition is refused, since its paths have no bound.
 
 ``loopty.reduce_sum`` marks the reduction explicitly, so that the reduced domain
 is known rather than guessed from an accumulator loop. It takes an ordinary
 generator expression; internally Lanky's binder tracing supplies the bound
 variable and its name, and this module only has to say what a symbolic ``.dom``
-yields when the binder tracer asks it for a point.
+yields when the binder tracer asks it for a point. The generator's ``if``
+clause is a constraint of the sum's domain; a branch inside the term it sums is
+refused by lanky, with the clause to write instead.
 
 What the tracer produces is a :class:`~loopty.term.Term`: parameters with their
 array types, the free size parameters, the statements with their isl domains,
@@ -69,6 +86,7 @@ from __future__ import annotations
 
 import builtins
 import contextlib
+import dataclasses
 import dis
 import functools
 import importlib.util
@@ -110,6 +128,7 @@ from lanky.terms import (
 )
 
 from loopty.arr import Arr, ArrSpec
+from loopty.bytecode import for_targets, loops_back
 from loopty.domain import Polyhedron, Union, index_domain
 from loopty.flow import (
     ISL_KEYWORDS,
@@ -121,10 +140,21 @@ from loopty.flow import (
 )
 from loopty.idx import Reflections
 from loopty.source import frame_statement_text, statement_text
-from loopty.term import Access, ArrType, Difference, Reduction, Stmt, Term, subtracted
+from loopty.term import (
+    Access,
+    ArrType,
+    Binder,
+    Callsite,
+    Difference,
+    Reduction,
+    Stmt,
+    Term,
+    subtracted,
+)
 
 __all__ = [
     "EXACTNESS_ORDER",
+    "MAX_RUNS",
     "TraceError",
     "Tracer",
     "SymArr",
@@ -151,9 +181,9 @@ def _abandoned_message(inames: Sequence[str]) -> str:
         "with every loop taking one generic point, and a 'break' or a 'return' "
         "inside a traced loop skips the point at which the loop level is "
         "closed, so every statement after it is recorded under a loop variable "
-        "the body has already left. Write 'with when(condition):' around the "
-        "part that should not run instead: it records the condition, narrows "
-        "the statement's domain, and masks the writes under plain python."
+        "the body has already left. Put the part that should not run under an "
+        "'if condition:' instead: the trace runs each branch and records the "
+        "condition, which narrows the statement's domain."
     )
 
 
@@ -327,7 +357,7 @@ def _refuse_table_bounds(tracer: Tracer) -> None:
             "before the loop it bounds, from its arguments. Pass the bounds as "
             "an array of whole numbers (counts: Arr[Fin[k], Nat]), as a ragged "
             "family's counts are, or write the loop over the largest bound with "
-            "a when(...) guard"
+            "an if on the table's value inside it"
         )
 
 
@@ -436,9 +466,10 @@ def _loop_domain(loop: _Loop) -> str:
     return _domain_text(dom) if isinstance(dom, SymDom) else "its domain"
 
 
-def _escaped_message(loops: Sequence[_Loop], cell: str, where: str) -> str:
-    """What to say about a statement that mentions loops it is not inside.
+def _escaped_message(loops: Sequence[_Loop], what: str, where: str) -> str:
+    """What to say about a write or a condition that mentions loops it is not in.
 
+    ``what`` names it, ``the write to y[0]`` or ``the condition 'i > 0'``.
     Each loop is named by its ``for`` target and line rather than by its iname
     alone, which differs from the target when the target is reused: after
     ``for i in v.dom: for i in u.dom[i]: ...`` the ``i`` the outer body reads
@@ -456,7 +487,7 @@ def _escaped_message(loops: Sequence[_Loop], cell: str, where: str) -> str:
     )
     variable = _loop_variable(loops[0])
     return (
-        f"the write to {cell} at {where} mentions the loop "
+        f"{what} at {where} mentions the loop "
         f"variable{'s' if many else ''} {listed}, outside "
         f"{'those loops' if many else 'that loop'}. Tracing runs the body once "
         "with every loop taking one generic point, so a value that a Python "
@@ -567,18 +598,18 @@ def _carried_message(loop: _Loop, carried: Sequence[_Carried]) -> str:
 class TraceError(RuntimeError):
     """A body did something tracing cannot follow, with the fix in the message.
 
-    The archetype is a Python ``if`` on a symbolic value: the message names the
-    ``with when(...)`` replacement. Data-dependent ``while``, ``break``,
-    ``return`` out of a loop, Python's builtin ``sum`` over a symbolic domain,
-    state that a Python name, a global, or a list, dict or set carries from one
-    loop iteration to the next, a loop whose code can ask which names are
-    bound, an operation on a whole array, a reduction condition its domain
-    cannot state, a change to Python state outside the arrays, and a call that
-    prints, reads, opens a file or draws a random number are the other cases.
+    A ``while`` on a traced condition, ``break`` or ``return`` out of a loop,
+    more paths through the body's branches than :data:`MAX_RUNS`, a branch
+    that raises, Python's builtin ``sum`` over a symbolic domain, state that a
+    Python name, a global, or a list, dict or set carries from one loop
+    iteration to the next, a loop whose code can ask which names are bound, an
+    operation on a whole array, a reduction condition its domain cannot state,
+    a change to Python state outside the arrays, and a call that prints,
+    reads, opens a file or draws a random number are the cases.
 
-    One case is raised by a native run as well as by a trace: a ``when`` guard
-    whose value is an integer rather than a truth value, which is what ``~``
-    makes of a Python bool.
+    Two are raised by a native run as well as by a trace: ``with when(...)``,
+    which loopty 0.4 replaced by a plain ``if``, and an integer stored into an
+    array of truth values, which is what ``~`` makes of a Python bool.
     """
 
 
@@ -614,6 +645,14 @@ class _Loop:
     #: render to.
     constraints: tuple[Any, ...] = ()
     texts: tuple[str, ...] = ()
+    #: Which loop of the source this is, the same in every run of the body
+    #: (:meth:`Tracer.site`), and the loop it is inside, by its key.
+    key: Any = None
+    parent: Any = None
+    #: Every name the ``for`` binds, ``box, a, b`` for each of the three
+    #: loops ``for box, a, b in R.dom`` opens: none of them is state the loop
+    #: carries, since the ``for`` binds them all before each iteration.
+    together: tuple[str, ...] = ()
 
 
 @dataclass
@@ -655,12 +694,18 @@ class _Snapshot:
 
 
 class Tracer:
-    """The state of one trace: open loops, open guards, recorded statements.
+    """The state of one trace: open loops, the path taken, recorded statements.
 
     There is one tracer per :func:`trace` call, pushed on a module-level stack
-    so that a proxy reached from anywhere in the body can find it. Statements are
-    appended in execution order, which is source order, because the body runs
-    once with every loop taking exactly one generic point.
+    so that a proxy reached from anywhere in the body can find it. The body
+    runs once per path through its branches (:meth:`decide`), with every loop
+    taking exactly one generic point, and each run's statements are appended
+    in execution order, which is source order. What a run opens (its loops,
+    its answers, its statements and calls) starts empty in each run
+    (:meth:`begin_run`); the names the term gives (loop variables, binders,
+    call labels, reflected parameters, tables) are kept across runs, each
+    given once to a place in the source (:meth:`site`), so that the runs
+    name one loop alike and can be joined (:meth:`joined`).
     """
 
     def __init__(self, name: str, params: Mapping[str, Any]) -> None:
@@ -675,11 +720,6 @@ class Tracer:
         #: in every domain and cannot collide with a size the kernel declares.
         self.reflections = Reflections(params)
         self.loops: list[_Loop] = []
-        self.guards: list[Any] = []
-        #: The value of each rule called inside a ``when`` block, by the id of
-        #: the node that stands for it, with the call as the body wrote it
-        #: (:class:`loopty.calls.Guarded`).
-        self.guarded: dict[int, tuple[Any, str]] = {}
         self.stmts: list[Stmt] = []
         self._inames: set[str] = set()
         #: The loop levels that have closed, by iname, so that a statement
@@ -727,16 +767,80 @@ class Tracer:
         #: term, by the identity of the value each made; see
         #: :meth:`unrolled_sum`.
         self.unrolled: dict[int, tuple[Any, tuple[str, int]]] = {}
+        #: Every loop of the source as it was entered, a ``for`` or a sum's
+        #: binder, with its line and the calls it is inside
+        #: (:class:`loopty.term.Binder`), which the term keeps for the
+        #: handles a schedule names its loops by (:mod:`loopty.handles`).
+        self.binder_records: list[Binder] = []
+        # {{{ the runs and their paths
+        #: The frame that calls the body, where a place in the source is
+        #: counted from (:meth:`site`); :func:`trace` sets it.
+        self.root: Any = None
+        #: The runs so far, and the answers this run gives the conditions it
+        #: asks first, the rest being ``True`` (:meth:`decide`).
+        self.runs = 0
+        self._forced: list[bool] = []
+        #: This run's answers, in the order they were given, each a
+        #: condition's index (:meth:`condition_index`) and its truth value.
+        self.answers: list[tuple[int, bool]] = []
+        #: The answers the statements recorded now are under, each with the
+        #: loops open when it was given: one given inside a loop that has
+        #: closed is no condition of what follows the loop (:meth:`path`).
+        self._literals: list[tuple[int, bool, tuple[int, ...], str]] = []
+        #: How many truth values this run was asked for; see MAX_ASKS. And
+        #: where, by the frame's code, its instruction and the open loops.
+        self._asks = 0
+        self._asked_at: set[Any] = set()
+        #: The values this run asked the truth of, by identity, each with its
+        #: condition's index: a value asked again is the same condition.
+        self._asked_values: dict[int, tuple[Any, int]] = {}
+        #: Every condition asked in any run, by index, as the trace computed
+        #: it, with the line that asked it first.
+        self.conditions: list[tuple[Any, str]] = []
+        #: The write each condition is asked after, by index: the place of the
+        #: last statement before the ask that writes an array the condition
+        #: reads, or ``None``. ``if x[i] > 0:`` asked again after ``x[i] =
+        #: -x[i]`` is another condition (:meth:`condition_index`).
+        self._epochs: list[Any] = []
+        #: The guard the term is being built under: ``None`` while a run
+        #: records, since its statements are joined across runs first, and
+        #: the joined path condition while each is built (:meth:`joined`).
+        self.building: Any = None
+        #: The names given to places in the source, by the place, so that
+        #: every run names a loop, a sum's binder and a call alike.
+        self._named: dict[Any, str] = {}
+        #: How many times this run has reached each place, by the loop it is
+        #: in and the frames from the body down (:meth:`site`).
+        self._reached: dict[Any, int] = {}
+        #: Each loop of the source by its key: the loop it is inside.
+        self._loop_parents: dict[Any, Any] = {}
+        #: What this run recorded, and what every finished run did.
+        self._run: _Run = _Run()
+        self._done: list[_Run] = []
+        # }}}
 
     # {{{ calls of other kernels
 
     def call_label(self, kernel: str) -> str:
-        """The label of the next call of ``kernel``: ``dot``, then ``dot@2``."""
+        """The label of the next call of ``kernel``: ``dot``, then ``dot@2``.
+
+        A call is labelled once, where the source makes it (:meth:`site`), so
+        a call after an ``if`` is ``dot@2`` in every run, whether the branch
+        before it called ``dot`` or not.
+        """
+        place = self.site("call")
+        label = self._named.get(place)
+        if label is not None:
+            return label
         count = self._call_counts.get(kernel, 0) + 1
         self._call_counts[kernel] = count
-        return kernel if count == 1 else f"{kernel}@{count}"
+        label = kernel if count == 1 else f"{kernel}@{count}"
+        self._named[place] = label
+        return label
 
-    def bind(self, iterator: Any, binder_trace: Any, domain: Any) -> Var:
+    def bind(
+        self, iterator: Any, binder_trace: Any, domain: Any, where: str = ""
+    ) -> Var:
         """Bind a sum's binder over ``domain``, the next of ``binder_trace``'s.
 
         lanky names a binder after the generator's loop target (``k`` in
@@ -750,15 +854,33 @@ class Tracer:
 
         The binder is open until its iterator is exhausted
         (:meth:`release`), which is where a call made inside the generator
-        reads it as one of the points the call is made at.
+        reads it as one of the points the call is made at. ``where`` is the
+        line of the generator's ``for`` clause, which the binder's record
+        keeps (:class:`loopty.term.Binder`).
         """
         position = len(binder_trace.binders)
-        if self.inlining and position < len(binder_trace.names):
-            name = binder_trace.names[position]
-            if self._binder_clashes(name):
-                binder_trace.names[position] = self._fresh_binder(name)
+        stem = None
+        if position < len(binder_trace.names):
+            stem = binder_trace.names[position]
+        place = self.site("binder")
+        named = self._named.get(place)
+        if named is not None and stem is not None:
+            # The name an earlier run gave this binder, so that the runs agree.
+            binder_trace.names[position] = named
+        elif self.inlining and stem is not None and self._binder_clashes(stem):
+            binder_trace.names[position] = self._fresh_binder(stem)
         var = binder_trace.bind(domain)
+        self._named.setdefault(place, var.name)
         self.binders.add(var.name)
+        self.binder_records.append(
+            Binder(
+                var.name,
+                stem or var.name,
+                where,
+                sum=True,
+                scope=tuple(label for label, _key in self.inlining),
+            )
+        )
         self.open_binders.append((iterator, var, domain, binder_trace))
         return var
 
@@ -873,8 +995,14 @@ class Tracer:
         owner: Any = None,
         frame: Any = None,
         constraints: Callable[[Var], Sequence[Any]] | None = None,
+        together: tuple[str, ...] = (),
     ) -> Var:
         """Open a loop level over ``0 <= i < bound`` and return its variable.
+
+        The variable is named once for the place in the source the loop is
+        at (:meth:`site`), so every run of the body names it alike.
+        ``together`` are the names the ``for`` binds when it binds more than
+        one, ``for box, a, b in R.dom``.
 
         ``constraints`` gives, for the loop's variable, whatever else bounds
         the loop: the constraints of the fiber of a polyhedral domain it runs
@@ -893,9 +1021,27 @@ class Tracer:
         A frame whose code can ask whether a name is bound is refused here,
         before anything is copied; see :func:`_binding_probes`.
         """
-        name = self.fresh_iname(hint)
+        place = self.site("loop")
+        parent = self.loops[-1].key if self.loops else None
+        name = self._named.get(place)
+        if name is None:
+            name = self.fresh_iname(hint)
+            self._named[place] = name
         var = Var(name)
-        loop = _Loop(name, var, bound, owner, target=hint)
+        loop = _Loop(
+            name, var, bound, owner, target=hint, key=place, parent=parent,
+            together=together,
+        )
+        self._loop_parents[place] = parent
+        self._run.children.setdefault(parent, []).append(("loop", place))
+        self.binder_records.append(
+            Binder(
+                name,
+                hint or name,
+                _location(frame) if frame is not None else "",
+                scope=tuple(label for label, _key in self.inlining),
+            )
+        )
         if constraints is not None:
             loop.constraints = tuple(constraints(var))
             dom = getattr(owner, "dom", None)
@@ -919,7 +1065,8 @@ class Tracer:
         would otherwise see it change as statements are recorded. The symbolic
         arrays and domains need no entry: they are not containers.
         """
-        return {id(value) for value in (*vars(self).values(), _TRACERS, _MASKS)}
+        run = vars(self._run).values()
+        return {id(value) for value in (*vars(self).values(), *run, _TRACERS)}
 
     def leave_loop(self, owner: Any = None, frame: Any = None) -> None:
         """Close the innermost loop level, refusing to close somebody else's.
@@ -970,13 +1117,12 @@ class Tracer:
         than the container's own elements, such as ``acc[0][0] += 1``, is not
         seen, and neither is an attribute an object holds.
 
-        Three things are left alone on purpose:
+        Two things are left alone on purpose:
 
         * the loop's own target, which the ``for`` rebinds before every
-          iteration, so no iteration can read the value the previous one left;
-        * a name bound to a :class:`when`, the object ``with when(...) as g``
-          binds, which carries no data: its condition is recorded on the
-          statements it guards;
+          iteration, so no iteration can read the value the previous one left,
+          and the other names of the same ``for``, ``a`` and ``b`` of ``for
+          box, a, b in R.dom``;
         * a name whose value before the loop already mentions the variable of
           a loop that has closed, such as a ``for`` target reused by a later
           loop, and likewise a global, or an element of a container, whose
@@ -1003,12 +1149,15 @@ class Tracer:
             for name, before in values.items():
                 if name == loop.target and kind == stored:
                     continue
+                if name in loop.together and kind == stored:
+                    # Another name of the same for, bound before each pass.
+                    continue
                 value = now[name] if name in now else _UNBOUND
                 if loop.target is None and value is loop.var:
                     # The target could not be read off the bytecode; the name
                     # still holding the loop's own variable is that target.
                     continue
-                if _same_value(before, value) or isinstance(value, when):
+                if _same_value(before, value):
                     continue
                 if _loop_variables(before, closed):
                     continue
@@ -1061,28 +1210,284 @@ class Tracer:
 
     # }}}
 
-    # {{{ guards
+    # {{{ branches: the path one run takes
 
-    def push_guard(self, condition: Any) -> None:
-        """Open a ``when`` block."""
-        self.guards.append(condition)
+    def begin_run(self, forced: Sequence[bool]) -> None:
+        """Start a run of the body that answers its first conditions ``forced``.
 
-    def pop_guard(self) -> None:
-        """Close the innermost ``when`` block."""
-        self.guards.pop()
+        Everything a run opens starts empty: its loops, its answers, the
+        statements and calls it records. The names given to places in the
+        source are kept (:meth:`site`).
+        """
+        self.runs += 1
+        self._forced = list(forced)
+        self.answers = []
+        self._literals = []
+        self._asks = 0
+        self._asked_at = set()
+        self._asked_values = {}
+        self.loops = []
+        self.open_binders = []
+        self.inlining = []
+        self._path = []
+        self._counters = [0]
+        self.stmts = []
+        self.calls = []
+        self.binder_records = []
+        self._reached = {}
+        self._run = _Run()
+
+    def end_run(self, finished: bool) -> None:
+        """Keep what the run recorded, unless it stopped at a path isl shows empty."""
+        if finished:
+            self._run.binders = list(self.binder_records)
+            self._run.answers = dict(self.answers)
+            self._done.append(self._run)
+
+    def site(self, kind: str) -> Any:
+        """Which place in the source the body is at, the same in every run.
+
+        The frames from the body's own down to the caller of this, each by its
+        code and the instruction it is at, inside the innermost open loop,
+        and counted: the second ``for`` a helper opens, called twice in a row,
+        is another place than the first. A loop, a statement, a sum's binder
+        or a call at one place is the same one in every run of the body,
+        whichever path led there, and is named alike (:meth:`enter_loop`,
+        :meth:`bind`, :meth:`call_label`) and joined (:meth:`joined`).
+        """
+        frames: list[tuple[Any, int]] = []
+        frame = sys._getframe(1)
+        while frame is not None and frame is not self.root:
+            frames.append((frame.f_code, frame.f_lasti))
+            frame = frame.f_back
+        parent = self.loops[-1].key if self.loops else None
+        place = (kind, parent, tuple(frames))
+        count = self._reached.get(place, 0)
+        self._reached[place] = count + 1
+        return (*place, count)
+
+    def condition_index(self, condition: Any, where: str, epoch: Any = None) -> int:
+        """The index of ``condition`` among every condition any run asked.
+
+        One condition is one index wherever it is asked, as long as no
+        statement between the asks writes an array it reads: ``epoch`` is the
+        place of the last such write before this ask (:meth:`_epoch`), and a
+        condition asked after another write is another index, which a run
+        answers apart from the first.
+        """
+        for index, (known, _where) in enumerate(self.conditions):
+            if self._epochs[index] == epoch and _same(known, condition):
+                return index
+        self.conditions.append((condition, where))
+        self._epochs.append(epoch)
+        return len(self.conditions) - 1
+
+    def _epoch(self, condition: Any) -> Any:
+        """Where this run last wrote an array ``condition`` reads, or ``None``.
+
+        The place (:meth:`site`) of the statement, which every run that
+        recorded it names alike.
+        """
+        reads = _arrays_read(condition)
+        if not reads:
+            return None
+        for record in reversed(self._run.records):
+            if record.stmt.assignee.array in reads:
+                return record.key
+        return None
+
+    def decide(self, condition: Any, frame: Any) -> bool:
+        """Answer the truth value a branch of the body asks ``condition`` for.
+
+        ``frame`` is the frame that asks, the body's or a helper's. The first
+        conditions a run asks are answered as :meth:`begin_run` was told, and
+        every one after them ``True``; :func:`trace` runs the body again with
+        each of those answered ``False``. A condition this run has answered
+        already gets the same answer, since one run is one path: ``x and y``
+        asks ``x`` twice when it is false, and ``if a < 2:`` twice in a row
+        branches alike. Computed again after the run wrote an array it
+        reads, it is another condition (:meth:`condition_index`): ``if x[i] >
+        0:`` after ``x[i] = -x[i]`` is answered apart. The value a name holds,
+        ``flag = x[i] > 0`` asked as ``if flag:``, is the condition it was.
+
+        The condition is checked as any value the body computes is: ``~`` of
+        a Python bool is refused (:func:`_refuse_bitwise`), since natively it
+        is the integer ``-2`` or ``-1``, which Python's ``if`` takes as true,
+        and so is a variable of a loop that has closed, which a Python name
+        carried past it (:func:`_escaped_message`). A ``while`` on it is
+        refused: its paths have no bound. So is a run that has asked more
+        than :data:`MAX_ASKS` times, which a loop around a branch that never
+        leaves it does. Where the answer leaves a path isl shows to be empty
+        (``a < 2`` and then ``a == 3``), the run stops (:class:`_EmptyPath`):
+        no point takes it, natively or compiled.
+        """
+        where = _location(frame)
+        sorts = {**self.params, **self.array_types}
+        held = condition
+        condition = _exact_guard(condition, self)
+        # Python's own if: nothing refuses the integer ~ makes of a Python
+        # bool natively, so the trace refuses it wherever it is.
+        _refuse_bitwise(condition, sorts, where)
+        _refuse_arithmetic(condition, sorts, where)
+        escaped = _loop_variables(
+            condition, self._inames, bound=self.inames, reflections=self.reflections
+        )
+        if escaped:
+            loops = [self._closed[name] for name in sorted(escaped)]
+            raise TraceError(
+                _escaped_message(loops, f"the condition {_shown(condition)!r}", where)
+            )
+        asking = (frame.f_code, frame.f_lasti, tuple(id(loop) for loop in self.loops))
+        if asking in self._asked_at and loops_back(frame.f_code, frame.f_lasti):
+            # The second pass of a while on it: the first may be an if
+            # ending a while True, which asks once per pass as well.
+            raise TraceError(_while_message(condition, where))
+        self._asked_at.add(asking)
+        self._asks += 1
+        if self._asks > MAX_ASKS:
+            raise TraceError(_unending_message(condition, where))
+        known = self._asked_values.get(id(held))
+        if known is not None and known[0] is held:
+            # The value Python holds, flag = x[i] > 0.0, asked again: what it
+            # was when it was computed, whatever the run wrote since.
+            index = known[1]
+        else:
+            index = self.condition_index(condition, where, self._epoch(condition))
+            self._asked_values[id(held)] = (held, index)
+        for asked, value in self.answers:
+            if asked == index:
+                self._literal(index, value, where)
+                return value
+        position = len(self.answers)
+        value = self._forced[position] if position < len(self._forced) else True
+        self.answers.append((index, value))
+        self._literal(index, value, where)
+        return value
+
+    def _literal(self, index: int, value: bool, where: str) -> None:
+        """Put the answer on the path of what follows, unless it is on it already.
+
+        Where isl shows the path with this answer to be empty, the run stops
+        (:class:`_EmptyPath`); where it shows the path with the other answer
+        to be, this one holds wherever the path does, ``assert i < n`` in a
+        loop over ``Fin[n]``, and says nothing a guard needs.
+        """
+        if any(known == index for known, _value, _term in self.path()):
+            return
+        term = self._said(index, value)
+        if self._empty_with(term):
+            raise _EmptyPath
+        if self._empty_with(self._said(index, not value)):
+            return
+        self._literals.append(
+            (index, value, tuple(id(loop) for loop in self.loops), where, term)
+        )
+        if _arrays_read(self.conditions[index][0]):
+            # Where it went on the path among the statements, for what a
+            # write after it does to those under it (_refuse_stale_conditions).
+            parent = self.loops[-1].key if self.loops else None
+            self._run.children.setdefault(parent, []).append(("cond", index))
+
+    def _said(self, index: int, value: bool) -> Any:
+        """Condition ``index``, or its negation, as a guard says it here.
+
+        The negation of an equality of integers is the one side of it the
+        loops and the path leave: the ``else`` of ``if i == 0:`` in a loop
+        over ``Fin[n]`` is ``i > 0``, which isl states, where ``i != 0`` is
+        no constraint it can. Any other negation is :meth:`literal`'s.
+        """
+        from lanky.terms import Comparison
+
+        condition = self.conditions[index][0]
+        if value:
+            return condition
+        if (
+            isinstance(condition, prim.Comparison)
+            and condition.operator == "=="
+            and _integral(condition, self)
+        ):
+            for below, above in (("<", ">"), (">", "<")):
+                if self._empty_with(Comparison(condition.left, below, condition.right)):
+                    return Comparison(condition.left, above, condition.right)
+        return _negation(condition, self)
+
+    def path(self) -> tuple[tuple[int, bool, Any], ...]:
+        """The answers what the body records now is under, in the order given.
+
+        Each is ``(condition, answer, as a guard says it)``, the condition by
+        its index. An answer given inside a loop that has closed since is
+        left out: the loop's body ran at a generic point of it, and what
+        follows the loop runs whichever way the branch inside went.
+        """
+        open_loops = tuple(id(loop) for loop in self.loops)
+        return tuple(
+            (index, value, term)
+            for index, value, loops, _where, term in self._literals
+            if open_loops[: len(loops)] == loops
+        )
+
+    def literal(self, index: int, value: bool) -> Any:
+        """Condition ``index`` as a guard says it, or its negation.
+
+        The negation of an affine comparison of integers is its complement,
+        ``a >= 2`` for ``not (a < 2)``, which isl states and a reader knows;
+        that of anything else is ``not (...)``, which says what the body
+        tested, a comparison of numbers that may be NaN included.
+        """
+        condition = self.conditions[index][0]
+        return condition if value else _negation(condition, self)
+
+    def guard_of(self, path: Sequence[tuple[Any, Any, Any]]) -> Any:
+        """The conjunction of the answers ``path``, or ``None``."""
+        terms = [term for _index, _value, term in path]
+        if not terms:
+            return None
+        if len(terms) == 1:
+            return terms[0]
+        return prim.LogicalAnd(tuple(terms))
+
+    def path_guard(self) -> Any:
+        """The path condition of what the body records now, or ``None``."""
+        return self.guard_of(self.path())
+
+    def path_text(self, path: Sequence[tuple[Any, Any, Any]] | None = None) -> str:
+        """A path condition as the source says it: ``a >= 2 and x[i] > 0``."""
+        if path is None:
+            path = self.path()
+        return " and ".join(_shown(term) for _index, _value, term in path)
+
+    def _empty_with(self, term: Any) -> bool:
+        """Whether isl shows that no point of the loops takes the path and ``term``.
+
+        Only a condition isl states can empty a path; one it cannot is never
+        shown empty, whatever it says.
+        """
+        if not constraints_of(term, self):
+            return False
+        guard = self.guard_of((*self.path(), (None, None, term)))
+        try:
+            points = domain_set(
+                self.inames,
+                self.bounds,
+                constraints=(*self.loop_constraints(), *constraints_of(guard, self)),
+                reflections=self.reflections,
+            )
+            return bool(points.is_empty())
+        except Exception:  # noqa: BLE001 - a set isl cannot read is no answer
+            return False
 
     def guard(self) -> Any:
-        """The conjunction of the open guards, or ``None``."""
-        if not self.guards:
-            return None
-        if len(self.guards) == 1:
-            return self.guards[0]
-        return prim.LogicalAnd(tuple(self.guards))
+        """The guard the statement being built is under, or ``None``.
+
+        ``None`` while a run records: its statements are joined across runs
+        before any is built under its path (:meth:`joined`).
+        """
+        return self.building
 
     # }}}
 
     def domain(self) -> Any:
-        """The isl set of the enclosing loop nest, narrowed by the guards.
+        """The isl set of the enclosing loop nest, narrowed by the guard.
 
         Only a comparison isl can state narrows it: an affine one, over loop
         variables, sizes and scalars of an integral sort (see
@@ -1102,7 +1507,7 @@ class Tracer:
         )
 
     def unnarrowed(self) -> tuple[tuple[str, str], ...]:
-        """The conjuncts of the open guards that do not narrow :meth:`domain`.
+        """The conjuncts of the guard that do not narrow :meth:`domain`.
 
         Each is ``(conjunct, why)``, the conjunct as the body spells it. A
         statement records them (:attr:`loopty.term.Stmt.unnarrowed`), so that
@@ -1116,12 +1521,9 @@ class Tracer:
     def loop_domain(self) -> Any:
         """The isl set of the enclosing loop nest with no guard applied.
 
-        A ``when`` masks the write; it does not skip the block, and Python
-        evaluates the whole condition at every point of the nest before the
-        mask exists (``&`` is eager). So the reads a guard performs happen over
-        this set and not over :meth:`domain`, which the guard has narrowed: a
-        guard ``(i + 1 < n) & (flag[i + 1] != 0)`` still reads ``flag[n]`` at
-        ``i = n - 1``.
+        Where a statement's loops read their bounds, which a guard does not
+        change: isl simplifies a narrowed set, and ``k == j`` leaves no
+        constraint of the bound of ``k`` in it (#111).
         """
         return domain_set(
             self.inames,
@@ -1129,6 +1531,32 @@ class Tracer:
             constraints=self.loop_constraints(),
             reflections=self.reflections,
         )
+
+    def path_sets(
+        self, path: Sequence[tuple[int, bool, Any]]
+    ) -> tuple[tuple[Any, Any], ...]:
+        """Each answer of ``path`` with the points its condition is asked at.
+
+        Python asks the conditions of a path in turn, each where the ones
+        before it held: ``if i > 0 and x[i - 1] > 0:`` reads ``x[i - 1]``
+        only where ``i > 0``. So the reads of each condition happen over the
+        loop nest narrowed by the answers before it, where isl states them
+        (:attr:`loopty.term.Stmt.path`).
+        """
+        out: list[tuple[Any, Any]] = []
+        for position, (_index, _value, term) in enumerate(path):
+            before = self.guard_of(path[:position])
+            points = domain_set(
+                self.inames,
+                self.bounds,
+                constraints=(
+                    *self.loop_constraints(),
+                    *constraints_of(before, self),
+                ),
+                reflections=self.reflections,
+            )
+            out.append((term, points))
+        return tuple(out)
 
     def record(
         self,
@@ -1140,7 +1568,7 @@ class Tracer:
         exactness: str | None = None,
         text: str = "",
     ) -> Stmt:
-        """Append one statement instance family to the term being built.
+        """Append one statement instance family to the run being recorded.
 
         A statement that mentions the variable of a loop it is not inside is
         refused. Every statement is a family over its own inames, so such a
@@ -1154,7 +1582,9 @@ class Tracer:
         looked at too, because each reduction binder's bound is still its own
         there: ``reduce_sum(... for r in val.dom[r])`` after a loop over ``r``
         reads that loop's ``r`` in its bound, which the lowered domain can no
-        longer tell from the binder.
+        longer tell from the binder. It is what the statement is built from
+        again once the runs are joined, under its joined path
+        (:meth:`joined`); the statement recorded here has no guard.
 
         ``exactness`` is the class of an update, ``y[cell[c, j]] += v``
         (:func:`update_exactness`), which :attr:`loopty.term.Stmt.exactness`
@@ -1174,7 +1604,8 @@ class Tracer:
                 else assignee.array
             )
             loops = [self._closed[name] for name in sorted(escaped)]
-            raise TraceError(_escaped_message(loops, cell, where))
+            raise TraceError(_escaped_message(loops, f"the write to {cell}", where))
+        guard = self.guard()
         stmt = Stmt(
             id=f"S{len(self.stmts)}",
             inames=self.inames,
@@ -1182,10 +1613,10 @@ class Tracer:
             assignee=assignee,
             expr=expr,
             kind=kind,
-            guard=self.guard(),
+            guard=guard,
             where=where,
             order=(*self._path, self._position()),
-            loop_domain=self.loop_domain() if self.guards else None,
+            loop_domain=self.loop_domain() if guard is not None else None,
             unnarrowed=self.unnarrowed(),
             exactness=exactness if kind == "accumulate" else None,
             text=text,
@@ -1193,7 +1624,32 @@ class Tracer:
             unrolled=self.unrolled_in(expr if source is None else source),
         )
         self.stmts.append(stmt)
+        parent = self.loops[-1].key if self.loops else None
+        self._run.children.setdefault(parent, []).append(
+            ("stmt", len(self._run.records))
+        )
+        self._run.records.append(
+            _Record(
+                key=self.site("stmt"),
+                stmt=stmt,
+                source=expr if source is None else source,
+                path=self.path(),
+                loops=tuple(self.loops),
+            )
+        )
         return stmt
+
+    def note_call(
+        self, call: Any, points: Callable[[Any], tuple[Any, Any, Any]]
+    ) -> None:
+        """Keep the record of a call the body made, for the runs to be joined.
+
+        ``points`` gives the call's points under a guard, as ``(domain,
+        loop_domain, unnarrowed)``: the call is made where its path holds,
+        which is known once the runs are joined.
+        """
+        self.calls.append(call)
+        self._run.calls.append(_CallRecord(call, self.path(), points))
 
     def spelled(self) -> tuple[str, ...]:
         """The names the source gives the enclosing loops, outermost first.
@@ -1261,6 +1717,827 @@ class Tracer:
             bound=self.inames,
             reflections=self.reflections,
         )
+
+    # {{{ joining the runs
+
+    def joined(self) -> tuple[list[Stmt], list[Any]]:
+        """The statements and the calls of every run, joined into one term.
+
+        A statement is one place in the source writing one cell
+        (:meth:`site`), recorded by every run whose path reaches it. Its
+        records are joined two at a time where their paths differ in one
+        answer only (:meth:`_join_two`): with the same value, the statement
+        does not depend on that answer, as a statement after an ``if``/``else``
+        does not, and is one statement under the rest of the path; with
+        values that differ, where the condition is one on data that isl does
+        not state, it is one statement whose value is a select. Records that
+        cannot be joined stay statements of their own, each under its path:
+        the ``else`` of ``if a < 2 and b < 1:`` is the two paths ``a < 2 and
+        b >= 1`` and ``a >= 2``.
+
+        Each statement is built again from its records' value under its
+        joined path (:meth:`_built`), the statements are put in the source's
+        order, every run's loops and statements interleaved as each run met
+        them (:meth:`_orders`), and named ``S0``, ``S1``, ... in that order.
+        A call is joined by its label, which is its place in the source, and
+        is made where its joined path holds.
+        """
+        runs = self._done
+        groups: list[_Group] = []
+        by_place: dict[Any, list[_Group]] = {}
+        for number, run in enumerate(runs):
+            for index, record in enumerate(run.records):
+                candidates = by_place.setdefault(record.key, [])
+                group = next(
+                    (
+                        known
+                        for known in candidates
+                        if _same(known.assignee, record.stmt.assignee)
+                    ),
+                    None,
+                )
+                if group is None:
+                    group = _Group(record.stmt.assignee)
+                    candidates.append(group)
+                    groups.append(group)
+                group.entries.append(
+                    _Entry(
+                        record.path,
+                        record.source,
+                        record.stmt.expr,
+                        [(number, index)],
+                    )
+                )
+        finals: list[tuple[_Record, _Entry]] = []
+        final_of: dict[tuple[int, int], int] = {}
+        for group in groups:
+            for entry in self._merged(group.entries):
+                for key in entry.records:
+                    final_of[key] = len(finals)
+                number, index = entry.records[0]
+                finals.append((runs[number].records[index], entry))
+        self._refuse_closed_choices(finals)
+        self._refuse_stale_conditions(final_of, finals)
+        orders = self._orders(final_of, finals)
+        ranked = sorted(range(len(finals)), key=lambda final: orders[final])
+        ids = {final: f"S{rank}" for rank, final in enumerate(ranked)}
+        stmts: list[Stmt] = []
+        for final in ranked:
+            record, entry = finals[final]
+            built = self._built(record, entry.path, entry.source)
+            unrolled = tuple(
+                dict.fromkeys(
+                    item
+                    for number, index in entry.records
+                    for item in runs[number].records[index].stmt.unrolled
+                )
+            )
+            stmts.append(
+                dataclasses.replace(
+                    built, id=ids[final], order=orders[final], unrolled=unrolled
+                )
+            )
+        calls = self._joined_calls(final_of, ids, ranked)
+        return stmts, calls
+
+    def _merged(self, entries: Sequence[_Entry], select: bool = True) -> list[_Entry]:
+        """``entries`` joined two at a time until no two join.
+
+        Records under one path, of runs that parted after the statement, are
+        joined before any two that answer a condition apart. In ``if a: ...``,
+        ``z[i] += 1.0``, ``if b: ...`` the update is recorded twice under
+        ``a`` and twice under ``not a``; joining one of each first would leave
+        the fourth record a statement of its own, and the update would run
+        twice where ``a`` is false.
+        """
+        out = list(entries)
+        while True:
+            found = next(
+                (
+                    (first, second, both)
+                    for alike in (True, False)
+                    for first in range(len(out))
+                    for second in range(first + 1, len(out))
+                    if alike == _alike(out[first], out[second])
+                    for both in (self._join_two(out[first], out[second], select),)
+                    if both is not None
+                ),
+                None,
+            )
+            if found is None:
+                return out
+            first, second, both = found
+            out[first] = both
+            del out[second]
+
+    def _join_two(self, one: _Entry, other: _Entry, select: bool) -> _Entry | None:
+        """The one statement two records of a place are, or ``None``.
+
+        Their paths have to ask the same conditions. Where they answer them
+        alike, they are records of one statement by two runs that parted
+        after it; where they answer one of them apart, the statement before
+        the branch joins again after it, or, of values that differ under a
+        condition on data, is a select between them (:func:`_select`).
+        """
+        mine = {index: value for index, value, _term in one.path}
+        theirs = {index: value for index, value, _term in other.path}
+        if mine.keys() != theirs.keys():
+            return None
+        apart = [index for index in mine if mine[index] != theirs[index]]
+        records = [*one.records, *other.records]
+        chosen = one.chosen | other.chosen
+        if not apart:
+            if _same(one.lowered, other.lowered):
+                return _Entry(one.path, one.source, one.lowered, records, chosen)
+            return None
+        if len(apart) > 1:
+            return None
+        (index,) = apart
+        path = tuple(answer for answer in one.path if answer[0] != index)
+        if _same(one.lowered, other.lowered):
+            return _Entry(path, one.source, one.lowered, records, chosen)
+        if not select or not self._chooses(index):
+            return None
+        then, otherwise = (one, other) if mine[index] else (other, one)
+        condition = self.conditions[index][0]
+        source = _select(
+            condition, then.source, then.lowered, otherwise.source, otherwise.lowered
+        )
+        lowered = _select(
+            condition, then.lowered, then.lowered, otherwise.lowered, otherwise.lowered
+        )
+        return _Entry(path, source, lowered, records, chosen | {index})
+
+    def _chooses(self, index: int) -> bool:
+        """Whether condition ``index`` can choose a value: isl states neither answer.
+
+        A condition isl states narrows a statement's domain, which a select
+        cannot: ``x[i - 1] if i > 0 else 0.0`` is two statements, one over
+        ``i > 0``, where the read is in bounds.
+        """
+        return not constraints_of(self.literal(index, True), self) and not (
+            constraints_of(self.literal(index, False), self)
+        )
+
+    def _built(
+        self, record: _Record, path: Sequence[tuple[int, bool, Any]], source: Any
+    ) -> Stmt:
+        """``record``'s statement with the value ``source``, under ``path``.
+
+        Built as :meth:`record` builds one, in the loops around ``record``,
+        with ``path`` as its guard: its reductions' domains, its own domain,
+        whether it is an update and of what class, and where each condition
+        of its path is asked (:meth:`path_sets`).
+        """
+        saved = self.loops, self.building
+        self.loops = list(record.loops)
+        self.building = self.guard_of(path)
+        try:
+            stmt = record.stmt
+            expr = lower_reductions(source, self, where=stmt.where)
+            assignee = stmt.assignee
+            kind = "accumulate" if _reads_assignee(expr, assignee) else "assign"
+            guard = self.building
+            exactness = (
+                update_exactness(expr, assignee, guard, self)
+                if kind == "accumulate"
+                else None
+            )
+            return dataclasses.replace(
+                stmt,
+                expr=expr,
+                kind=kind,
+                guard=guard,
+                domain=self.domain(),
+                loop_domain=self.loop_domain() if guard is not None else None,
+                unnarrowed=self.unnarrowed(),
+                exactness=exactness,
+                path=self.path_sets(path),
+            )
+        finally:
+            self.loops, self.building = saved
+
+    def _refuse_closed_choices(self, finals: Sequence[tuple[_Record, _Entry]]) -> None:
+        """Refuse a statement that a branch inside a closed loop decides.
+
+        An answer given inside a loop is off the path once the loop closes
+        (:meth:`path`), since what follows the loop runs whichever way the
+        branch went. So every run whose answers agree with a statement's
+        joined path records it, with its value, unless what it writes, or
+        whether, rests on such an answer: ``a = 1 if i == 0 else 2`` in a
+        loop over ``i``, and ``y[0] = a`` after it. Natively that is what the
+        loop's last iteration chose, which a generic point of the loop
+        cannot tell.
+        """
+        runs = self._done
+        for record, entry in finals:
+            path = {index: value for index, value, _term in entry.path}
+            recorded = {number for number, _index in entry.records}
+            for number, run in enumerate(runs):
+                if number in recorded:
+                    continue
+                answers = run.answers
+                if any(answers.get(index) != value for index, value in path.items()):
+                    continue
+                other = runs[entry.records[0][0]].answers
+                apart = [
+                    index
+                    for index in sorted({*other, *answers})
+                    if other.get(index) != answers.get(index)
+                ]
+                if not apart:
+                    continue
+                condition, where = self.conditions[apart[0]]
+                raise TraceError(
+                    _closed_choice_message(record.stmt, condition, where)
+                )
+
+    def _refuse_stale_conditions(
+        self,
+        final_of: Mapping[tuple[int, int], int],
+        finals: Sequence[tuple[_Record, _Entry]],
+    ) -> None:
+        """Refuse a condition on an array that a write under it changes.
+
+        Python asks a condition once, at its ``if``. The term keeps it as the
+        guard of every statement under it, and as the choice of a select,
+        which the interpreter and the compiled kernel evaluate as each
+        statement runs. The two agree unless a statement between the ``if``
+        and one under it writes an array the condition reads: ``if x[i] >
+        0: x[i] = -1.0`` and then ``else: x[i] = 1.0``, where the ``else``
+        asks again after the write and runs too. Such a write, after the
+        ``if`` in its block and before the statement, or in a loop opened
+        after the ``if`` that holds both (whose next pass runs the statement
+        after the write), is refused, by the array it writes.
+        """
+        reads = {
+            index: _arrays_read(condition)
+            for index, (condition, _where) in enumerate(self.conditions)
+        }
+        if not any(reads.values()):
+            return
+        sequences: dict[Any, list[list[Any]]] = {}
+        for number, run in enumerate(self._done):
+            for parent, children in run.children.items():
+                seen: list[Any] = []
+                for kind, ident in children:
+                    child = (
+                        ("stmt", final_of[(number, ident)])
+                        if kind == "stmt"
+                        else (kind, ident)
+                    )
+                    if child not in seen:
+                        seen.append(child)
+                sequences.setdefault(parent, []).append(seen)
+        position: dict[tuple[Any, Any], int] = {}
+        for parent, runs in sequences.items():
+            for place, child in enumerate(_interleaved(runs)):
+                position[(parent, child)] = place
+
+        def chain(parent: Any, child: Any) -> tuple[int, ...]:
+            out = [position[(parent, child)]]
+            while parent is not None:
+                above = self._loop_parents[parent]
+                out.append(position[(above, ("loop", parent))])
+                parent = above
+            return tuple(reversed(out))
+
+        asks: dict[int, list[tuple[int, ...]]] = {}
+        for parent, child in position:
+            if child[0] == "cond":
+                asks.setdefault(child[1], []).append(chain(parent, child))
+        placed = []
+        for final, (record, entry) in enumerate(finals):
+            parent = record.loops[-1].key if record.loops else None
+            placed.append((chain(parent, ("stmt", final)), record, entry))
+        for at, record, entry in placed:
+            used = {index for index, _value, _term in entry.path} | entry.chosen
+            for index in sorted(used):
+                if not reads[index]:
+                    continue
+                before = [
+                    ask
+                    for ask in asks.get(index, ())
+                    if ask[:-1] == at[: len(ask) - 1] and ask < at
+                ]
+                if not before:
+                    continue
+                ask = max(before)
+                depth = len(ask) - 1
+                for written, writer, _entry in placed:
+                    if writer.stmt.assignee.array not in reads[index]:
+                        continue
+                    if written[:depth] != ask[:depth] or written < ask:
+                        continue
+                    shared = (
+                        written[depth] == at[depth]
+                        and len(written) > depth + 1
+                        and len(at) > depth + 1
+                    )
+                    if written < at or shared:
+                        condition, where = self.conditions[index]
+                        raise TraceError(
+                            _stale_condition_message(
+                                condition,
+                                where,
+                                writer.stmt,
+                                record.stmt,
+                                looped=shared and not written < at,
+                            )
+                        )
+
+    def _orders(
+        self, final_of: Mapping[tuple[int, int], int], finals: Sequence[Any]
+    ) -> dict[int, tuple[int, ...]]:
+        """The position of each joined statement in the loop tree of the source.
+
+        Each run met its loops and statements in source order, and each loop
+        or statement is one of the source's whichever run met it: the
+        children of a loop, as every run met them, are interleaved into one
+        order (:func:`_interleaved`), the then-branch's before the else's.
+        """
+        sequences: dict[Any, list[list[Any]]] = {}
+        for number, run in enumerate(self._done):
+            for parent, children in run.children.items():
+                seen: list[Any] = []
+                for kind, ident in children:
+                    if kind == "cond":
+                        continue
+                    child = (
+                        ("loop", ident)
+                        if kind == "loop"
+                        else ("stmt", final_of[(number, ident)])
+                    )
+                    if child not in seen:
+                        seen.append(child)
+                sequences.setdefault(parent, []).append(seen)
+        position: dict[tuple[Any, Any], int] = {}
+        for parent, runs in sequences.items():
+            for place, child in enumerate(_interleaved(runs)):
+                position[(parent, child)] = place
+        orders: dict[int, tuple[int, ...]] = {}
+        for final, (record, _entry) in enumerate(finals):
+            parent = record.loops[-1].key if record.loops else None
+            chain = [position[(parent, ("stmt", final))]]
+            while parent is not None:
+                above = self._loop_parents[parent]
+                chain.append(position[(above, ("loop", parent))])
+                parent = above
+            orders[final] = tuple(reversed(chain))
+        return orders
+
+    def _joined_calls(
+        self, final_of: Mapping[tuple[int, int], int], ids: Mapping[int, str],
+        ranked: Sequence[int],
+    ) -> list[Any]:
+        """Every run's calls, one per label, made where its joined path holds.
+
+        A call made on paths that do not join into one, the ``else`` of ``if
+        a and b:``, is made where the answers all its paths share hold, which
+        is wider than where it is made, as a guard isl cannot state leaves a
+        statement's domain.
+        """
+        rank = {final: place for place, final in enumerate(ranked)}
+        labels: dict[str, list[tuple[int, _CallRecord]]] = {}
+        for number, run in enumerate(self._done):
+            for record in run.calls:
+                labels.setdefault(record.call.label, []).append((number, record))
+        out: list[Any] = []
+        for records in labels.values():
+            first = records[0][1]
+            entries = self._merged(
+                [
+                    _Entry(record.path, None, None, [(number, 0)])
+                    for number, record in records
+                ],
+                select=False,
+            )
+            if len(entries) == 1:
+                path = entries[0].path
+            else:
+                shared = set.intersection(
+                    *(
+                        {(index, value) for index, value, _term in entry.path}
+                        for entry in entries
+                    )
+                )
+                path = tuple(
+                    answer for answer in entries[0].path if answer[:2] in shared
+                )
+            domain, loop_domain, unnarrowed = first.points(self.guard_of(path))
+            finals = {
+                final_of[(number, int(stmt_id[1:]))]
+                for number, record in records
+                for stmt_id in record.call.statements
+            }
+            out.append(
+                dataclasses.replace(
+                    first.call,
+                    domain=domain,
+                    loop_domain=loop_domain,
+                    unnarrowed=unnarrowed,
+                    statements=tuple(
+                        ids[final] for final in sorted(finals, key=rank.get)
+                    ),
+                )
+            )
+        return out
+
+    # }}}
+
+
+@dataclass
+class _Record:
+    """One statement one run recorded, before the runs are joined.
+
+    ``key`` is its place in the source (:meth:`Tracer.site`), ``stmt`` the
+    statement as the run recorded it, with no guard and the run's own id,
+    ``source`` its value as the body built it, ``path`` the answers it is
+    under and ``loops`` the loops around it, which it is built in again
+    under its joined path (:meth:`Tracer._built`).
+    """
+
+    key: Any
+    stmt: Stmt
+    source: Any
+    path: tuple[tuple[int, bool, Any], ...]
+    loops: tuple[_Loop, ...]
+
+
+@dataclass
+class _CallRecord:
+    """One call one run made: the call, its path, and its points under a guard."""
+
+    call: Any
+    path: tuple[tuple[int, bool, Any], ...]
+    points: Callable[[Any], tuple[Any, Any, Any]]
+
+
+@dataclass
+class _Run:
+    """What one run of the body recorded.
+
+    ``children`` lists, for each loop by its key (``None`` for the body),
+    what the run met inside it in order: ``("loop", key)``, ``("stmt",
+    index)``, an index into ``records``, and ``("cond", index)``, where a
+    condition that reads an array went on the path, by the condition's index.
+    """
+
+    records: list[_Record] = dataclasses.field(default_factory=list)
+    calls: list[_CallRecord] = dataclasses.field(default_factory=list)
+    children: dict[Any, list[tuple[str, Any]]] = dataclasses.field(default_factory=dict)
+    binders: list[Binder] = dataclasses.field(default_factory=list)
+    #: Every answer the run gave, by the condition's index.
+    answers: dict[int, bool] = dataclasses.field(default_factory=dict)
+
+
+@dataclass
+class _Entry:
+    """Records of one place that are one statement: its path and its value.
+
+    ``source`` is the value as the body built it and ``lowered`` as it was
+    recorded, with no guard on its sums, which is what two are compared by.
+    ``records`` are ``(run, index)`` pairs, the first the earliest, and
+    ``chosen`` the conditions its value selects by (:func:`_select`), by
+    index.
+    """
+
+    path: tuple[tuple[int, bool, Any], ...]
+    source: Any
+    lowered: Any
+    records: list[tuple[int, int]]
+    chosen: frozenset[int] = frozenset()
+
+
+@dataclass
+class _Group:
+    """The records of one place in the source that write one cell."""
+
+    assignee: Access
+    entries: list[_Entry] = dataclasses.field(default_factory=list)
+
+
+class _EmptyPath(BaseException):
+    """A run's path is empty: no point of its loops takes it.
+
+    Raised from :meth:`Tracer.decide`, through the body, to :func:`trace`,
+    which drops the run. A ``BaseException``, so that a body's own ``except
+    Exception`` does not take it for one of its errors.
+    """
+
+
+#: How many runs a trace may take, one per path through the body's branches.
+#: ``k`` conditions in sequence make ``2^k`` paths, and each path is one more
+#: run of the body; past this the body is refused, with what to write instead.
+MAX_RUNS = 256
+
+#: How many truth values one run may ask for. A loop that does not end, a
+#: ``while True`` around a branch on a traced condition, asks without end.
+MAX_ASKS = 10_000
+
+
+class Select(prim.If):
+    """A value two paths choose between: ``a if c else b``, as the term says it.
+
+    Made where two runs recorded one statement with values that differ under
+    a condition on data (:meth:`Tracer._join_two`). It is pymbolic's ``If``,
+    which the interpreter evaluates one branch of and C computes with
+    ``?:``, and it prints as Python writes it.
+    """
+
+    def __str__(self) -> str:
+        return (
+            f"({_shown(self.then)} if {_shown(self.condition)} else "
+            f"{_shown(self.else_)})"
+        )
+
+
+#: The arithmetic a select goes inside of, so that it chooses between the
+#: smallest parts that differ: ``vn * (a if c else b)``. Not a read, whose
+#: indices isl has to read, and not a sum, whose domain is its own.
+_SELECT_INSIDE = (
+    prim.Sum,
+    prim.Product,
+    prim.Quotient,
+    prim.FloorDiv,
+    prim.Remainder,
+    prim.Power,
+    prim.Call,
+)
+
+
+def _select(
+    condition: Any, then: Any, then_lowered: Any, other: Any, other_lowered: Any
+) -> Any:
+    """``then if condition else other``, chosen where the two differ.
+
+    ``then`` and ``other`` are values as the body built them, and
+    ``then_lowered`` and ``other_lowered`` the same as they were recorded,
+    which are what is compared: the parts both have alike are kept, and a
+    select is put where they differ.
+    """
+    if _same(then_lowered, other_lowered):
+        return then
+    if (
+        type(then) is type(other)
+        and isinstance(then, _SELECT_INSIDE)
+        and not isinstance(then, Sum)
+        and type(then_lowered) is type(then)
+        and type(other_lowered) is type(other)
+    ):
+        parts = [
+            init_args(then),
+            init_args(then_lowered),
+            init_args(other),
+            init_args(other_lowered),
+        ]
+        if len({len(part) for part in parts}) == 1:
+            chosen = [
+                _select_part(condition, *items) for items in zip(*parts, strict=True)
+            ]
+            if all(part is not _NO_SELECT for part in chosen):
+                return type(then)(*chosen)
+    return Select(condition, then, other)
+
+
+#: A part of a node no select can stand for: an operator, a name.
+_NO_SELECT = object()
+
+
+def _select_part(
+    condition: Any, then: Any, then_lowered: Any, other: Any, other_lowered: Any
+) -> Any:
+    """One argument of a node, chosen as :func:`_select` chooses a value."""
+    if _same(then_lowered, other_lowered):
+        return then
+    if isinstance(then, tuple) and isinstance(other, tuple):
+        if not (len(then) == len(other) == len(then_lowered) == len(other_lowered)):
+            return _NO_SELECT
+        chosen = [
+            _select_part(condition, *items)
+            for items in zip(then, then_lowered, other, other_lowered, strict=True)
+        ]
+        if any(part is _NO_SELECT for part in chosen):
+            return _NO_SELECT
+        return tuple(chosen)
+    if isinstance(then, tuple | str) or isinstance(other, tuple | str):
+        return _NO_SELECT
+    return _select(condition, then, then_lowered, other, other_lowered)
+
+
+def _same(one: Any, other: Any) -> bool:
+    """Whether two values the trace computed are the same, as syntax.
+
+    Terms compare as trees (``==`` of a term builds a proposition), sums by
+    their parts and their domains, isl sets by their points, and anything
+    else by its type and ``==``: ``1`` and ``1.0`` are two values, which
+    compile to two types.
+    """
+    if one is other:
+        return True
+    if isinstance(one, Reduction) or isinstance(other, Reduction):
+        return (
+            type(one) is type(other)
+            and one.op == other.op
+            and one.inames == other.inames
+            and one.exactness == other.exactness
+            and _same(one.domain, other.domain)
+            and _same(one.loop_domain, other.loop_domain)
+            and _same(one.body, other.body)
+        )
+    if isinstance(one, prim.ExpressionNode) or isinstance(other, prim.ExpressionNode):
+        return type(one) is type(other) and _same(init_args(one), init_args(other))
+    if isinstance(one, tuple | list) or isinstance(other, tuple | list):
+        return (
+            type(one) is type(other)
+            and len(one) == len(other)
+            and all(_same(a, b) for a, b in zip(one, other, strict=True))
+        )
+    if dataclasses.is_dataclass(one) and not isinstance(one, type):
+        # An Access, say: its generated == would compare the indices with
+        # lanky's ==, which builds a proposition.
+        return type(one) is type(other) and all(
+            _same(getattr(one, field.name), getattr(other, field.name))
+            for field in dataclasses.fields(one)
+        )
+    sets = isl.Set | isl.BasicSet
+    if isinstance(one, sets) or isinstance(other, sets):
+        return (
+            type(one) is type(other)
+            and one.get_space() == other.get_space()
+            and bool(one.is_equal(other))
+        )
+    if type(one) is not type(other):
+        return False
+    try:
+        return bool(one == other)
+    except Exception:  # noqa: BLE001 - what cannot be compared is not the same
+        return False
+
+
+def _interleaved(runs: Sequence[Sequence[Any]]) -> list[Any]:
+    """One order of the children of a loop, from each run's order of them.
+
+    Every run's order is kept where the runs agree: what one run met and the
+    order so far has not is put just before the next child the order has,
+    so the then-branch's statements, which the first run meets, come before
+    the else-branch's, and a statement after the branch comes after both.
+    """
+    order: list[Any] = []
+    for run in runs:
+        pending: list[Any] = []
+        for child in run:
+            if child in order:
+                place = order.index(child)
+                order[place:place] = pending
+                pending = []
+            else:
+                pending.append(child)
+        order.extend(pending)
+    return order
+
+
+_COMPLEMENT = {"<": ">=", "<=": ">", ">": "<=", ">=": "<", "==": "!=", "!=": "=="}
+
+
+def _integral(condition: Any, tracer: Tracer) -> bool:
+    """Whether a comparison is of integers isl states: of its sides with ``<``."""
+    probe = prim.Comparison(condition.left, "<", condition.right)
+    return all(text for _part, text, _why in _conjuncts(probe, tracer, ()))
+
+
+def _negation(condition: Any, tracer: Tracer) -> Any:
+    """``not condition``, as a guard says it.
+
+    The complement of an affine comparison of integers, which isl states and
+    which means the same; ``not (...)`` of anything else, which is what
+    Python tested (``not (x[i] > 0)`` holds where ``x[i]`` is NaN, and ``x[i]
+    <= 0`` does not). ``not`` of a negation is what it negates.
+    """
+    from lanky.terms import Comparison, LogicalNot
+
+    if isinstance(condition, prim.LogicalNot):
+        return condition.child
+    if isinstance(condition, prim.Comparison):
+        if _integral(condition, tracer):
+            return Comparison(
+                condition.left, _COMPLEMENT[condition.operator], condition.right
+            )
+    return LogicalNot(condition)
+
+
+def _while_message(condition: Any, where: str) -> str:
+    """Why a ``while`` on a traced condition is refused."""
+    at = f" at {where}" if where else ""
+    return (
+        f"the while loop{at} runs while {_shown(condition)}, a condition the "
+        "trace computes: tracing runs the body once per branch, and a loop on "
+        "such a condition has a branch at every pass, so its paths have no "
+        "bound, and the compiled kernel has no loop of a size isl can state. "
+        "Loop over a domain instead, 'for i in x.dom:', and put the condition "
+        "on what the loop does: 'if condition:'"
+    )
+
+
+def _unending_message(condition: Any, where: str) -> str:
+    """Why a run that asks without end is refused."""
+    at = f" at {where}" if where else ""
+    return (
+        f"the body asked for the truth of traced conditions more than {MAX_ASKS} "
+        f"times in one run, the last {_shown(condition)}{at}: a loop that "
+        "leaves only on such a condition, 'while True:' around 'if condition: "
+        "break', has no bound the trace can see. Loop over a domain instead, "
+        "'for i in x.dom:', with the condition on what the loop does"
+    )
+
+
+def _paths_message(name: str, tracer: Tracer) -> str:
+    """Why a body with more paths than :data:`MAX_RUNS` is refused."""
+    asked = [_shown(condition) for condition, _where in tracer.conditions[:6]]
+    more = len(tracer.conditions) - len(asked)
+    listed = ", ".join(asked) + (f" and {more} more" if more > 0 else "")
+    return (
+        f"{name} has more than {MAX_RUNS} paths through its branches, on the "
+        f"conditions {listed}: tracing runs the body once per path, and every "
+        "condition asked in sequence doubles the paths after it (k of them "
+        "make 2^k). Ask fewer: join conditions that go together into one "
+        "('if (a < 2) & (b < 1):' is one, where 'a < 2 and b < 1' is two), "
+        "choose a value with a conditional expression rather than a block, or "
+        "split the body into kernels"
+    )
+
+
+def _branch_message(name: str, exc: BaseException, path: str) -> str:
+    """Why a branch of the body that raises is refused."""
+    where = _body_location(exc)
+    at = f" at {where}" if where else ""
+    return (
+        f"{name} raises {type(exc).__name__}: {exc}{at}, on the branch where "
+        f"{path}. Natively that is an error at every point that takes the "
+        "branch, and a compiled kernel cannot raise: check the inputs before "
+        "the kernel is called, or make the branch compute a value"
+    )
+
+
+def _alike(one: _Entry, other: _Entry) -> bool:
+    """Whether two records of a place are under one path: the same answers."""
+    return {index: value for index, value, _term in one.path} == {
+        index: value for index, value, _term in other.path
+    }
+
+
+def _shown_stmt(stmt: Stmt) -> str:
+    """A statement as a message names it: its text and its line."""
+    text = stmt.text or f"the write to {stmt.assignee.array}"
+    return f"{text} ({stmt.where})" if stmt.where else text
+
+
+def _closed_choice_message(stmt: Stmt, condition: Any, where: str) -> str:
+    """Why a statement that a branch inside a closed loop decides is refused."""
+    at = f" at {where}" if where else ""
+    return (
+        f"{_shown_stmt(stmt)} rests on which way the branch on "
+        f"{_shown(condition)!r}{at} went, inside a loop that has closed before "
+        "it: natively it is what the loop's last iteration chose, and tracing "
+        "runs the loop's body once, at a generic point, so it cannot tell "
+        "which. Write what the branch chooses into an array inside the loop, "
+        "and read that cell after it, or make the choice after the loop"
+    )
+
+
+def _stale_condition_message(
+    condition: Any, where: str, writer: Stmt, reader: Stmt, looped: bool
+) -> str:
+    """Why a branch that writes an array its condition reads is refused.
+
+    ``looped`` says that the write comes after the statement in a loop
+    opened after the ``if``, whose next pass runs the statement after it.
+    """
+    at = f" at {where}" if where else ""
+    array = writer.assignee.array
+    if writer is reader:
+        written = f"writes {array} itself, in a loop opened after the if"
+    elif looped:
+        written = (
+            f"{_shown_stmt(writer)} writes {array} in a loop opened after the "
+            "if, whose next pass runs it after the write"
+        )
+    else:
+        written = f"{_shown_stmt(writer)} writes {array} after the if and before it"
+    return (
+        f"{_shown_stmt(reader)} is under the condition {_shown(condition)!r}"
+        f"{at}, which reads {array}, and {written}. Python tests the condition "
+        "once, at the if, and the compiled kernel tests it again at each "
+        "statement under it, so after that write the two can take different "
+        f"branches. Choose the value in one statement, '... if "
+        f"{_shown(condition)} else ...', or write what the branch computes "
+        f"into an array other than {array}"
+    )
+
+
+def _arrays_read(condition: Any) -> frozenset[str]:
+    """The arrays ``condition`` reads, by name."""
+    return frozenset(access.array for access in accesses_in(condition))
 
 
 _TRACERS: list[Tracer] = []
@@ -2024,20 +3301,18 @@ def _outside_changes(outside: _Outside, tracer: Tracer) -> list[_Change]:
     """What the trace changed of the state :func:`_outside` copied.
 
     Values are compared as the loop snapshot compares them
-    (:func:`_same_value`, never ``==``). Two things are left alone, as they are
-    across a loop iteration: a name now bound to a :class:`when`, and a name now
-    bound to a loop's own variable, which is what a ``for`` whose target is a
-    global stores there; anything that reads it is refused as an escaped loop
-    variable. So is an attribute a :class:`functools.cached_property` stored
-    the first time the body read it: the property computes it from the object,
-    once, whoever asks first, and a native call reads the same value. A
-    container whose name was rebound is reported as that rebinding.
+    (:func:`_same_value`, never ``==``). One thing is left alone, as it is
+    across a loop iteration: a name now bound to a loop's own variable, which
+    is what a ``for`` whose target is a global stores there; anything that
+    reads it is refused as an escaped loop variable. So is an attribute a
+    :class:`functools.cached_property` stored the first time the body read
+    it: the property computes it from the object, once, whoever asks first,
+    and a native call reads the same value. A container whose name was
+    rebound is reported as that rebinding.
     """
     loops = tracer._inames
 
     def exempt(after: Any) -> bool:
-        if isinstance(after, when):
-            return True
         return isinstance(after, prim.Variable) and after.name in loops
 
     out: list[_Change] = []
@@ -2332,7 +3607,7 @@ def constraints_of(
     """Render a guard as isl constraints, dropping what isl cannot express.
 
     A guard narrows the statement's domain, which is what makes
-    ``with when(i + 1 < n): u[i + 1] = ...`` provably in bounds. A guard that is
+    ``if i + 1 < n: u[i + 1] = ...`` provably in bounds. A guard that is
     not quasi-affine (a data-dependent test) is dropped, which widens the domain
     and can only make an obligation harder, never falsely discharge one.
 
@@ -2527,19 +3802,6 @@ def _exact_key(key: Any, tracer: Any) -> Any:
     return exact_key(key, tracer)
 
 
-def _unguarded(expr: Any, tracer: Any, where: str) -> Any:
-    """``expr`` with the value of each rule called in an open ``when`` block.
-
-    One called in a block that has closed is refused; see
-    :func:`loopty.calls.unguarded`.
-    """
-    if tracer is None or not tracer.guarded:
-        return expr
-    from loopty.calls import unguarded
-
-    return unguarded(expr, tracer, where)
-
-
 def _exact_guard(condition: Any, tracer: Any) -> Any:
     """A guard without the conversions of a called kernel's scalars it does not need."""
     from loopty.calls import exact
@@ -2630,8 +3892,7 @@ class SymDom:
         of the tuple.
         """
         tracer = self.array.tracer
-        where = _location(sys._getframe(1))
-        index = _exact_key(_unguarded(index, tracer, where), tracer)
+        index = _exact_key(index, tracer)
         if _whole_key(index):
             raise TraceError(
                 f"{_domain_text(self)}[{_key_text(index)}] at "
@@ -2639,7 +3900,7 @@ class SymDom:
                 "one point. A fiber is taken at one index, "
                 f"{_domain_text(self)}[i]; to leave points of a domain out, "
                 "iterate all of it and put the statements under "
-                "'with when(condition):'"
+                "'if condition:'"
             )
         if isinstance(index, tuple):
             if not index:
@@ -2686,41 +3947,79 @@ class SymDom:
     def __bool__(self) -> bool:
         """Refuse: emptiness of a symbolic domain is not a Python truth value."""
         raise TraceError(
-            f"the truth value of {self.array.name}.dom is symbolic; "
-            "use 'with when(...)' for a data-dependent condition"
+            f"the truth value of {self.array.name}.dom is symbolic: a domain "
+            "is not empty or full until the kernel runs. Iterate it, and put "
+            "a condition on the points as 'if condition:' inside the loop"
         )
 
     def __repr__(self) -> str:
         return f"SymDom({self.array.name}, axis={self.axis})"
 
 
-def _loop_target_name() -> str | None:
-    """The name of the ``for`` target in the frame that asked for a point.
+def _loop_targets(frame: Any) -> tuple[str, ...] | None:
+    """The names the ``for`` running in ``frame`` binds, read off its bytecode.
 
     A generic point is handed out from inside ``FOR_ITER``, so the calling
-    frame's next store instruction is the loop variable. Reading it keeps the
-    inames of the term equal to the names in the source, which is what makes a
-    witness or a generated loop nest recognizable. Any surprise (a comprehension,
-    a future bytecode layout) gives ``None`` and the tracer invents a name.
-
-    From Python 3.13 on the compiler fuses a store with the instruction after
-    it when both are on one line, so ``for i in x.dom: s = s + x[i]`` stores
-    its target with ``STORE_FAST_LOAD_FAST ('i', 's')``. The target is what is
-    stored first, which is the first name of the pair.
+    frame's next instructions store the loop variables: one name, or the
+    names ``for box, a, b in R.dom`` unpacks the point into
+    (:func:`loopty.bytecode.for_targets`). Reading them keeps the inames of
+    the term equal to the names in the source, which is what makes a witness
+    or a generated loop nest recognizable. Any surprise (a future bytecode
+    layout) gives ``None`` and the tracer invents a name.
     """
-    frame = sys._getframe(2)
     try:
-        for instruction in dis.get_instructions(frame.f_code):
-            if instruction.offset > frame.f_lasti and instruction.opname.startswith(
-                "STORE_"
-            ):
-                name = instruction.argval
-                if isinstance(name, tuple) and name:
-                    name = name[0]
-                return name if isinstance(name, str) and name.isidentifier() else None
+        return for_targets(frame.f_code, frame.f_lasti)
     except Exception:  # pragma: no cover - bytecode reading is best effort
         return None
+
+
+def _tuple_loop_message(dom: SymDom, names: Sequence[str], where: str) -> str | None:
+    """Why ``for box, a, b in R.dom`` cannot be the loops it names, or ``None``."""
+    spelled = ", ".join(name or "(...)" for name in names)
+    domain = _domain_text(dom)
+    at = f" at {where}" if where else ""
+    if not all(names):
+        return (
+            f"'for {spelled} in {domain}'{at} unpacks a point into something that "
+            "is not a name; a loop nest in one line binds one name per loop, "
+            f"'for box, a, b in {dom.array.name}.dom:'"
+        )
+    left = dom.array.ndim - dom.axis
+    if len(names) > left:
+        return (
+            f"'for {spelled} in {domain}'{at} binds {len(names)} names, and "
+            f"{domain} runs over {left} axis{'' if left == 1 else 'es'} of "
+            f"{dom.array.name}: one name per axis, outermost first"
+        )
     return None
+
+
+def _open_levels(
+    tracer: Tracer, dom: SymDom, names: Sequence[str], owner: Any, frame: Any
+) -> list[Var]:
+    """Open the loops ``for box, a, b in R.dom`` binds, outermost first.
+
+    The loop over ``box`` runs over ``R.dom``, the one over ``a`` over
+    ``R.dom[box]`` and the one over ``b`` over ``R.dom[box, a]``: each is the
+    fiber of the one before, as the nested ``for`` statements are.
+    """
+    variables: list[Var] = []
+    fiber = dom
+    together = tuple(names)
+    for name in names:
+        if variables:
+            fiber = fiber[variables[-1]]
+        variables.append(
+            tracer.enter_loop(
+                fiber.bound,
+                name,
+                owner,
+                frame,
+                constraints=fiber.constraints_for,
+                together=together,
+            )
+        )
+    return variables
 
 
 class _DomIterator:
@@ -2736,14 +4035,19 @@ class _DomIterator:
     the first before the target is bound, the second once the body has run.
     What it holds at those two moments is what the tracer compares to find
     state carried across iterations; see :meth:`Tracer.leave_loop`.
+
+    A ``for`` that unpacks the point into several names, ``for box, a, b in
+    R.dom:``, opens a loop level for each (:func:`_open_levels`), and the
+    second ``__next__`` closes them all, innermost first.
     """
 
-    __slots__ = ("dom", "done", "loop")
+    __slots__ = ("dom", "done", "levels", "loop")
 
     def __init__(self, dom: SymDom) -> None:
         self.dom = dom
         self.done = False
         self.loop = False
+        self.levels = 1
 
     def __iter__(self) -> _DomIterator:
         return self
@@ -2755,26 +4059,37 @@ class _DomIterator:
             tracer = current_tracer()
             if self.loop:
                 if tracer is not None:
-                    tracer.leave_loop(self, sys._getframe(1))
+                    frame = sys._getframe(1)
+                    for _level in range(self.levels):
+                        tracer.leave_loop(self, frame)
             elif tracer is not None:
                 tracer.release(self)
             raise StopIteration
         self.done = True
+        frame = sys._getframe(1)
         binder_trace = current_trace()
         if binder_trace is not None:
             # lanky is driving a generator expression: this is a reduction
             # binder, and lanky names it after the source's loop target.
+            names = _loop_targets(frame)
+            if names is not None and len(names) > 1:
+                spelled = ", ".join(names)
+                raise TraceError(
+                    f"a sum at {_location(frame)} binds {spelled} in one for "
+                    "clause, and a sum binds one name per clause: write "
+                    f"reduce_sum(... for {names[0]} in {_domain_text(self.dom)} "
+                    f"for {names[1]} in ...), one clause per axis"
+                )
             tracer = current_tracer()
             if tracer is None:
                 return binder_trace.bind(self.dom)
-            return tracer.bind(self, binder_trace, self.dom)
+            return tracer.bind(self, binder_trace, self.dom, _location(frame))
         tracer = current_tracer()
         if tracer is None:
             raise TraceError(
                 f"cannot iterate {self.dom!r} outside a trace; under plain "
                 "python a kernel iterates a real array's .dom"
             )
-        frame = sys._getframe(1)
         caller = frame.f_code.co_name
         if caller in ("<genexpr>", "<listcomp>", "<setcomp>", "<dictcomp>"):
             raise TraceError(
@@ -2784,9 +4099,17 @@ class _DomIterator:
                 "reduction and its domain are recorded"
             )
         self.loop = True
+        names = _loop_targets(frame)
+        if names is not None and len(names) > 1:
+            refused = _tuple_loop_message(self.dom, names, _location(frame))
+            if refused is not None:
+                raise TraceError(refused)
+            self.levels = len(names)
+            return tuple(_open_levels(tracer, self.dom, names, self, frame))
+        hint = names[0] if names else None
         return tracer.enter_loop(
             self.dom.bound,
-            _loop_target_name(),
+            hint or None,
             self,
             frame,
             constraints=self.dom.constraints_for,
@@ -2800,18 +4123,24 @@ class _PieceIterator:
     ``__iter__``, for the reason :class:`_DomIterator` binds late: Python calls
     ``iter`` on a generator's outermost iterable before ``reduce_sum`` has
     started tracing its binders.
+
+    ``for p, i, j in U.dom:`` walks the pieces and opens the loops of each
+    piece's fiber under the names after the first (:func:`_open_levels`),
+    closing them before the next piece.
     """
 
-    __slots__ = ("dom", "left")
+    __slots__ = ("dom", "left", "names", "open")
 
     def __init__(self, dom: SymDom, pieces: int) -> None:
         self.dom = dom
         self.left = iter(range(pieces))
+        self.names: tuple[str, ...] | None = None
+        self.open = 0
 
     def __iter__(self) -> _PieceIterator:
         return self
 
-    def __next__(self) -> int:
+    def __next__(self) -> Any:
         from lanky.terms import current_trace
 
         if current_trace() is not None:
@@ -2823,7 +4152,25 @@ class _PieceIterator:
                 f"results: reduce_sum(... for i in {name}.dom[0]) + "
                 f"reduce_sum(... for i in {name}.dom[1])"
             )
-        return next(self.left)
+        frame = sys._getframe(1)
+        tracer = current_tracer()
+        if self.names is None:
+            names = _loop_targets(frame) or ("",)
+            self.names = names if len(names) > 1 else ()
+            if self.names:
+                refused = _tuple_loop_message(self.dom, self.names, _location(frame))
+                if refused is not None:
+                    raise TraceError(refused)
+        if tracer is not None:
+            for _level in range(self.open):
+                tracer.leave_loop(self, frame)
+        self.open = 0
+        piece = next(self.left)
+        if not self.names or tracer is None:
+            return piece
+        inner = _open_levels(tracer, self.dom[piece], self.names[1:], self, frame)
+        self.open = len(inner)
+        return (piece, *inner)
 
 
 class SymArr:
@@ -2933,7 +4280,7 @@ class SymArr:
         whole array is, with the loop nest to write.
         """
         where = _location(sys._getframe(1))
-        key = _exact_key(_unguarded(key, self.tracer, where), self.tracer)
+        key = _exact_key(key, self.tracer)
         view = self._view_of(key, where)
         if view is not None:
             return view
@@ -2961,7 +4308,7 @@ class SymArr:
         """Write: record a statement at the caller's file and line."""
         frame = sys._getframe(1)
         where = _location(frame)
-        key = _exact_key(_unguarded(key, self.tracer, where), self.tracer)
+        key = _exact_key(key, self.tracer)
         self._refuse_whole(key, where, write=True)
         self._store(_index_tuple(key), value, where, frame_statement_text(frame))
 
@@ -2973,7 +4320,6 @@ class SymArr:
         ``text`` is the statement as the source writes it, for the messages
         that name it (:attr:`loopty.term.Stmt.text`).
         """
-        value = _unguarded(value, self.tracer, where)
         key = _key_of(indices)
         if self.type.domain is not None:
             self._check_domain_key(key, where, write=True)
@@ -3380,8 +4726,8 @@ def _truth_valued(value: Any, params: Mapping[str, Any]) -> bool:
     ``and``, ``or`` and ``not`` in the trace, and natively they are logical
     on a bool and bitwise on an integer, so ``k[i] & 1`` of an integer ``k``
     is not a truth value in the native run, whatever the trace records. An
-    integer is not one either, ``0`` and ``1`` included, as it is not one for
-    :class:`when`; the native run refuses to store one (:class:`_MaskedArr`).
+    integer is not one either, ``0`` and ``1`` included; the native run
+    refuses to store one into an array of truth values (:class:`_MaskedArr`).
     """
     from lanky.terms import PropositionMixin
 
@@ -3496,10 +4842,10 @@ def _python_nots(expr: Any, params: Mapping[str, Any], truth: bool) -> Iterator[
     """Every ``~`` of a Python bool whose integer the native run computes with.
 
     ``~(i > 0)`` of a loop variable is ``~`` of a Python bool natively, which is
-    bitwise: ``-2`` or ``-1``. Where a truth value is asked for, a guard or a
-    cell of an array of truth values, the native run refuses that integer
-    (:class:`when`, :func:`_refuse_integer_truth`). Anywhere else it computes
-    with it: ``x[i] * ~(i > 0)`` is ``-2 * x[i]`` natively and ``0`` compiled.
+    bitwise: ``-2`` or ``-1``. Stored into a cell of an array of truth values,
+    the native run refuses that integer (:func:`_refuse_integer_truth`).
+    Anywhere else it computes with it: ``x[i] * ~(i > 0)`` is ``-2 * x[i]``
+    natively and ``0`` compiled, and ``if ~(i > 0):`` takes either as true.
     ``truth`` says whether ``expr`` is asked as a truth value; a connective
     passes that on to its operands, and anything else asks its operands for a
     number.
@@ -3550,12 +4896,11 @@ def _refuse_bitwise(
 
     ``~`` of a comparison passes, since a comparison is a truth value. On a
     comparison of Python ints, such as ``~(i > 0)`` of a loop variable, it is
-    bitwise natively all the same. Where a truth value is asked for, which
-    ``truth`` says of ``expr`` (a guard, or a value stored into an array of
-    truth values), the native run refuses the integer it makes (:class:`when`,
-    :func:`_refuse_integer_truth`). Anywhere else the native run would compute
-    with that integer, so the trace refuses it (:func:`_python_nots`), naming
-    the complement as a comparison.
+    bitwise natively all the same. Stored into an array of truth values,
+    which ``truth`` says of ``expr``, the native run refuses the integer it
+    makes (:func:`_refuse_integer_truth`). Anywhere else, an ``if`` on it
+    included, the native run would compute with that integer, so the trace
+    refuses it (:func:`_python_nots`), naming the complement as a comparison.
     """
     for node in _connectives(expr):
         operand = _untruthful_operand(node, params)
@@ -3587,7 +4932,8 @@ def _refuse_bitwise(
             "~False is -1, while the trace reads it as 'not' and the compiled "
             "kernel computes 0 or 1, so the two runs would compute different "
             f"things with it. Write the complement as a comparison ({complement}, "
-            "and '(i <= 0) | (i >= n)' for '~((i > 0) & (i < n))')"
+            "and '(i <= 0) | (i >= n)' for '~((i > 0) & (i < n))'), or, in an "
+            "if, Python's 'not' for '~'"
         )
 
 
@@ -4073,15 +5419,14 @@ def _refuse_unheld_store(array: SymArr, value: Any, where: str) -> None:
     array's type does not hold at some point is refused when the compiled
     run is asked for, where the sizes are known
     (:func:`loopty.refusal.refuse_where_native_does`, #153), and so is a
-    literal under a guard: the guard masks the store, so numpy converts
-    nothing where it is false, and ``with when(i < 0): y[i] = 300`` stores
-    nothing in either run.
+    literal on a branch: numpy converts nothing where the branch is not
+    taken, and ``if i < 0: y[i] = 300`` stores nothing in either run.
     """
     from loopty.contract import native_storage
 
     if not isinstance(value, int) or isinstance(value, bool):
         return
-    if array.tracer.guard() is not None:
+    if array.tracer.path_guard() is not None:
         return
     stored = native_storage(array.type.dtype)
     if stored is None or stored.kind not in "iu":
@@ -4754,10 +6099,12 @@ def lower_reductions(
         )
         loop_domain = None
         if tracer.guard() is not None or expr.guard is not None:
-            # Where the sum starts and reads its bounds: the statement's guard
-            # masks the write, and the clause is tested after the range is
-            # read, so neither narrows it. An outer generator's clause does:
-            # the inner sum is in its body, which runs only where it holds.
+            # Where the sum starts and reads its bounds: the clause is tested
+            # after the range is read, so it does not narrow it, and the
+            # statement's path is left out too, which only widens where an
+            # if lets the sum start (Reduction.loop_domain). An outer
+            # generator's clause does narrow it: the inner sum is in its
+            # body, which runs only where it holds.
             loop_domain = domain_set(
                 (*tracer.inames, *inames),
                 (*tracer.bounds, *bounds),
@@ -4820,8 +6167,8 @@ def _reduction_condition_message(
         "point, while the body skips the points the condition excludes. isl "
         "states an affine comparison of loop variables, sizes and integral "
         f"scalars, and this condition {why}.{split} Otherwise write each term "
-        "to an indexed cell, 0.0 where the condition is false and the term "
-        "under 'with when(condition):', and sum the cells."
+        "to an indexed cell, 't[k] = term if condition else 0.0', and sum the "
+        "cells."
     )
 
 
@@ -4915,19 +6262,11 @@ def reductions_in(expr: Any) -> tuple[Reduction, ...]:
 # }}}
 
 
-# {{{ when
-
-
-_MASKS: list[bool] = []
-
-
-def _writes_are_masked() -> bool:
-    """Whether an open ``when`` block is false, so writes must be dropped."""
-    return not all(_MASKS)
+# {{{ the native run's views, and when
 
 
 def _refuse_integer_truth(dtype: np.dtype, value: Any, frame: Any) -> None:
-    """Refuse to store an integer into a bool array, as :class:`when` refuses one.
+    """Refuse to store an integer into a bool array.
 
     The trace reads ``~``, ``&`` and ``|`` as ``not``, ``and`` and ``or``, and
     natively they are bitwise on an integer and on a Python bool: ``~(i > 0)``
@@ -4938,7 +6277,7 @@ def _refuse_integer_truth(dtype: np.dtype, value: Any, frame: Any) -> None:
     is a value the two runs disagree about, or a constant ``0`` or ``1`` that
     is spelled ``False`` or ``True`` everywhere else.
 
-    The masking view knows the array's dtype and not its declared sort, so
+    The native view knows the array's dtype and not its declared sort, so
     this holds of every bool array, one of a numpy ``np.bool_`` sort too. That
     is wider than the trace's rule (:meth:`SymArr._refuse_untruthful`), which
     leaves such a sort alone because C's conversion into its ``bool`` is
@@ -4966,42 +6305,33 @@ def _integer_store_message(value: Any, where: str) -> str:
 
 
 class _MaskedArr(Arr):
-    """An :class:`~loopty.arr.Arr` sharing its buffers, whose writes obey ``when``."""
+    """An :class:`~loopty.arr.Arr` sharing its buffers: the native run's view.
+
+    The name is from when it masked the writes of a ``when`` block; what is
+    left is the rest of the native run's contract with the compiled one.
+    """
 
     def __setitem__(self, key: Any, value: Any) -> None:
-        """Write, unless an open ``when`` block is false.
+        """Write; an integer written into a bool array is refused.
 
-        An integer written into a bool array is refused; see
-        :func:`_refuse_integer_truth`.
+        See :func:`_refuse_integer_truth`.
         """
-        if _writes_are_masked():
-            return
         _refuse_integer_truth(self.numpy().dtype, value, sys._getframe(1))
         super().__setitem__(key, value)
 
     def __getitem__(self, key: Any) -> Any:
-        """Read, answering zero for an out-of-range read under a false guard.
-
-        An element is read in the dtype :func:`read_elements_as` gave the
-        view, if any.
+        """Read, in the dtype :func:`read_elements_as` gave the view, if any.
 
         Fewer indices than the array has axes, ``A[i]``, read a row, and an
         array of indices, ``u[cell[c]]``, the cells it picks; each is what
         the trace reads as a view (:class:`_RowView`, :class:`_GatherView`),
         an :class:`~loopty.arr.Arr` with a ``.dom``, so that a kernel the body
         calls takes it as an array: the row shares the buffer, and its writes
-        land in it, under the same guards; the gathered cells are a copy,
-        which nothing can write. A row out of range under a false guard is
-        zeros, as a cell is zero there.
+        land in it; the gathered cells are a copy, which nothing can write.
         """
         if isinstance(key, Arr):
             key = key.numpy()
-        try:
-            value = super().__getitem__(key)
-        except IndexError:
-            if _writes_are_masked():
-                return self._zero_row(key)
-            raise
+        value = super().__getitem__(key)
         parts = key if isinstance(key, tuple) else (key,)
         sliced = any(part is Ellipsis or isinstance(part, slice) for part in parts)
         if isinstance(value, np.ndarray) and not sliced:
@@ -5018,17 +6348,9 @@ class _MaskedArr(Arr):
             return read_in.type(value)
         return value
 
-    def _zero_row(self, key: Any) -> Any:
-        """What a read out of range under a false guard answers: zero, or zeros."""
-        given = len(key) if isinstance(key, tuple) else 1
-        if self.domain is not None or self.is_ragged or given >= self.ndim:
-            return 0
-        shape = self.numpy().shape[given:]
-        return _MaskedArr(np.zeros(shape, dtype=self.dtype))
-
 
 def read_elements_as(view: Any, dtype: np.dtype) -> None:
-    """Have the masking view ``view`` read each element as a ``dtype`` scalar.
+    """Have the native view ``view`` read each element as a ``dtype`` scalar.
 
     The native run writes into a written array as the caller gave it, and
     reads each element in the dtype the compiled run computes with: an
@@ -5041,40 +6363,21 @@ def read_elements_as(view: Any, dtype: np.dtype) -> None:
 
 
 class _MaskedArray(np.ndarray):
-    """A numpy view whose writes obey ``when``."""
+    """A numpy view whose writes are those of :class:`_MaskedArr`."""
 
     def __setitem__(self, key: Any, value: Any) -> None:
-        """Write, unless an open ``when`` block is false; see :class:`_MaskedArr`."""
-        if _writes_are_masked():
-            return
+        """Write; an integer written into a bool array is refused."""
         _refuse_integer_truth(self.dtype, value, sys._getframe(1))
         super().__setitem__(key, value)
 
-    def __getitem__(self, key: Any) -> Any:
-        """Read, answering zero for an out-of-range read under a false guard."""
-        try:
-            return super().__getitem__(key)
-        except IndexError:
-            if _writes_are_masked():
-                return 0
-            raise
-
 
 def mask_writes(value: Any) -> Any:
-    """Wrap an argument so that writes inside a false ``when`` are dropped.
+    """Wrap an argument in the native run's view of it.
 
-    The wrapper shares the buffers of what it wraps, so a masked run still
-    writes through to the caller's array everywhere the guard holds. Only
-    arrays are wrapped, and only when the body opens a guard at all:
-    :func:`loopty.kernel.opens_a_guard` decides that by looking for this very
-    object in the code, whatever name it was imported under, so an unguarded
-    kernel is called with exactly the objects it was given.
-
-    Masking covers reads too, in one direction only: inside a false guard, a
-    read that would go out of range answers zero rather than raising, because
-    the block's value cannot be used. That is what lets the boundary guard of a
-    stencil be written once, as the condition it is, instead of as an ``if``
-    around the loop bounds.
+    The wrapper shares the buffers of what it wraps, so the native run writes
+    through to the caller's array. A bare ``ndarray`` gets a ``.dom`` by it,
+    and an integer stored into a bool array is refused
+    (:func:`_refuse_integer_truth`).
     """
     if isinstance(value, Arr):
         # Every field is shared: the buffers, a declared layout a ragged view
@@ -5085,23 +6388,6 @@ def mask_writes(value: Any) -> Any:
     return value
 
 
-def _integer_guard_message(value: Any, where: str) -> str:
-    """What to say about a guard whose value is an integer and not a bool."""
-    at = f" at {where}" if where else ""
-    return (
-        f"the guard of 'with when(...)'{at} is the integer {int(value)}, not a "
-        "truth value. Python's '~' is bitwise on an int and on a bool: ~True is "
-        "-2 and ~False is -1, and both are true, so a guard such as "
-        "'~(i > 0)' on a loop variable holds at every point when the body runs "
-        "natively, while the traced term reads it as 'not' and the compiled "
-        "kernel skips the points where i > 0. '&' and '|' with an integer "
-        "operand are bitwise in the same way. Write the complement as a "
-        "comparison ('i <= 0' for '~(i > 0)', and "
-        "'(i <= 0) | (i >= n)' for '~((i > 0) & (i < n))'), and compare an "
-        "integer explicitly ('k != 0') rather than guarding on it."
-    )
-
-
 def _integer(value: Any) -> bool:
     """Whether ``value`` is a Python or numpy integer that is not a bool."""
     return isinstance(value, int | np.integer) and not isinstance(
@@ -5109,63 +6395,77 @@ def _integer(value: Any) -> bool:
     )
 
 
-class when:  # noqa: N801 - a context manager written like a statement
-    """Guard the writes of a block by ``condition``.
+#: ``with when(a < 2):``, or ``with loopty.when(a < 2) as guard:`` or ``when``
+#: imported under another name, read off a source line for the ``if`` to
+#: write in its place.
+_WHEN_LINE = re.compile(r"^(\s*)with\s+([\w.]+)\((.*)\)(?:\s+as\s+\w+)?\s*:")
 
-    Under tracing the condition is pushed onto the guard stack: the statements
-    recorded inside carry it, and it narrows their domain where isl can state
-    it (an affine comparison of loop variables, sizes and integral scalars; see
-    :func:`constraints_of`), so a guarded access is proved in bounds exactly
-    where it runs. Under plain ``python`` the block still executes and the
-    writes are masked, which is why the guard has to be a condition on data and
-    not a Python ``if``: masking keeps the traced term and the native run
-    agreeing statement for statement.
 
-    The condition has to be a truth value, and an integer that is not a bool
-    is refused, under tracing and natively, with a :class:`TraceError`. The
-    native value of ``~(i > 0)`` is where one comes from: ``i`` is a Python
-    ``int``, ``i > 0`` a Python ``bool``, and ``~`` on a bool is bitwise, so
-    the guard is ``-2`` or ``-1`` and always true, while the trace records
-    ``not (i > 0)``. A data comparison is a numpy ``bool_``, on which ``~`` is
-    logical, and is not affected. Natively the guard is asked wherever the
-    guards around it hold; under a false one nothing is written whatever it
-    says.
+def _when_message(frame: Any) -> str:
+    """What to write in place of ``with when(...)``, read off the source.
+
+    The ``if`` with the condition the line guards by, and an ``else`` for the
+    ``with when(...)`` block right after it, if there is one.
+    """
+    import linecache
+
+    filename = frame.f_code.co_filename
+    line = frame.f_lineno
+    where = _location(frame)
+    lines = linecache.getlines(filename)
+    found = _WHEN_LINE.match(lines[line - 1]) if 0 < line <= len(lines) else None
+    if found is None:
+        condition, other = "condition", None
+    else:
+        indent, called = len(found.group(1)), found.group(2)
+        condition = found.group(3).strip()
+        other = None
+        for later in lines[line:]:
+            if not later.strip():
+                continue
+            depth = len(later) - len(later.lstrip())
+            if depth > indent:
+                continue
+            following = _WHEN_LINE.match(later)
+            if (
+                depth == indent
+                and following is not None
+                and following.group(2) == called
+            ):
+                other = following.group(3).strip()
+            break
+    if other is None:
+        shape = f"    if {condition}:\n        ..."
+        after = ""
+    else:
+        shape = f"    if {condition}:\n        ...\n    else:\n        ..."
+        after = (
+            f" The else is the block under 'with when({other}):', where it holds "
+            f"wherever {condition} does not; write 'elif {other}:' where it does "
+            "not."
+        )
+    return (
+        f"'with when({condition}):' at {where} is loopty 0.3's guard, which "
+        "loopty 0.4 removed: a kernel body branches with Python's own if, elif "
+        "and else (and, or, not and 'a if c else b' too), which the trace runs "
+        "once per branch, recording each statement under its branch's "
+        f"condition. Write\n\n{shape}\n\n" + after.lstrip()
+    ).rstrip()
+
+
+class when:  # noqa: N801 - the name loopty 0.3 gave its guard
+    """Removed in loopty 0.4: a kernel body branches with a plain ``if``.
+
+    ``with when(a < 2):`` guarded the writes of a block: it ran the block
+    whatever the condition said and masked its writes natively. A body
+    branches with Python's own ``if``, ``elif`` and ``else`` now, which the
+    trace runs once per branch (:mod:`loopty.trace`), so using ``when``
+    raises a :class:`TraceError` that shows the ``if`` to write in its place,
+    natively and traced alike.
     """
 
-    def __init__(self, condition: Any) -> None:
-        self.condition = condition
-        self.tracer = current_tracer()
-
-    def __enter__(self) -> when:
-        """Open the guard."""
-        # Natively, a guard inside a block whose guard is false is not asked:
-        # nothing under it is written, and a read out of range there answers
-        # the integer 0 (see _MaskedArr), whatever the array holds.
-        asked = self.tracer is not None or not _writes_are_masked()
-        if asked and _integer(self.condition):
-            raise TraceError(
-                _integer_guard_message(self.condition, _location(sys._getframe(1)))
-            )
-        if self.tracer is not None:
-            tracer = self.tracer
-            sorts = {**tracer.params, **tracer.array_types}
-            where = _location(sys._getframe(1))
-            self.condition = _exact_guard(
-                _unguarded(self.condition, tracer, where), tracer
-            )
-            _refuse_bitwise(self.condition, sorts, where, truth=True)
-            _refuse_arithmetic(self.condition, sorts, where)
-            tracer.push_guard(self.condition)
-        else:
-            _MASKS.append(bool(self.condition))
-        return self
-
-    def __exit__(self, *exc_info: Any) -> None:
-        """Close the guard."""
-        if self.tracer is not None:
-            self.tracer.pop_guard()
-        else:
-            _MASKS.pop()
+    def __init__(self, *_condition: Any, **_given: Any) -> None:
+        raise TraceError(_when_message(sys._getframe(1)))
 
 
 # }}}
@@ -5419,6 +6719,175 @@ def _writing_differences() -> Iterator[None]:
 # }}}
 
 
+# {{{ branches as the body writes them
+
+
+#: Guards :data:`_BRANCHING_BODIES` and the wrapping of lanky's truth values.
+_BRANCHING_LOCK = threading.Lock()
+
+#: How many bodies are being traced, in every thread; the truth values are
+#: wrapped while it is not zero (:func:`_answering_branches`).
+_BRANCHING_BODIES = 0
+
+#: What each class held under ``__bool__`` before the wrapping, to put back,
+#: and lanky's own ``__bool__`` of each, which anything outside a body asks.
+_TRUTH_SAVED: dict[str, Any] = {}
+_TRUTH_OWN: dict[str, Any] = {}
+
+#: How many traced bodies deep the current thread is.
+_BRANCHING = threading.local()
+
+
+class _FrameOut:
+    """``sys`` as lanky's own ``__bool__`` sees it when a wrapper calls it.
+
+    lanky tells who asked for a truth value by ``sys._getframe(1)``, the frame
+    that called ``__bool__``: the ``if`` clause of the generator it traces
+    for a sum is answered by recording a guard, and anything else is refused
+    (``SymbolicBoolError``). Called from :func:`_proposition_truth`, that
+    frame is the wrapper's, and the clause of every sum in a traced body was
+    refused. This ``sys`` answers a frame past the wrapper, the one that
+    asked it, and is ``sys`` in every other respect.
+    """
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(sys, name)
+
+    @staticmethod
+    def _getframe(depth: int = 0) -> Any:
+        # 0 is this function's frame and 1 lanky's __bool__; past that, the
+        # wrapper's frame is skipped.
+        return sys._getframe(depth + 2 if depth >= 1 else 1)
+
+
+def _as_asked(own: Any) -> Any:
+    """lanky's ``__bool__`` ``own``, seeing the frame that asked the wrapper.
+
+    A copy of the function whose module ``sys`` is :class:`_FrameOut`, with
+    the same code, closure (``super()`` reads its class there) and defaults.
+    Anything but a Python function is returned as it is.
+    """
+    if not isinstance(own, FunctionType):
+        return own
+    names = dict(own.__globals__)
+    names["sys"] = _FrameOut()
+    copy = FunctionType(
+        own.__code__, names, own.__name__, own.__defaults__, own.__closure__
+    )
+    copy.__kwdefaults__ = own.__kwdefaults__
+    copy.__qualname__ = own.__qualname__
+    return copy
+
+
+def _deciding() -> Tracer | None:
+    """The tracer that answers a truth value asked now, or ``None``.
+
+    The innermost trace's, in the thread running its body, unless lanky is
+    driving a generator expression for a sum: there the question is the
+    generator's ``if`` clause, which lanky records as the sum's condition.
+    """
+    if not getattr(_BRANCHING, "depth", 0):
+        return None
+    tracer = current_tracer()
+    if tracer is None or tracer.thread != threading.get_ident():
+        return None
+    from lanky.terms import current_trace
+
+    if current_trace() is not None:
+        return None
+    return tracer
+
+
+def _asked_by_body(frame: Any, tracer: Tracer) -> bool:
+    """Whether ``frame`` runs the kernel's code, the body's or a helper's.
+
+    A library's code (pymbolic's, lanky's, loopty's own) asking a term for
+    its truth is answered as lanky answers it; only the body branches. A
+    builtin the body calls, ``min`` or ``any``, has no frame of its own and
+    asks in the body's.
+    """
+    module = frame.f_globals.get("__name__")
+    return not _library(
+        module if isinstance(module, str) else None,
+        frame.f_code.co_filename,
+        tracer.own,
+    )
+
+
+def _proposition_truth(self: Any) -> bool:
+    """The truth value of a proposition: a branch, asked by a traced body."""
+    tracer = _deciding()
+    if tracer is not None:
+        frame = sys._getframe(1)
+        if _asked_by_body(frame, tracer):
+            return tracer.decide(self, frame)
+    return _TRUTH_OWN["proposition"](self)
+
+
+def _number_truth(self: Any) -> bool:
+    """The truth value of a number, ``x != 0``: a branch, asked by a traced body.
+
+    ``if k:`` of a term ``k`` is Python's ``if k != 0:``, which is what it
+    tests natively; pymbolic's own answer is the term's shape, ``True`` for
+    ``i`` and ``False`` for ``i*0``, which is what pymbolic asks it for.
+    """
+    tracer = _deciding()
+    if tracer is not None:
+        frame = sys._getframe(1)
+        if _asked_by_body(frame, tracer):
+            from lanky.terms import Comparison
+
+            return tracer.decide(Comparison(self, "!=", 0), frame)
+    return _TRUTH_OWN["number"](self)
+
+
+@contextlib.contextmanager
+def _answering_branches() -> Iterator[None]:
+    """Have a traced body's ``if`` on a term ask the tracer which way to go.
+
+    lanky refuses the truth value of a proposition outside a generator it
+    traces (``SymbolicBoolError``), and answers that of a number by its
+    shape. While a body is traced in this thread, a truth value its own code
+    asks for is a branch (:meth:`Tracer.decide`); anything else is answered
+    as before. The wrapping is installed while the first body in the
+    process is traced and put back when the last one is done, under a lock,
+    as :func:`_writing_differences` installs its own.
+    """
+    global _BRANCHING_BODIES
+    from lanky.terms import PropositionMixin, SymbolicMixin
+
+    classes = {"proposition": PropositionMixin, "number": SymbolicMixin}
+    wrappers = {"proposition": _proposition_truth, "number": _number_truth}
+    with _BRANCHING_LOCK:
+        if _BRANCHING_BODIES == 0:
+            for role, cls in classes.items():
+                _TRUTH_SAVED[role] = vars(cls).get("__bool__")
+                own = cls.__bool__
+                if own is not wrappers[role]:
+                    _TRUTH_OWN[role] = _as_asked(own)
+                cls.__bool__ = wrappers[role]
+        _BRANCHING_BODIES += 1
+    _BRANCHING.depth = getattr(_BRANCHING, "depth", 0) + 1
+    try:
+        yield
+    finally:
+        _BRANCHING.depth -= 1
+        with _BRANCHING_LOCK:
+            _BRANCHING_BODIES -= 1
+            if _BRANCHING_BODIES == 0:
+                for role, cls in classes.items():
+                    saved = _TRUTH_SAVED.pop(role, None)
+                    if vars(cls).get("__bool__") is not wrappers[role]:
+                        continue
+                    if saved is None:
+                        delattr(cls, "__bool__")
+                    else:
+                        cls.__bool__ = saved
+
+
+# }}}
+
+
 def returned_sort(annotation: Any) -> Any:
     """The sort a rule returns, from its return annotation, or ``None``.
 
@@ -5571,18 +7040,16 @@ def trace(kernel: Any, arg_types: Any) -> Term:
     _TRACERS.append(tracer)
     watching = _CallWatch.start()
     try:
-        with _writing_differences():
-            if result is None:
-                value = function(*arguments)
-                line = None
-            else:
-                value, line = _returning(function, arguments)
-            _returned(tracer, name, function, value, result, line, post_annotation)
+        with _writing_differences(), _answering_branches():
+            tracer.root = sys._getframe()
+            _run_every_path(tracer, name, function, arguments, result, post_annotation)
+            stmts, calls = tracer.joined()
     except SymbolicBoolError as exc:
         raise TraceError(
-            f"{exc}\nA kernel body may not branch on a value it computes: "
-            "write 'with when(condition):' instead of 'if condition:', which "
-            "masks the writes of the block rather than choosing a branch."
+            f"{exc}\nA sum's term is traced once, at its binders' generic "
+            "point, and does not branch: put the condition in the generator's "
+            "if clause, reduce_sum(x[k] for k in x.dom if k < m), or compute "
+            "the term in the loop around the sum."
         ) from exc
     except Exception as exc:
         message = _numbers_message(exc)
@@ -5593,12 +7060,12 @@ def trace(kernel: Any, arg_types: Any) -> Term:
         if watching:
             _CallWatch.stop()
         _TRACERS.pop()
+    tracer.stmts = stmts
+    tracer.calls = calls
+    tracer.binder_records = list(
+        dict.fromkeys(binder for run in tracer._done for binder in run.binders)
+    )
 
-    if tracer.loops:
-        # Every loop level is closed by its own iterator raising StopIteration.
-        # A level still open once the body has returned means that iterator was
-        # abandoned, which only a 'break' or a 'return' inside the loop does.
-        raise TraceError(_abandoned_message([loop.iname for loop in tracer.loops]))
     if tracer.effects:
         raise TraceError(_effects_message(name, tracer.effects))
     changes = _outside_changes(outside, tracer)
@@ -5624,7 +7091,128 @@ def trace(kernel: Any, arg_types: Any) -> Term:
         tables=tuple(tracer.tables.items()),
         calls=tuple(tracer.calls),
         result=None if result is None else result.name,
+        binders=_binders_of(tracer),
+        callsites=tuple(
+            Callsite(
+                labels=(*call.within, call.label),
+                kernel=call.callee,
+                where=call.where,
+                arrays=tuple(
+                    (argument.param, argument.array)
+                    for argument in call.arguments
+                    if argument.array is not None
+                ),
+            )
+            for call in tracer.calls
+        ),
     )
+
+
+def _run_every_path(
+    tracer: Tracer,
+    name: str,
+    function: Any,
+    arguments: Sequence[Any],
+    result: SymArr | None,
+    annotation: Any,
+) -> None:
+    """Run the body once per path through its branches.
+
+    The first run answers every condition ``True``. After each run, every
+    condition it asked past the answers it was given is asked again the other
+    way, with the answers before it as they were: a run for each branch not
+    taken yet, until every path has run once. A run that reaches a path isl
+    shows to be empty stops there and records nothing (:class:`_EmptyPath`).
+    More runs than :data:`MAX_RUNS` are refused.
+
+    A refusal raised on a branch says which (``on the branch where a >= 2``),
+    and an error of the body's own there, an ``assert`` that fails or a
+    ``raise``, is refused as one: natively it is raised at every point that
+    takes the branch, and a compiled kernel cannot raise.
+    """
+    pending: list[list[bool]] = [[]]
+    while pending:
+        forced = pending.pop()
+        if tracer.runs >= MAX_RUNS:
+            raise TraceError(_paths_message(name, tracer))
+        tracer.begin_run(forced)
+        finished = False
+        try:
+            if result is None:
+                value = function(*arguments)
+                line = None
+            else:
+                value, line = _returning(function, arguments)
+            _returned(tracer, name, function, value, result, line, annotation)
+            if tracer.loops:
+                # Every loop level is closed by its own iterator raising
+                # StopIteration. A level still open once the body has
+                # returned means that iterator was abandoned, which only a
+                # 'break' or a 'return' inside the loop does.
+                raise TraceError(
+                    _abandoned_message([loop.iname for loop in tracer.loops])
+                )
+            finished = True
+        except _EmptyPath:
+            pass
+        except TraceError as exc:
+            path = tracer.path_text()
+            if not path or getattr(exc, "branch", None) is not None:
+                raise
+            refusal = TraceError(f"{exc} (on the branch where {path})")
+            refusal.branch = path
+            raise refusal from exc
+        except SymbolicBoolError:
+            raise
+        except Exception as exc:
+            path = tracer.path_text()
+            if not path or _numbers_message(exc) is not None:
+                raise
+            raise TraceError(_branch_message(name, exc, path)) from exc
+        for position in range(len(forced), len(tracer.answers)):
+            pending.append(
+                [value for _index, value in tracer.answers[:position]]
+                + [not tracer.answers[position][1]]
+            )
+        tracer.end_run(finished)
+
+
+def _binders_of(tracer: Tracer) -> tuple[Binder, ...]:
+    """The loops of the source the trace entered, as the term names them.
+
+    Each loop the body entered, and each sum's binder it bound, in the order
+    it met them; a loop no statement runs in is no loop of the term and is
+    left out. A sum lanky drove itself, over a ``Fin`` of a size, has no
+    record from the trace, and is added at the line of the statement it is
+    in, with its binder's name as the source's.
+    """
+    used: set[str] = set()
+    summed: dict[str, Stmt] = {}
+    for stmt in tracer.stmts:
+        used.update(stmt.inames)
+        for reduction in reductions_in(stmt.expr):
+            for name in reduction.inames:
+                used.add(name)
+                summed.setdefault(name, stmt)
+    out = list(
+        dict.fromkeys(
+            record for record in tracer.binder_records if record.name in used
+        )
+    )
+    seen = {record.name for record in out}
+    # a call's record follows those of the calls made inside it, so the
+    # first call that lists a statement is the innermost it is in
+    scopes: dict[str, tuple[str, ...]] = {}
+    for call in tracer.calls:
+        for stmt_id in call.statements:
+            scopes.setdefault(stmt_id, (*call.within, call.label))
+    for name, stmt in summed.items():
+        if name not in seen:
+            seen.add(name)
+            out.append(
+                Binder(name, name, stmt.where, sum=True, scope=scopes.get(stmt.id, ()))
+            )
+    return tuple(out)
 
 
 def _fin_bound_of(sort: Any) -> Any:

@@ -98,7 +98,8 @@ from the cell map, which isl cannot follow, so isl takes any two updates to
 touch one cell. The refusal is not isl's pair: it is two updates the example
 inputs make of one node, the node PyOP2's two triangles share. PyOP2 makes
 every update atomic on a device, and silences loopy's ``write_race`` where it
-vectorizes; here ``atomic("y")`` is a step, which makes the split legal.
+vectorizes; here ``atomic(mass_action.y)`` is a step, which makes the split
+legal.
 
 *In bounds by type, and the type is checked.* ``cell`` is declared
 ``Arr[Fin[nc], Fin[3], Fin[nv]]``: every entry is a node. So ``y[cell[c, a]]``
@@ -247,11 +248,10 @@ def mass_ffc(x: Arr[Fin[3], Fin[2], Real], A: Arr[Fin[3], Fin[3], Real]) -> all(
     compared with its native one.
     """
     det = abs(jacobian(x))
-    for j in A.dom:
-        for k in A.dom[j]:
-            A[j, k] = reduce_sum(
-                FE0[ip, j] * FE0[ip, k] * W3[ip] * det for ip in W3.dom
-            )
+    for j, k in A.dom:
+        A[j, k] = reduce_sum(
+            FE0[ip, j] * FE0[ip, k] * W3[ip] * det for ip in W3.dom
+        )
 
 
 @kernel
@@ -357,10 +357,11 @@ def kulkarni(atomic: bool, target: str = "c") -> Schedule:
     target, which has no groups or work items, the accepted schedule cannot
     be built (its ``buildable`` fact says so); ``target="opencl"`` runs it.
     """
-    schedule = Schedule(mass_action, target=target).assume("nc >= 1")
+    schedule = Schedule(mass_action, target=target).assume(mass_action.nc >= 1)
     if atomic:
-        schedule = schedule.atomic("y")
-    return schedule.split("c", 32).tag(c_outer="g.0", c_inner="l.0")
+        schedule = schedule.atomic(mass_action.y)
+    cells = mass_action.c
+    return schedule.split(cells, 32).tag({cells.outer: "g.0", cells.inner: "l.0"})
 
 
 def rejected_split() -> tuple[str, tuple]:
@@ -383,10 +384,10 @@ def rejected_split() -> tuple[str, tuple]:
 #: run`` compiles and compares.
 vectorized = (
     Schedule(mass_action, target="c")
-    .assume("nc % 4 == 0")
-    .atomic("y")
-    .split("c", 4)
-    .tag(c_inner="ilp")
+    .assume(mass_action.nc % 4 == 0)
+    .atomic(mass_action.y)
+    .split(mass_action.c, 4)
+    .tag(mass_action.c.inner, "ilp")
     .example(**inputs_on(square_mesh()))
 )
 
@@ -436,7 +437,10 @@ def main() -> int:
 
     message, _witness = rejected_split()
     print()
-    print("Schedule(mass_action).split('c', 32).tag(c_outer='g.0', c_inner='l.0') ->")
+    print(
+        "Schedule(mass_action).split(mass_action.c, 32)"
+        ".tag({mass_action.c.outer: 'g.0', mass_action.c.inner: 'l.0'}) ->"
+    )
     print(f"  IllegalCast: {message}")
 
     accepted = kulkarni(atomic=True)

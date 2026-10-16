@@ -22,6 +22,7 @@ from lanky.plugins import registry
 from lanky.prelude import Fn, Int, Nat, Real
 from lanky.terms import render
 
+from lines import named, where
 from loopty import Arr, Fin, kernel
 from loopty.dataflow import APPLIED, KIND, stores
 from loopty.schedule import IllegalCast
@@ -54,7 +55,35 @@ with registry.collecting():
 
 
 def facts(kernel: Any, kind: str) -> list[Any]:
-    return [fact for fact in kernel.facts() if fact.kind == kind]
+    return [
+        fact
+        for fact in kernel.facts()
+        if fact.kind == kind
+        and not (kind == APPLIED and fact.status is Status.ASSUMED)
+    ]
+
+
+def nothing(kernel: Any) -> str:
+    """Why the one theorem ``kernel`` cites gives it nothing, as its row says.
+
+    A cited theorem that gives nothing has a row of its own, ``assumed``, the
+    reason under ``declined``, which ``lanky check`` prints (#234).
+    """
+    (row,) = [
+        fact
+        for fact in kernel.facts()
+        if fact.kind == APPLIED and fact.status is Status.ASSUMED
+    ]
+    (theorem,) = kernel.uses
+    assert row.statement == (
+        f"{theorem.__name__}, which {kernel.__name__} cites, applies to it"
+    )
+    assert row.provenance["theorem"] == theorem.fact_id
+    assert row.decided_by is None and not row.rests_on
+    said = row.provenance["declined"]
+    prefix = f"{theorem.__name__} gives {kernel.__name__} nothing: "
+    assert said.startswith(prefix), said
+    return said[len(prefix) :]
 
 
 # {{{ decided
@@ -79,9 +108,9 @@ def test_the_scans_postcondition_is_decided_from_what_it_stores() -> None:
     assert single.id == f"{KIND}:dataflow.scan@18:off"
     ids = [fact.id for fact in kernels.scan.facts()]
     assert ids.index(single.id) == ids.index(post.id) - 1
+    term = kernels.scan.term
     assert post.provenance["used"] == [
-        f"what {stmt.id} stores in off at {stmt.where}"
-        for stmt in kernels.scan.term.stmts
+        f"what {named(term, stmt.id)} stores in off" for stmt in term.stmts
     ]
 
 
@@ -114,13 +143,13 @@ def test_a_postcondition_about_reals_is_decided_with_each_equation_an_atom() -> 
 
 def test_a_statement_without_loops_is_stated_for_lean_as_storing_once() -> None:
     """One instance, so no two that differ: a part, its hypothesis ``False``."""
-    pytest.importorskip("lanky.obligations", reason="this lanky states no obligations")
     (fact,) = facts(kernels.one_cell, KIND)
     assert fact.status is Status.DECIDED
     obligation = fact.term.lean_obligation()
     assert not obligation.declined
     (part,) = obligation.parts
-    assert "two instances of S0 storing into lim" in part.label
+    stored = named(kernels.one_cell.term, "S0")
+    assert f"two instances of {stored} storing into lim" in part.label
 
 
 # }}}
@@ -132,7 +161,11 @@ def test_a_statement_without_loops_is_stated_for_lean_as_storing_once() -> None:
 def test_a_cell_stored_twice_leaves_the_postcondition_tested() -> None:
     (post,) = facts(kernels.twice, "postcondition")
     assert post.status is Status.TESTED
-    assert "S0 and S1 store into one cell of y" in post.provenance["undecided"]
+    term = kernels.twice.term
+    assert (
+        f"{named(term, 'S0')} and {named(term, 'S1')} store into one cell of y"
+        in post.provenance["undecided"]
+    )
     assert not facts(kernels.twice, KIND)
 
 
@@ -140,8 +173,10 @@ def test_a_read_before_its_store_leaves_the_postcondition_tested() -> None:
     """True at every input, and not decided: what ``S0`` read was stored after it."""
     (post,) = facts(kernels.from_the_right, "postcondition")
     assert post.status is Status.TESTED
+    reading = named(kernels.from_the_right.term, "S0")
     assert (
-        "S0 stores a cell of y that S0 reads before it" in post.provenance["undecided"]
+        f"{reading} reads a cell of y before it stores it"
+        in post.provenance["undecided"]
     )
 
 
@@ -160,7 +195,7 @@ def test_a_cell_the_storing_instance_reads_first_is_read_before_its_store(
     assert post.status is Status.TESTED
     array = "x" if name == "in_place" else "y"
     assert (
-        f"S0 stores a cell of {array} that S0 reads before it"
+        f"{named(k.term, 'S0')} reads a cell of {array} before it stores it"
         in post.provenance["undecided"]
     )
     assert not facts(k, KIND)
@@ -216,7 +251,8 @@ def _update_reason(stmt: str, cell: str) -> str:
     [
         ("bumped", "S0", "y[i]"),
         ("scattered", "S0", "y[cell[c, k]]"),
-        ("zeroed_then_added", "S1", "y[i_0]"),  # its second loop's i
+        # its second loop's i, which the term calls i_0
+        ("zeroed_then_added", "S1", "y[i]"),
     ],
 )
 def test_an_updated_array_has_no_equation_and_its_claim_is_left_to_the_runs(
@@ -234,11 +270,12 @@ def test_an_updated_array_has_no_equation_and_its_claim_is_left_to_the_runs(
     (post,) = facts(k, "postcondition")
     assert post.status is not Status.DECIDED
     assert post.status is not Status.REFUTED
-    assert _update_reason(stmt, cell) in post.provenance["undecided"]
+    reason = _update_reason(named(k.term, stmt), cell)
+    assert reason in post.provenance["undecided"]
     assert not facts(k, KIND)
     found = stores(k.term, name)
     assert not found.equations
-    assert found.why == {"y": _update_reason(stmt, cell)}
+    assert found.why == {"y": reason}
 
 
 def test_an_update_beside_an_array_stored_once_leaves_that_arrays_claim_decided() -> (
@@ -250,8 +287,9 @@ def test_an_update_beside_an_array_stored_once_leaves_that_arrays_claim_decided(
     (single,) = facts(kernels.doubled_beside, KIND)
     assert single.provenance["array"] == "z"
     assert post.rests_on == (single.id,)
-    found = stores(kernels.doubled_beside.term, "doubled_beside")
-    assert found.why == {"y": _update_reason("S1", "y[i]")}
+    term = kernels.doubled_beside.term
+    found = stores(term, "doubled_beside")
+    assert found.why == {"y": _update_reason(named(term, "S1"), "y[i]")}
 
 
 # }}}
@@ -271,8 +309,9 @@ def test_a_conjunct_the_cited_theorem_gives_is_decided_under_it() -> None:
     assert any(
         source.startswith("offsets_increase at ") for source in post.provenance["used"]
     )
-    # its conclusion is a conjunct already: no fact of its own
-    assert not facts(kernels.scan_monotone, APPLIED)
+    # its conclusion is a conjunct already: no fact of its own, and no row
+    # saying it gives nothing, since the postcondition rests on it
+    assert not [f for f in kernels.scan_monotone.facts() if f.kind == APPLIED]
 
 
 def test_a_cited_theorem_gives_its_conclusion_from_the_postcondition() -> None:
@@ -316,6 +355,10 @@ def test_a_kernel_computing_another_recurrence_gets_nothing_from_its_theorem() -
     (post,) = facts(kernels.wrong_coefficient, "postcondition")
     assert post.status is Status.REFUTED
     assert not facts(kernels.wrong_coefficient, APPLIED)
+    assert nothing(kernels.wrong_coefficient) == (
+        "the postcondition of wrong_coefficient is refuted, and a theorem is applied "
+        "to one that holds"
+    )
     from loopty.dataflow import decide_postcondition
 
     term = kernels.wrong_coefficient.term
@@ -337,6 +380,14 @@ def test_a_kernel_off_by_one_gets_nothing_from_the_theorem() -> None:
     (post,) = facts(kernels.off_by_one, "postcondition")
     assert (post.status, post.decided_by) == (Status.DECIDED, "isl")
     assert not facts(kernels.off_by_one, APPLIED)
+    # and says so: the hypothesis no conjunct is, in the kernel's names, and
+    # the conjunct nearest it, off by one in b (#234)
+    guard = "forall a in Fin(p + 1), b in Fin(p + 1) where a + b + 2 <= p. "
+    assert nothing(kernels.off_by_one) == (
+        "no conjunct of the postcondition of off_by_one is its hypothesis "
+        f"recurrence, {guard}R[a + 2, b] == -R[a, b + 2]; the nearest is "
+        f"{guard}R[a + 2, b] == -R[a, b + 1]"
+    )
 
 
 @pytest.mark.parametrize("name", ["scaled", "summed"])
@@ -354,6 +405,16 @@ def test_a_conjunct_that_rounds_is_no_hypothesis_of_a_theorem_about_reals(
     assert (post.status, post.decided_by) == (Status.DECIDED, "isl")
     assert not facts(k, APPLIED)
     assert 3.0 * 0.1 * 10 != 3.0
+    # the row says which conjunct rounds (#234)
+    conjunct = {
+        "scaled": "R[i] == c[i]*0.1",
+        "summed": "s[i] == a[i] + b[i]",
+    }[name]
+    assert nothing(k) == (
+        f"the conjunct forall i in Fin(n). {conjunct} would be its hypothesis h, and "
+        "it is about reals and rounds in floating point, so a theorem about the "
+        "reals is not given it"
+    )
 
 
 def test_a_conjunct_reads_the_same_as_reals_where_nothing_in_it_rounds() -> None:
@@ -377,6 +438,9 @@ def test_a_theorems_integer_is_never_taken_at_a_real() -> None:
     (post,) = facts(kernels.fill, "postcondition")
     assert (post.status, post.decided_by) == (Status.DECIDED, "isl")
     assert not facts(kernels.fill, APPLIED)
+    assert nothing(kernels.fill) == (
+        "its integer k would be s, which is no integer of fill's"
+    )
 
 
 def test_a_conclusion_that_rounds_decides_no_conjunct_and_is_no_row() -> None:
@@ -389,6 +453,10 @@ def test_a_conclusion_that_rounds_decides_no_conjunct_and_is_no_row() -> None:
     assert post.status is not Status.DECIDED
     assert (2.0**53 + 1) - 2.0**53 != 1
     assert not facts(kernels.ones, APPLIED)
+    assert nothing(kernels.ones) == (
+        "its conclusion there, forall i in Fin(n). R[i] + 1 - R[i] == 1, holds of the "
+        "reals and not of the floats ones computes, which round"
+    )
 
 
 def test_a_theorems_integer_decides_nothing_at_a_real() -> None:
@@ -424,10 +492,33 @@ def test_numpys_floats_are_reals_to_a_theorem_about_reals() -> None:
 
 def test_a_theorem_that_does_not_apply_gives_nothing() -> None:
     assert not facts(kernels.scan_unrelated, APPLIED)
+    assert nothing(kernels.scan_unrelated) == (
+        "no conjunct of the postcondition is its hypothesis h, forall i in Fin(n). "
+        "f(i) == 7"
+    )
     # over Nat: the cells the scan writes are not known to be naturals
     assert not facts(kernels.scan_naturals, APPLIED)
     (post,) = facts(kernels.scan_naturals, "postcondition")
     assert kernels.naturals_increase.fact_id not in post.rests_on
+    assert nothing(kernels.scan_naturals) == (
+        "its off would be off, but scan_naturals writes off, and nothing says its "
+        "cells are points of Nat: a theorem about them is over Int"
+    )
+
+
+def test_a_matcher_that_raises_says_so_in_the_theorems_row(monkeypatch) -> None:
+    # #234: an exception of the matcher was taken for a theorem that does not
+    # apply, and said nothing
+    from loopty import dataflow
+    from loopty.kernel import Kernel
+
+    def broken(*args: Any, **kwargs: Any) -> list[Any]:
+        raise RuntimeError("the matcher broke")
+
+    monkeypatch.setattr(dataflow, "application_facts", broken)
+    k = Kernel(kernels.scan_cited.fn, uses=list(kernels.scan_cited.uses))
+    assert not facts(k, APPLIED)
+    assert nothing(k) == "applying it raised RuntimeError: the matcher broke"
 
 
 def test_uses_takes_theorems_and_refuses_anything_else() -> None:
@@ -663,7 +754,7 @@ def test_lanky_check_lists_the_casts_of_the_files_schedules_once(capsys: Any) ->
     first = [
         fact
         for fact in casts
-        if "split('r', 2" in fact.id and "split('r_outer'" not in fact.id
+        if "split(scan.r, 2" in fact.id and "split(scan.r.outer" not in fact.id
     ]
     assert len(first) == 2  # bijective and monotone, once
     assert not [fact for fact in ledger if fact.provenance.get("duplicate_claims")]
@@ -672,7 +763,7 @@ def test_lanky_check_lists_the_casts_of_the_files_schedules_once(capsys: Any) ->
     )  # the refuted postcondition
     out = capsys.readouterr().out
     assert "DUPLICATE" not in out
-    assert "split('r', 2" in out or "split(r, 2" in out
+    assert "split(scan.r, 2)" in out
 
 
 # }}}
@@ -729,29 +820,44 @@ def test_lanky_check_lists_a_layouts_facts_and_a_windows_casts_once() -> None:
     assert clobber.owner == "differences"
     assert (clobber.status, clobber.decided_by) == (Status.DECIDED, "isl")
     assert clobber.id in {fact.id for fact in kernels.windowed_differences.facts()}
-    window = [fact for fact in ledger if ".contract('f'" in fact.id]
+    window = [fact for fact in ledger if ".contract(differences.f" in fact.id]
     assert window
     assert all(fact.owner == "differences" for fact in window)
 
 
-def test_a_substitutions_and_a_windows_definedness_read_apart_in_the_ledger() -> None:
-    """Both steps need every cell of ``f`` stored before it is read: two rows.
+def test_a_substitution_and_a_window_rest_on_one_definedness_row() -> None:
+    """Both steps need every cell of ``f`` stored before it is read: one row.
 
     ``examples/fusion.py`` substitutes ``f`` in one schedule and keeps it in a
-    window in another, after the same fusion. Each step's fact leads with the
-    step, so the two rows of ``lanky check`` read apart.
+    window in another, after the same fusion. Every schedule of the program
+    is made with that fact, where it runs without the zeros ``f`` is made
+    with, since no read sees them (#290), and both steps rest on it: one row
+    of ``lanky check``, at the line that makes ``f``, which the window's
+    ``no-clobber`` row names.
     """
     from lanky.check import check_path
 
     ledger = list(check_path(EXAMPLES / "fusion.py"))
-    rows = [
-        fact.statement
+    (row,) = [fact for fact in ledger if fact.id.endswith(":zeros:f")]
+    assert (row.kind, row.status, row.decided_by) == (
+        "definedness",
+        Status.DECIDED,
+        "isl",
+    )
+    assert row.statement == (
+        "every cell of burgers_rhs.f that burgers_rhs reads, burgers_rhs.flux "
+        "has stored by the time it is read, so burgers_rhs runs without the "
+        "zeros burgers_rhs.f is made with"
+    )
+    fusion = load(EXAMPLES / "fusion.py")
+    assert row.where == where(fusion.burgers_rhs, "f = Arr.zeros_like(u)")
+    assert not [
+        fact
         for fact in ledger
         if fact.kind == "definedness" and fact.statement.startswith("for ")
     ]
-    assert len(rows) == len(set(rows)) == 2
-    assert any(row.startswith("for substitute('f'), every cell of f") for row in rows)
-    assert any(row.startswith("for contract('f'") for row in rows)
+    (clobber,) = [fact for fact in ledger if fact.kind == "no-clobber"]
+    assert clobber.rests_on == (row.id,)
 
 
 # }}}
@@ -769,7 +875,6 @@ def _without_lean(reason: str) -> None:
 @pytest.fixture(scope="module")
 def lean(tmp_path_factory: pytest.TempPathFactory) -> Any:
     """A Lean oracle with an open session and a proof cache of its own."""
-    pytest.importorskip("lanky.obligations", reason="this lanky states no obligations")
     from lanky.oracles.lean import LeanOracle, ProofCache
 
     if os.environ.get("LANKY_LEAN_DISABLE"):

@@ -59,6 +59,12 @@ annotations write them; isl's inverse of a layout, in pieces with ``//`` and
 ``%``, is the witness that every address has its cell. A layout at every
 size is stated the same way, its address as the function writes it, and two
 layouts the same is then a polynomial identity, which Lean multiplies out.
+Two layouts at a number are stated as written too: Python folds ``N**3 * e``
+to ``27*e`` when ``N = 3``, so the body is run once more with each module
+constant it reads a symbol, and the number put back unfolded, and loopy's
+dim_tags give each stride as the product of the extents nested inside it,
+``3 ^ 3 * e + a + 3 * b + 3 ^ 2 * c = 3 * 3 * 3 * e + a + 3 * b + 3 * 3 *
+c``, whose arithmetic is Lean's and not Python's.
 Where its strides are each the product of the extents nested inside, as
 loopy's dim_tags make them (a mixed radix), loopty gives Lean the steps
 ``omega`` lacks: the products that bound each digit's term, ``0 ≤ n * (n - 1
@@ -72,7 +78,7 @@ from __future__ import annotations
 import inspect
 import os
 import re
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from functools import partial
 from typing import Any
@@ -102,6 +108,12 @@ class Piece:
     as one tuple, ``cell: Where[...]``. ``sizes`` are the sizes the function
     computes with, which it is run with as themselves (see the module), and
     ``extents`` the bound of each index's ``Fin``, for a box.
+
+    ``written`` is the address as the function writes it, where Python folded
+    the module constants it computes with: ``3**3 * e + (a + 3 * b + 3**2 *
+    c)`` where ``address`` is ``27*e + a + 3*b + 9*c``. Lean states two
+    layouts the same with it, so the arithmetic is Lean's (#275); ``None``
+    where it is ``address``.
     """
 
     fn: Any
@@ -112,6 +124,7 @@ class Piece:
     packed: bool = False
     sizes: tuple[str, ...] = ()
     extents: tuple[Any, ...] = ()
+    written: Any = None
 
     @property
     def polynomial(self) -> bool:
@@ -149,13 +162,13 @@ class Piece:
         anything it computes with besides the indices (a module constant, a
         helper) may have changed since. At a cell of numbers the address is
         compared with the term's value there; at symbolic indices, in a
-        traced kernel, the function's term is computed again and compared
-        with the stated one, at the ``sizes`` the call gave. ``None`` when
-        they agree.
+        traced kernel, ``got`` is the term the trace records, and it is
+        compared with the stated term at those indices and at the ``sizes``
+        the call gave (:func:`_same_address`). ``None`` when they agree.
         """
         import numbers
 
-        from lanky.terms import Var, render, structurally_equal
+        from lanky.terms import render
         from pymbolic import evaluate
 
         from loopty.hypotheses import substitute
@@ -174,16 +187,14 @@ class Piece:
                 return None
             cell = ", ".join(f"{n}={v}" for n, v in zip(self.names, values))
             return f"{got} for ({cell}), where its facts say {stated}"
-        fresh = tuple(Var(name) for name in self.names)
-        now = self.run((fresh,) if self.packed else fresh, sizes)
-        address = substitute(self.address, sizes) if sizes else self.address
-        if structurally_equal(_plain(now), _plain(address)):
+        # the stated term at the call's own indices, not a second call's term:
+        # a function that answers differently when called again would pass
+        address = substitute(
+            self.address, {**sizes, **dict(zip(self.names, values, strict=True))}
+        )
+        if _same_address(got, address):
             return None
-        mine = polynomial(now)
-        if mine is not None and mine == polynomial(address):
-            # the same address multiplied out (see _normal)
-            return None
-        return f"{render(now)}, where its facts say {render(address)}"
+        return f"{render(got)}, where its facts say {render(address)}"
 
     def at(self, values: dict[str, int]) -> Piece:
         """This piece at the sizes ``values``: its address, cells and buffer there."""
@@ -366,6 +377,39 @@ def _normal(expr: Any) -> Any:
     return term if _affine(term) else expr
 
 
+def _same_address(got: Any, stated: Any) -> bool:
+    """Whether two addresses are one term at every value of what they name.
+
+    The same term; the same polynomial multiplied out, ``n * i - n * i + i``
+    and ``i``; or, quasi-affine, the same function of its names as isl reads
+    it, ``(i + 1) + b`` and ``i + (1 + b)``, with a read of an array or a
+    product of unknowns one name wherever it is the same term.
+    """
+    from lanky.terms import structurally_equal
+
+    from loopty.lower import _plain
+
+    got, stated = _plain(got), _plain(stated)
+    if structurally_equal(got, stated):
+        return True
+    found = polynomial(got)
+    if found is not None and found == polynomial(stated):
+        return True
+    if isinstance(got, bool) or isinstance(stated, bool):
+        return False
+    table = idx.Reflections()
+    reflected: dict[str, Any] = {}
+    try:
+        first = flow.expr_text(got, reflected=reflected, table=table)
+        second = flow.expr_text(stated, reflected=reflected, table=table)
+        names = sorted(flow.free_names(first) | flow.free_names(second))
+        head = f"[{', '.join(names)}] -> " if names else ""
+        apart = isl.Set(f"{head}{{ : {first} < {second} or {first} > {second} }}")
+        return bool(apart.is_empty())
+    except (isl.Error, flow.NonAffine, TypeError, ValueError):
+        return False
+
+
 def _linear_in(found: Polynomial, names: Sequence[str]) -> bool:
     """Whether each monomial of ``found`` has at most one of ``names``, once."""
     for key in found:
@@ -461,7 +505,60 @@ def _piece(fn: Any) -> Piece:
     # every size the body read, which a call has to give it to run
     used = tuple(sorted(sizes))
     bound = _normal(buffer.bound)
-    return Piece(fn, names, cells, address, bound, packed, used, extents)
+    written = _written(fn, args, names, sizes, address)
+    return Piece(fn, names, cells, address, bound, packed, used, extents, written)
+
+
+def _constants(fn: Any, skip: Collection[str]) -> dict[str, int]:
+    """The module constants ``fn`` reads, the numbers by name: ``{"N": 3}``.
+
+    The names its code reads from its module, which hold an integer there,
+    and none of ``skip``, the cell's indices and the sizes.
+    """
+    out: dict[str, int] = {}
+    for name in fn.__code__.co_names:
+        value = fn.__globals__.get(name)
+        if name in skip or isinstance(value, bool) or not isinstance(value, int):
+            continue
+        out[name] = value
+    return out
+
+
+def _written(
+    fn: Any, args: Any, names: Sequence[str], sizes: dict[str, Any], address: Any
+) -> Any:
+    """The address as ``fn`` writes it, its module constants not folded, or ``None``.
+
+    Run on the cell with ``N = 3`` a number, ``N**3 * e + (a + N * b + N**2
+    * c)`` is ``27*e + a + 3*b + 9*c`` before anyone reads it. Run once
+    more, with each module constant the body reads a symbol, the address is
+    the term the function writes, and each symbol put back as its number,
+    unfolded, ``3**3 * e + (a + 3 * b + 3**2 * c)``, is the address as
+    written. It is kept only where it is the same function of the cell as
+    ``address`` (:func:`_same_address`): a body that branches on a constant,
+    or gives another address for a symbol, keeps the folded one alone.
+    """
+    from lanky.terms import Var, structurally_equal
+
+    from loopty.hypotheses import substitute
+    from loopty.lower import _plain
+
+    constants = _constants(fn, {*names, *sizes})
+    if not constants:
+        return None
+    symbols = {**sizes, **{name: Var(name) for name in constants}}
+    try:
+        symbolic = _with_sizes(fn, symbols)(*args)
+        if isinstance(symbolic, bool):
+            return None
+        written = substitute(_plain(symbolic), constants)
+    except Exception:  # noqa: BLE001 - then the folded address is the one stated
+        return None
+    if structurally_equal(written, _plain(address)) or not _same_address(
+        written, address
+    ):
+        return None
+    return written
 
 
 def _owner(obj: Any, fn: Any) -> str:
@@ -1186,7 +1283,6 @@ def dim_tags(tags: str, of: Layout) -> Layout:
     * k`` over ``ne x n x n x n``, the layout at every ``n``. The layout is of
     the cells of ``of``'s one piece, a box of one ``Fin`` per axis.
     """
-    from lanky.terms import Var
 
     parts = [part.strip() for part in tags.split(",")]
     levels = []
@@ -1219,21 +1315,29 @@ def dim_tags(tags: str, of: Layout) -> Layout:
         )
     extents = [evaluated[name].bound for name in piece.names]
     stride: Any = 1
+    # the stride as loopy's rule writes it, where Python folds 3 * 3 to 9
+    product: Any = 1
     strides: dict[int, Any] = {}
+    products: dict[int, Any] = {}
     for level in range(len(levels)):
         axis = levels.index(level)
         strides[axis] = stride
+        products[axis] = product
         extent = extents[axis]
         if level < len(levels) - 1:
             # the next stride is the product of the extents nested inside it
             stride = extent if _unit(stride) else stride * extent
-    terms = [
-        Var(name) if _unit(strides[axis]) else strides[axis] * Var(name)
-        for axis, name in enumerate(piece.names)
-    ]
-    address: Any = terms[0]
-    for term in terms[1:]:
-        address = address + term
+            product = extent if _unit(product) else prim.Product((product, extent))
+    address = _sum_of_strides(piece.names, strides)
+    written = _sum_of_strides(piece.names, products)
+    from lanky.terms import structurally_equal
+
+    from loopty.lower import _plain
+
+    if structurally_equal(_plain(written), _plain(address)) or not _same_address(
+        written, address
+    ):
+        written = None
     shown = f"dim_tags {tags}"
     tagged = Piece(
         _Named(piece.fn, shown),
@@ -1243,6 +1347,7 @@ def dim_tags(tags: str, of: Layout) -> Layout:
         piece.buffer,
         sizes=tuple(sorted(_sizes(address, piece.names))),
         extents=tuple(extents),
+        written=written,
     )
     out = object.__new__(Layout)
     out.pieces = (tagged,)
@@ -1255,6 +1360,20 @@ def dim_tags(tags: str, of: Layout) -> Layout:
     out._facts = ()
     out._shown = shown
     return out
+
+
+def _sum_of_strides(names: Sequence[str], strides: dict[int, Any]) -> Any:
+    """``strides[0] * names[0] + ...``, a stride of one left out."""
+    from lanky.terms import Var
+
+    terms = [
+        Var(name) if _unit(strides[axis]) else strides[axis] * Var(name)
+        for axis, name in enumerate(names)
+    ]
+    address: Any = terms[0]
+    for term in terms[1:]:
+        address = address + term
+    return address
 
 
 class _Named:

@@ -6,8 +6,8 @@ name an instruction of its own and no fix:
 * its bounds check reads a guard into isl only where the guard is an affine
   comparison of integers, and under any other guard it checks an access at
   every point of the loop, so it refuses one the guard keeps in bounds:
-  ``x[i + 4]`` under ``when(i * 0.5 < 2)``, ``when(i * i < 16)`` or
-  ``when(m[i] > 0.5)`` fails with ``LoopyIndexError: 'x[i + 4]' in
+  ``x[i + 4]`` under ``if i * 0.5 < 2:``, ``if i * i < 16:`` or
+  ``if m[i] > 0.5:`` fails with ``LoopyIndexError: 'x[i + 4]' in
   instruction 'S0' ... could not establish ...`` (#148, note 23 in
   ``docs/loopy-notes.md``);
 * its type inference visits an instruction's value and never its guard, so a
@@ -103,6 +103,13 @@ def _statement(lowering: Lowering, instruction: str) -> Stmt | None:
     return None
 
 
+def _said(term: Term, stmt_id: str) -> str:
+    """A statement as a message names it: ``y[i] = x[i] (f.py:3)``."""
+    from loopty.handles import statement_names
+
+    return statement_names(term)(stmt_id)
+
+
 def _unread_guard(error: LoopyIndexError, lowering: Lowering) -> GuardNotRead | None:
     """:class:`GuardNotRead` for loopy's refusal where a guard explains it, or ``None``.
 
@@ -127,18 +134,18 @@ def _unread_guard(error: LoopyIndexError, lowering: Lowering) -> GuardNotRead | 
         fix = (
             "Write the guard as a comparison of integers, which loopy reads, "
             "or add one that keeps the access in bounds, which it reads too: "
-            + " and ".join(f"'with when({condition}):'" for condition in suggested)
+            + " and ".join(f"'if {condition}:'" for condition in suggested)
         )
     else:
         fix = (
             "Write the guard as a comparison of integers, which loopy reads "
-            "('when(i < 4)' for 'when(i * 0.5 < 2)'), or add one that keeps "
+            "('if i < 4:' for 'if i * 0.5 < 2:'), or add one that keeps "
             "the access in bounds"
         )
     plural = "s" if len(conjuncts) > 1 else ""
     return GuardNotRead(
-        f"loopy's bounds check refuses an access of {stmt.id} of {term.name} at "
-        f"{stmt.where}: it reads into isl only a guard that is an affine "
+        f"loopy's bounds check refuses an access of {_said(term, stmt.id)} in "
+        f"{term.name}: it reads into isl only a guard that is an affine "
         f"comparison of integers, so under the guard{plural} {guard} it checks "
         "the access at every point of the loops around it, and cannot show it "
         f"in bounds there. {fix}. loopy said: {text}"
@@ -302,7 +309,7 @@ def _called_in_a_guard(error: KeyError, lowering: Lowering) -> LoweringError | N
         return None
     stmt = guarded[0]
     return LoweringError(
-        f"the guard of {stmt.id} of {term.name} at {stmt.where} calls {name}, "
+        f"the guard of {_said(term, stmt.id)} in {term.name} calls {name}, "
         "which loopy cannot call there: its type inference visits a statement's "
         "value and never its guard, so a function only a guard calls is never "
         f"resolved, and loopy failed with KeyError: {name!r} (note 20 in "
@@ -322,10 +329,13 @@ class RefusedNatively(OverflowError):
     numpy integer whose type does not hold it, and the compiled kernel would
     compute a value in C's type instead (#153). The message names the point
     and the fix. ``checks`` names the flags of a program's checked points the
-    refused statement runs after, empty for one every run reaches.
+    refused statement runs after, empty for one every run reaches, and
+    ``statement`` the refused statement's id, for the executor to stop the
+    program at the call it is in (#176).
     """
 
     checks: frozenset[str] = frozenset()
+    statement: str | None = None
 
 
 #: The operations numpy converts a Python int beside a numpy integer for, into
@@ -359,19 +369,21 @@ def refuse_where_native_does(
 
     * an operation, ``+``, ``*``, ``//``, ``%``, ``**``, ``^``, ``<<`` or
       ``>>``, of such arithmetic beside a numpy integer narrower than 64 bits
-      or an unsigned one, over the loops around the statement with no guard
-      applied, since a ``when`` masks the write and the body computes at
-      every point of its loops; inside a sum, over the sum's own, narrowed by
-      the generator's ``if`` clause, which skips the body
-      (:func:`_summed_points`). A point
-      where one of the integer's reads is out of bounds is left out: under a
-      false guard the native run reads such a cell as the Python int ``0``;
+      or an unsigned one, where the body computes it: a statement's value and
+      subscripts over its domain, which its path condition narrows, and each
+      condition of the path over the points it is asked at
+      (:attr:`loopty.term.Stmt.path`); a guard with no path, a program's
+      checked point, over the loops with no guard applied; inside a sum, over
+      the sum's own, narrowed by the generator's ``if`` clause, which skips
+      the body (:func:`_summed_points`). A point where one of the integer's
+      reads is out of bounds is left out, since the native run stops at the
+      read;
     * a store of such arithmetic into an array stored so natively, over the
       points the statement stores at, when its guard narrows its domain
       whole, a program's checked points apart (:func:`_store`); and of a
-      literal the array's type does not hold under such a
-      guard, which the trace leaves here (:func:`loopty.trace.trace`), since
-      the guard may hold nowhere: ``with when(i < 0): y[i] = 300``;
+      literal the array's type does not hold on a branch, which the trace
+      leaves here (:func:`loopty.trace.trace`), since the branch may be taken
+      nowhere: ``if i < 0: y[i] = 300``;
     * such arithmetic a kernel called in a loop is given for a scalar of a
       numpy integer sort, which its contract converts into that type, over
       the points the call is made at (:func:`_converted`, #232).
@@ -384,12 +396,14 @@ def refuse_where_native_does(
     entries say: those are left to the native refusal (#166).
 
     A program's statement after a checked point runs only where the point
-    passed (:meth:`loopty.compose._Builder.guarded`), and natively the call
+    passed (:meth:`loopty.compose._Composer.guarded`), and natively the call
     after a point that fails is refused before it starts, with the point's
     error. So its refusal is returned, not raised, with the flags of the
-    points before it (:attr:`RefusedNatively.checks`), for the executor to
-    raise once the run has shown that those points passed, before anything
-    a later point says; a statement every run reaches is refused here.
+    points before it (:attr:`RefusedNatively.checks`) and the statement
+    (:attr:`RefusedNatively.statement`), for the executor to run the program
+    up to the statement's call and raise it once the run has shown that
+    those points passed, before anything a later point says; a statement
+    every run reaches is refused here.
     """
     from loopty.contract import resolve_sizes
     from loopty.promotion import Promotion
@@ -402,9 +416,20 @@ def refuse_where_native_does(
         _converted(term, call, promotion, sizes)
     for stmt in term.stmts:
         loops = stmt.loop_domain if stmt.loop_domain is not None else stmt.domain
+        parts: tuple[tuple[Any, Any], ...] = (
+            (stmt.assignee.indices, loops),
+            (stmt.expr, loops),
+            (stmt.guard, loops),
+        )
+        if stmt.path:
+            parts = (
+                (stmt.assignee.indices, stmt.domain),
+                (stmt.expr, stmt.domain),
+                *stmt.path,
+            )
         try:
-            for part in (stmt.assignee.indices, stmt.expr, stmt.guard):
-                _operations(part, term, stmt, promotion, loops, sizes)
+            for part, points in parts:
+                _operations(part, term, stmt, promotion, points, sizes)
             _store(term, stmt, promotion, sizes, flags)
         except RefusedNatively as refusal:
             before = _checks_before(stmt, flags)
@@ -414,12 +439,14 @@ def refuse_where_native_does(
                 deferred = RefusedNatively(
                     str(refusal).replace(
                         "stops before it starts",
-                        "is refused once it has run, since the program's checked "
-                        "points before the call passed, which only the run shows",
+                        "stops at the call, since the program's checked points "
+                        "before the call passed, which only the run shows, and "
+                        "keeps what the calls before it wrote, as natively",
                         1,
                     )
                 )
                 deferred.checks = before
+                deferred.statement = stmt.id
     return deferred
 
 

@@ -18,7 +18,8 @@ tree, one set of coefficients and one device:
   variants that make loopty's choices, so that each cost can be told apart:
   `global` keeps every box's triangle whole, as `fused` does, and `inline`
   computes the target's scaled offsets `x` and `y` inside the sum, at every
-  term, as loopty's code of the example does. On the C target it is built with the flags loopty builds its kernels with,
+  term, as loopty's code of the example did before it computed them once per
+  target (#270). On the C target it is built with the flags loopty builds its kernels with,
   `-fwrapv` beside loopy's own, which changes the code GCC makes; `--no-wrapv`
   builds it with loopy's flags alone;
 - loopty's schedules of the example, written out at the order asked for,

@@ -77,8 +77,9 @@ def main() -> int:
     quadrature = load("quadrature")
     mass = (
         Schedule(quadrature.mass_action, target="opencl")
-        .split("c", 32)
-        .tag(c_outer="g.0", c_inner="l.0")
+        .split(quadrature.mass_action.c, 32)
+        .on_groups(quadrature.mass_action.c.outer)
+        .on_items(quadrature.mass_action.c.inner)
     )
     report(
         "P1 mass with constant tables, cells on g.0/l.0",
@@ -95,7 +96,7 @@ def main() -> int:
         "two passes fused on the element and the row",
         factored.weak_derivative,
         Schedule(factored.weak_derivative, target="opencl").fuse(
-            "along_r", "along_s", loops=2
+            factored.weak_derivative.along_r.a, factored.weak_derivative.along_s.a
         ),
         factored.inputs(),
     )

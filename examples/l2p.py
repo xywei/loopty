@@ -68,8 +68,8 @@ contiguous runs of targets, as boxtree's do, so ``box_target_starts`` is the
 scan of the counts. sumpy reconstructs the triangle symbolically, inside the
 straight-line code it generates for each target, and its Taylor sum is
 sympy's; here both are loops. ``sumpy_l2p`` is sumpy's own kernel on this
-file's inputs: the potentials agree to round-off (``benchmarks/l2p.py``
-recorded them, at the commit below, on loopy main).
+file's inputs: the potentials agree within ``1e-14`` of the largest one
+(``benchmarks/l2p.py`` recorded them, at the commit below, on loopy main).
 
 The code it mirrors, at sumpy 13a48a0:
 
@@ -107,7 +107,6 @@ from loopty import (
     reduce_sum,
     table,
     upstream,
-    when,
 )
 from loopty.math import ipow
 
@@ -222,7 +221,7 @@ storage_index = layout(centre, derivatives)
 @kernel
 def unpack(
     coeffs: Arr[Fin[nb], Fin[2 * P + 1], Real],
-    C: Arr[Where[i: Fin[nb], a: Fin[2], b: Fin[Q], a + b <= P], Real],
+    C: Arr[Where[box: Fin[nb], a: Fin[2], b: Fin[Q], a + b <= P], Real],
 ) -> all(C[i, 0, 0] == coeffs[i, 0] for i in Fin[nb]) & all(
     C[i, a, b] == coeffs[i, 2 * (a + b) - 1 + a]
     for i in Fin[nb]
@@ -237,19 +236,17 @@ def unpack(
     The postcondition is sumpy's storage order, ``2 (a + b) - 1 + a`` after
     the value at the centre, decided from what the body stores.
     """
-    for i in C.dom:
-        for a in C.dom[i]:
-            for b in C.dom[i, a]:
-                with when(a + b == 0):
-                    C[i, a, b] = coeffs[i, centre(a, b)]
-                with when(a + b >= 1):
-                    C[i, a, b] = coeffs[i, derivatives((a, b))]
+    for box, a, b in C.dom:
+        if a + b == 0:
+            C[box, a, b] = coeffs[box, centre(a, b)]
+        else:
+            C[box, a, b] = coeffs[box, derivatives((a, b))]
 
 
 @kernel(uses=[on_every_triangle])
 def reconstruct(
-    C: Arr[Where[i: Fin[nb], a: Fin[2], b: Fin[Q], a + b <= P], Real],
-    R: Arr[Where[i: Fin[nb], a: Fin[Q], b: Fin[Q], a + b <= P], Real],
+    C: Arr[Where[box: Fin[nb], a: Fin[2], b: Fin[Q], a + b <= P], Real],
+    R: Arr[Where[box: Fin[nb], a: Fin[Q], b: Fin[Q], a + b <= P], Real],
 ) -> all(
     R[i, a, b] == C[i, a, b]
     for i in Fin[nb]
@@ -269,13 +266,11 @@ def reconstruct(
     ``G_xx = -G_yy``: a coefficient with two more ``x``'s is minus the one
     with two more ``y``'s, which an earlier row of the triangle stored.
     """
-    for i in R.dom:
-        for a in R.dom[i]:
-            for b in R.dom[i, a]:
-                with when(a < 2):
-                    R[i, a, b] = C[i, a, b]
-                with when(a >= 2):
-                    R[i, a, b] = -R[i, a - 2, b + 2]
+    for box, a, b in R.dom:
+        if a < 2:
+            R[box, a, b] = C[box, a, b]
+        else:
+            R[box, a, b] = -R[box, a - 2, b + 2]
 
 
 #: What sumpy stores for every box, as a table: ``a < 2`` and ``a + b <= P``.
@@ -287,7 +282,7 @@ TRIANGLES = reconstruct.arg_types["R"].domain
 
 @kernel
 def evaluate(
-    R: Arr[Where[i: Fin[nb], a: Fin[Q], b: Fin[Q], a + b <= P], Real],
+    R: Arr[Where[box: Fin[nb], a: Fin[Q], b: Fin[Q], a + b <= P], Real],
     cx: Arr[Fin[nb], Real],
     cy: Arr[Fin[nb], Real],
     cnt: Arr[Fin[nb], Nat],
@@ -302,15 +297,14 @@ def evaluate(
     an integer power, in both runs; ``x**a`` would be the C library's ``pow``
     in both, as numpy computes it.
     """
-    for i in pot.dom:
-        for t in pot.dom[i]:
-            x = (tx[i, t] - cx[i]) / rscale
-            y = (ty[i, t] - cy[i]) / rscale
-            pot[i, t] = SCALING * reduce_sum(
-                R[i, a, b] * ipow(x, a) * ipow(y, b) * INV_FACT[a] * INV_FACT[b]
-                for a in R.dom[i]
-                for b in R.dom[i, a]
-            )
+    for box, target in pot.dom:
+        x = (tx[box, target] - cx[box]) / rscale
+        y = (ty[box, target] - cy[box]) / rscale
+        pot[box, target] = SCALING * reduce_sum(
+            R[box, a, b] * ipow(x, a) * ipow(y, b) * INV_FACT[a] * INV_FACT[b]
+            for a in R.dom[box]
+            for b in R.dom[box, a]
+        )
 
 
 @program
@@ -329,37 +323,37 @@ def l2p(coeffs, cx, cy, cnt, tx, ty, pot, rscale):
 # {{{ 3. the schedules
 
 #: Box by box: its stored coefficients, its triangle, then its targets, the
-#: order sumpy runs them in. Each fusion is of the loop over the boxes alone.
-fused = (
-    Schedule(l2p, target="c")
-    .fuse("unpack", "reconstruct", loops=1)
-    .fuse("reconstruct", "evaluate", loops=1)
+#: order sumpy runs them in. The three calls are fused along their loops over
+#: the boxes, and no deeper.
+fused = Schedule(l2p, target="c").fuse(
+    l2p.unpack.box, l2p.reconstruct.box, l2p.evaluate.box
 )
 
 #: The same, keeping only the box at hand's triangle and table, as sumpy
-#: keeps them in registers: lambda i, a, b: (a, b), found along the order.
-contracted = fused.contract("R").contract("C")
+#: keeps them in registers: lambda box, a, b: (a, b), found along the order.
+contracted = fused.contract(l2p.R).contract(l2p.C)
 
 #: sumpy's own schedule on a GPU, ``E2PFromSingleBox.get_optimized_kernel``:
 #: each box a work group (its ``itgt_box`` on ``g.0``), whose one work item
-#: runs the box's coefficients, triangle and targets in turn. The cells of C
-#: and R the program makes are zeroed by the work item that stores them.
+#: runs the box's coefficients, triangle and targets in turn. No read sees
+#: the zeros the program makes C and R with, so it runs without them, and
+#: the box's loop is the one loop on an axis.
 #: Checked anywhere; ``loopty run`` runs it where pyopencl and a device are.
-on_a_gpu = fused.retarget("opencl").tag(i="g.0")
+on_a_gpu = fused.retarget("opencl").on_groups(l2p.unpack.box)
 
 
 def refused_interchange() -> Schedule:
     """Columns of the triangle outside its rows: refused, with the pair it reorders."""
-    return Schedule(reconstruct, target="c").interchange("b", "a")
+    return Schedule(reconstruct, target="c").interchange(reconstruct.b, reconstruct.a)
 
 
 def refused_row() -> Schedule:
     """One row of the triangle at a time: refused, with the read it would break."""
-    return fused.contract("R", lambda i, a, b: b)
+    return fused.contract(l2p.R, lambda box, a, b: b)
 
 
 def on_a_device(target: str = "c") -> Schedule:
-    """sumpy's own schedule with each box's windows: ``i`` on ``g.0``.
+    """sumpy's own schedule with each box's windows: each box on ``g.0``.
 
     Each work item keeps its own windows, as loopy keeps a private
     temporary, so the boxes need no order. Built for C here, which has no
@@ -369,7 +363,7 @@ def on_a_device(target: str = "c") -> Schedule:
     ledger.
     """
     schedule = contracted if target == "c" else contracted.retarget(target)
-    return schedule.tag(i="g.0")
+    return schedule.on_groups(l2p.unpack.box)
 
 
 # }}}
@@ -467,7 +461,7 @@ def example_inputs() -> dict:
 RECORDED = Path(__file__).with_name("l2p_sumpy.json")
 
 
-@upstream(l2p)
+@upstream(l2p, within=1e-14)
 def sumpy_l2p(coeffs, cx, cy, cnt, tx, ty, pot, rscale):
     """sumpy's own E2PFromSingleBox at 13a48a0, run on these inputs and recorded."""
     recorded = json.loads(RECORDED.read_text())

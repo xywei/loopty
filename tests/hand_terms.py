@@ -9,11 +9,19 @@ a stencil with a loop-carried dependence in time, and a ragged reduction.
 
 Sizes are symbolic pymbolic variables, as they are in a real trace; the test
 supplies concrete values only when it runs the compiled code.
+
+Each fixture is made once per set of arguments and kept: a schedule names a
+loop by a handle from what it schedules (:mod:`loopty.handles`), and
+``scope(jacobi_term()).t`` names the loop of the same term as
+``Schedule(jacobi_term())`` schedules. A term is a value, so sharing one is
+safe.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import functools
+import inspect
 
 import islpy as isl
 import numpy as np
@@ -22,6 +30,23 @@ import pymbolic.primitives as prim
 from loopty.term import Access, ArrType, Reduction, Stmt, Term
 
 V = prim.Variable
+
+
+def _kept(fixture):
+    """``fixture``, made once for each set of arguments, defaults filled in."""
+    signature = inspect.signature(fixture)
+    made: dict = {}
+
+    @functools.wraps(fixture)
+    def kept(*args, **kwargs):
+        bound = signature.bind(*args, **kwargs)
+        bound.apply_defaults()
+        key = tuple(sorted(bound.arguments.items()))
+        if key not in made:
+            made[key] = fixture(*args, **kwargs)
+        return made[key]
+
+    return kept
 
 
 def S(name: str, *indices: object) -> prim.Subscript:
@@ -43,6 +68,7 @@ def dense(*axes: object, dtype: object = REAL) -> ArrType:
     return ArrType(axes=tuple(axes), dtype=dtype, ragged=(False,) * len(axes))
 
 
+@_kept
 def axpy_term() -> Term:
     """``z[i] = a * x[i] + y[i]`` over ``Fin[n]``, with a scalar parameter."""
     domain = isl.Set("[n] -> { [i] : 0 <= i < n }")
@@ -70,6 +96,7 @@ def axpy_term() -> Term:
     )
 
 
+@_kept
 def transpose_term() -> Term:
     """``b[j, i] = a[i, j]``: a two-dimensional permutation of index space."""
     domain = isl.Set("[n, m] -> { [i, j] : 0 <= i < n and 0 <= j < m }")
@@ -92,6 +119,7 @@ def transpose_term() -> Term:
     )
 
 
+@_kept
 def jacobi_term() -> Term:
     """1D Jacobi in time: ``u[t+1, i] = (u[t, i-1] + u[t, i+1]) / 2``.
 
@@ -119,6 +147,7 @@ def jacobi_term() -> Term:
     )
 
 
+@_kept
 def coupled_pair_term() -> Term:
     """Two statements that feed each other, one of them across the time loop.
 
@@ -159,6 +188,7 @@ def coupled_pair_term() -> Term:
     )
 
 
+@_kept
 def spmv_term(exactness: str = "reassoc") -> Term:
     """Ragged CSR product, the reduction form.
 
@@ -210,6 +240,7 @@ def spmv_term(exactness: str = "reassoc") -> Term:
     )
 
 
+@_kept
 def spmv_accumulate_term() -> Term:
     """The same product written as an accumulation over a two-deep loop nest.
 
@@ -251,6 +282,7 @@ def spmv_accumulate_term() -> Term:
     )
 
 
+@_kept
 def spmv_and_shift_term(order: str = "ps") -> Term:
     """:func:`spmv_accumulate_term` and a shift of ``off`` by one, in any order.
 
@@ -301,6 +333,7 @@ def spmv_and_shift_term(order: str = "ps") -> Term:
     )
 
 
+@_kept
 def two_output_term() -> Term:
     """``y[i] = 2 * x[i]`` and ``z[i] = x[i] + 1``: two statements, two outputs.
 
@@ -338,6 +371,7 @@ def two_output_term() -> Term:
     )
 
 
+@_kept
 def narrowed_second_statement_term() -> Term:
     """Two statements over one iname with different, unguarded bounds.
 
@@ -386,6 +420,7 @@ def narrowed_reference(a: np.ndarray) -> np.ndarray:
     return out
 
 
+@_kept
 def two_reductions_term() -> Term:
     """Two reductions into one array, with different exactness classes.
 

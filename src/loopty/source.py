@@ -20,17 +20,22 @@ import ast
 import copy
 import itertools
 import linecache
-from collections.abc import Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from loopty.term import Stmt
+    from loopty.term import Binder, Stmt
 
 __all__ = [
     "LIMIT",
+    "Named",
+    "as_spelled",
+    "checked_array",
     "frame_statement_text",
     "instance_text",
     "instances_text",
+    "is_check",
+    "is_zeros",
     "statement_text",
 ]
 
@@ -188,6 +193,186 @@ def _with_value(node: ast.stmt, value: ast.expr) -> ast.stmt:
     return copied
 
 
+# {{{ statements, as a message names them
+
+
+def _label(stmt_id: str) -> str:
+    """The call a program's statement is in, by its label: ``step@2``."""
+    return stmt_id.rsplit(".", 1)[0]
+
+
+def _same(name: str) -> str:
+    """An array by its own name."""
+    return name
+
+
+def _nodes(expr: Any) -> Iterator[Any]:
+    """Every node of an expression, parents before their children, in order."""
+    from lanky.terms import init_args
+    from pymbolic.primitives import ExpressionNode
+
+    if isinstance(expr, tuple | list):
+        for item in expr:
+            yield from _nodes(item)
+        return
+    yield expr
+    if isinstance(expr, ExpressionNode):
+        for arg in init_args(expr):
+            yield from _nodes(arg)
+
+
+def checked_array(stmt: Stmt) -> str:
+    """The array a checked point loopty puts before a call reads, or ``""``.
+
+    The first array its guard reads: the cell it checks, ``perm[i] < 0 or
+    perm[i] >= n``, or the offsets, ``off[r + 1] != off[r] + cnt[r]``.
+    """
+    from pymbolic.primitives import Subscript, Variable
+
+    for node in _nodes(stmt.guard):
+        if isinstance(node, Subscript) and isinstance(node.aggregate, Variable):
+            return node.aggregate.name
+    return ""
+
+
+def as_spelled(
+    stmt: Stmt, *exprs: Any, binders: Iterable[Binder] = ()
+) -> tuple[Any, ...]:
+    """``exprs`` with ``stmt``'s loops named as the source names them.
+
+    ``val[off[r] + j]``, where a program named the loop of its call over
+    ``r`` ``r_0`` (:attr:`loopty.term.Stmt.spelled`). ``binders`` are the
+    term's (:attr:`loopty.term.Term.binders`), which spell the binder of a
+    sum in ``exprs`` too: ``R[box, a, b]``, where the program named the
+    sum's ``a`` ``a_1``. As they are where two of the loops ``exprs`` use
+    are spelled alike, or where a spelling is a name the expressions use
+    for something else, which the renaming would make one.
+    """
+    from pymbolic.primitives import Variable
+
+    spellings = {
+        binder.name: binder.binder
+        for binder in binders
+        if binder.sum and binder.binder and binder.name not in stmt.inames
+    }
+    if stmt.spelled:
+        spellings.update(zip(stmt.inames, stmt.spelled, strict=False))
+    used = {node.name for node in _nodes(exprs) if isinstance(node, Variable)}
+    names = {
+        name: spelling
+        for name, spelling in spellings.items()
+        if name in used and name != spelling
+    }
+    if not names:
+        return exprs
+    kept = used - set(names)
+    shown = [names.get(name, name) for name in used]
+    if kept & set(names.values()) or len(set(shown)) != len(shown):
+        return exprs
+    from loopty.compose import rename_expr
+
+    try:
+        return tuple(rename_expr(expr, names, {}) for expr in exprs)
+    except Exception:  # noqa: BLE001 - the term's names stand
+        return exprs
+
+
+def is_check(stmt_id: str) -> bool:
+    """Whether a statement is a checked point a program puts before a call."""
+    return ".check." in stmt_id
+
+
+def is_zeros(stmt_id: str) -> bool:
+    """Whether a statement zeroes an array a program makes (``R.zeros``)."""
+    return stmt_id.endswith(".zeros")
+
+
+class Named:
+    """A term's statements, each named as a message names it.
+
+    Calling it with a statement's id gives the statement as the source
+    writes it, shortened as :mod:`loopty.source` shortens it, and the line it
+    is on: ``y[r] += val[r, j] * x[col[r, j]] (spmv.py:114)``. Two statements
+    of one text and one line, the same kernel's statement in two of a
+    program's calls, are told apart by the call: ``(hexahedra.py:211,
+    hexahedra.along_r[1])``. A statement loopty adds is named by what it is:
+    the zeros a program makes an array with, ``the zeros of l2p.R
+    (l2p.py:316)``, and a point a program checks before a call, ``the check
+    of perm before travel.gather (travel.py:106)``. A statement of a term
+    written by hand, which has no text, is named by its id, ``S0``.
+
+    ``called`` names the call a statement of a program's term is in, by
+    the statement's id, ``calls`` a program's call by its label, and
+    ``arrays`` an array of the term, each by its path (``l2p.reconstruct``
+    and ``l2p.R``, :mod:`loopty.handles`); by the label and the name
+    otherwise. ``binders`` are the term's loops, which :meth:`spelled`
+    names a sum's binder by.
+    """
+
+    def __init__(
+        self,
+        stmts: Mapping[str, Stmt] | Iterable[Stmt],
+        *,
+        called: Callable[[str], str] | None = None,
+        calls: Callable[[str], str] | None = None,
+        arrays: Callable[[str], str] | None = None,
+        binders: Iterable[Binder] = (),
+    ) -> None:
+        if isinstance(stmts, Mapping):
+            self.stmts = dict(stmts)
+        else:
+            self.stmts = {stmt.id: stmt for stmt in stmts}
+        self.binders = tuple(binders)
+        self.called = called or _label
+        self.calls = calls or _same
+        self.arrays = arrays or _same
+        self.places: dict[tuple[str, str], set[str]] = {}
+        for stmt_id, stmt in self.stmts.items():
+            if stmt.text:
+                self.places.setdefault((stmt.text, stmt.where), set()).add(stmt_id)
+
+    def __call__(self, stmt_id: str) -> str:
+        """``y[r] += ... (spmv.py:114)``: one statement, by its text and line."""
+        stmt = self.stmts.get(stmt_id)
+        if stmt is None:
+            return stmt_id
+        if not stmt.text and is_zeros(stmt_id):
+            return f"the zeros of {self.arrays(stmt.assignee.array)} ({stmt.where})"
+        if not stmt.text and is_check(stmt_id):
+            array = checked_array(stmt)
+            call = self.calls(stmt_id.split(".check.", 1)[0])
+            what = f"the check of {self.arrays(array)}" if array else "the check"
+            return f"{what} before {call} ({stmt.where})"
+        if not stmt.text:
+            return stmt_id
+        return f"{stmt.text} ({self.where(stmt_id)})"
+
+    def where(self, stmt_id: str) -> str:
+        """``spmv.py:114``, and the call where two statements share the line."""
+        stmt = self.stmts[stmt_id]
+        if len(self.places.get((stmt.text, stmt.where), ())) > 1:
+            return f"{stmt.where}, {self.called(stmt_id)}"
+        return stmt.where
+
+    def spelled(self, stmt: Stmt, *exprs: Any) -> tuple[Any, ...]:
+        """``exprs`` of ``stmt``, each loop and sum as the source names it.
+
+        ``R[box, a, b]``, where a program named them ``box_0``, ``a_1`` and
+        ``b_1`` (:func:`as_spelled`).
+        """
+        return as_spelled(stmt, *exprs, binders=self.binders)
+
+    def listed(self, stmt_ids: Iterable[str], word: str = "and") -> str:
+        """Statements, each once, as one sentence lists them: ``a, b and c``."""
+        names = list(dict.fromkeys(self(stmt_id) for stmt_id in stmt_ids))
+        if len(names) < 3:
+            return f" {word} ".join(names)
+        return f"{', '.join(names[:-1])} {word} {names[-1]}"
+
+
+# }}}
+
+
 # {{{ instances, as a message names them
 
 
@@ -198,43 +383,67 @@ def instance_text(stmt_id: str, coords: Mapping[str, int]) -> str:
 
 
 def instances_text(
-    stmts: Mapping[str, Stmt], *instances: tuple[str, Mapping[str, int]]
+    stmts: Mapping[str, Stmt] | Named,
+    *instances: tuple[str, Mapping[str, int]],
+    called: Any = None,
+    arrays: Any = None,
 ) -> list[str]:
     """Instances as one message names them, in the order it names them.
 
-    Each is the statement as the source writes it, the line it is on, and
-    the instance's coordinates by the names the source gives its loops:
-    ``R[i, a, b] = C[i, a, b] (l2p.py:267) at i=0, a=1, b=9``. An instance
-    of the statement named just before it is ``the same statement at i=0,
-    a=3, b=7``, and two statements of one text and one line, the same
-    kernel's statement in two of a program's calls, are told apart by the
-    call: ``(hexahedra.py:211, along_r@2)``. A statement with no source
-    text, of a term written by hand or one loopty adds, is named by its id,
-    ``S1[i=0, a=3, b=7]``, as the witness in a fact's provenance names it.
+    Each is the statement as :class:`Named` names it and the instance's
+    coordinates by the names the source gives its loops: ``R[i, a, b] =
+    C[i, a, b] (l2p.py:267) at i=0, a=1, b=9``. An instance of the statement
+    named just before it is ``the same statement at i=0, a=3, b=7``. A
+    statement loopty adds has the cell it is at for its coordinates, which
+    no loop of the source runs over: the zeros a program makes an array
+    with, ``the zeros of l2p.R (l2p.py:316) at R[0, 1, 2]``, and a point
+    it checks, ``the check of perm before gather (travel.py:106) at
+    perm[3]``. A statement with no source text, of a term written by hand,
+    is named by its id, ``S1[i=0, a=3, b=7]``, as the witness in a fact's
+    provenance names it.
+
+    ``stmts`` are the term's statements, by id or as :class:`Named` names
+    them; ``called`` and ``arrays`` are :class:`Named`'s, for the first.
     """
-    places: dict[tuple[str, str], set[str]] = {}
-    for stmt_id, _ in instances:
-        stmt = stmts.get(stmt_id)
-        if stmt is not None and stmt.text:
-            places.setdefault((stmt.text, stmt.where), set()).add(stmt_id)
+    named = (
+        stmts
+        if isinstance(stmts, Named)
+        else Named(stmts, called=called, arrays=arrays)
+    )
     out = []
     previous = None
     for stmt_id, coords in instances:
-        stmt = stmts.get(stmt_id)
-        if stmt is None or not stmt.text:
+        stmt = named.stmts.get(stmt_id)
+        if stmt is None or (
+            not stmt.text and not is_zeros(stmt_id) and not is_check(stmt_id)
+        ):
             out.append(instance_text(stmt_id, coords))
             previous = stmt_id
             continue
-        at = _at_coords(stmt, coords)
+        at = _at_coords(stmt, coords) if stmt.text else _at_cell(stmt, coords)
         if stmt_id == previous:
-            out.append(f"the same statement{at}")
+            same = "check" if is_check(stmt_id) else "statement"
+            out.append(f"the same {same}{at}")
             continue
-        where = stmt.where
-        if len(places[stmt.text, stmt.where]) > 1:
-            where = f"{where}, {stmt_id.rsplit('.', 1)[0]}"
-        out.append(f"{stmt.text} ({where}){at}")
+        out.append(f"{named(stmt_id)}{at}")
         previous = stmt_id
     return out
+
+
+def _at_cell(stmt: Stmt, coords: Mapping[str, int]) -> str:
+    """`` at R[0, 1, 2]``: an instance of a statement loopty adds, by its cell.
+
+    The zeros' cell is the one they store, and an element's check the cell
+    it reads; the rows' check of a row's offsets is at the row, and the
+    check of the first offset is at no instance but its one.
+    """
+    values = [str(coords.get(name, name)) for name in stmt.inames]
+    if not values:
+        return ""
+    if is_check(stmt.id) and stmt.id.endswith(".rows"):
+        return f" at row {values[0]}"
+    array = stmt.assignee.array if is_zeros(stmt.id) else checked_array(stmt)
+    return f" at {array}[{', '.join(values)}]"
 
 
 def _at_coords(stmt: Stmt, coords: Mapping[str, int]) -> str:

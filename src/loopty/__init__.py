@@ -44,7 +44,7 @@ import sys
 from types import ModuleType
 from typing import TYPE_CHECKING, Any
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 #: The module each top-level name is defined in, imported on first use.
 _EXPORTS = {
@@ -70,10 +70,13 @@ _EXPORTS = {
     "layout": "loopty.layout",
     "program": "loopty.kernel",
     "reduce_sum": "loopty.reduction",
+    "scope": "loopty.handles",
     "table": "loopty.table",
     "tested": "loopty.tested",
     "trace": "loopty.trace",
     "upstream": "loopty.upstream",
+    # Removed in 0.4: kept importable so that using it raises with the if to
+    # write (loopty.trace.when).
     "when": "loopty.trace",
 }
 
@@ -108,6 +111,7 @@ __all__ = [
     "layout",
     "program",
     "reduce_sum",
+    "scope",
     "table",
     "tested",
     "trace",
@@ -158,6 +162,7 @@ sys.modules[__name__].__class__ = _Package
 if TYPE_CHECKING:
     from loopty.arr import Arr
     from loopty.domain import Sigma, Where
+    from loopty.handles import scope
     from loopty.idx import Fin
     from loopty.kernel import Kernel, Program, kernel, program
     from loopty.layout import layout

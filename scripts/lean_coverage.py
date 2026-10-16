@@ -67,8 +67,18 @@ def _refusals(module: Any) -> list[Any]:
     caught: list[Any] = []
     original = schedule_module.IllegalCast.__init__
 
-    def init(self: Any, message: str, witness: Any = None, fact: Any = None) -> None:
-        original(self, message, witness, fact)
+    def init(
+        self: Any,
+        message: str,
+        witness: Any = None,
+        fact: Any = None,
+        *more: Any,
+        **rest: Any,
+    ) -> None:
+        # Whatever else a refusal carries (its instances, by statement text)
+        # is passed on: an init that took less would raise a TypeError in
+        # place of the refusal, which the asking below swallows.
+        original(self, message, witness, fact, *more, **rest)
         if fact is not None:
             caught.append(fact)
 

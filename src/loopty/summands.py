@@ -662,6 +662,9 @@ def series_facts(
     line: int | None = None,
 ) -> list[Fact]:
     """One row per series a cited theorem gives (:func:`series_applications`)."""
+    from loopty.handles import statement_names
+
+    named = statement_names(term)
     out = []
     seen: dict[str, int] = {}
     for series in series_applications(term, theorems):
@@ -673,7 +676,8 @@ def series_facts(
             f"{var} = {render(value)}" for var, value in series.bindings
         )
         rule = (
-            f"{series.stmt.id} adds {render(series.terms[0][1])} and the terms like "
+            f"{named(series.stmt.id)} adds {render(series.terms[0][1])} and the "
+            "terms like "
             f"it, which are {name}'s {series.family}({series.binder}) at {shown}"
         )
         if identities:

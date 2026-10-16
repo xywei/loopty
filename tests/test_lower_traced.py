@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 from lanky.prelude import Bool, Nat, Real
 
-from loopty import Arr, Fin, kernel, when
+from loopty import Arr, Fin, kernel
 from loopty import sum as reduce_sum
 from loopty.isl_reading import declining
 from loopty.named import domains_of
@@ -90,9 +90,9 @@ def test_a_traced_reduction_is_split_tagged_and_reassociated() -> None:
     spmv = traced("spmv", "spmv_min")
     schedule = (
         Schedule(spmv, target="c")
-        .split("j", 2, inner="j_in", outer="j_out")
-        .tag(j_in="l.0")
-        .realize("y", tree=True)
+        .split(spmv.j, 2)
+        .tag(spmv.j.inner, "l.0")
+        .realize(spmv.y, tree=True)
     )
     assert schedule.reassociated == frozenset({"y"})
     # Every cast is legal: the instances are untouched and nothing is reordered.
@@ -119,10 +119,10 @@ def test_the_traced_stencil_refuses_a_tiling_and_accepts_a_skewed_one() -> None:
     schedule = Schedule(jacobi, sizes={"nt": 16, "nx": 16})
 
     with pytest.raises(IllegalCast) as caught:
-        schedule.tile("t", "i", 8, 8)
+        schedule.tile(jacobi.t, jacobi.i, 8, 8)
     assert "scheduled earlier" in str(caught.value)
 
-    tiled = schedule.skew("i", by="t").tile("t", "i", 8, 8)
+    tiled = schedule.skew(jacobi.i, by=jacobi.t).tile(jacobi.t, jacobi.i, 8, 8)
 
     u = np.zeros((6, 6))
     u[0] = np.arange(6.0)
@@ -447,17 +447,27 @@ def approx_then_exact(
     t[0] = reduce_sum(c[j] for j in c.dom)
 
 
-def test_a_schedule_names_a_renamed_reduction_by_its_own_iname() -> None:
-    # The second sum is ``j_0`` in the kernel, and a schedule step reaches it
-    # under that name, with its own exactness: parallelizing it would
-    # reassociate an exact accumulation. ``j`` is the first sum's alone.
+def test_a_schedule_names_a_renamed_reduction_by_its_own_handle() -> None:
+    # The second sum is ``j_0`` in the kernel and ``j[1]`` to a schedule,
+    # the second sum over ``j`` of the source, which a step reaches with its
+    # own exactness: parallelizing it would reassociate an exact
+    # accumulation. ``j[0]`` is the first sum's alone, and ``j`` names both.
     from loopty.schedule import IllegalCast, Schedule
 
+    first, second = approx_then_exact.j
     schedule = Schedule(approx_then_exact)
     with pytest.raises(IllegalCast, match="exact"):
-        schedule.split("j_0", 2, inner="k_in", outer="k_out").tag(k_in="l.0")
-    tagged = schedule.split("j", 2, inner="j_in", outer="j_out").tag(j_in="l.0")
+        schedule.split(second, 2).tag(second.inner, "l.0")
+    tagged = schedule.split(first, 2).tag(first.inner, "l.0")
     assert tagged.reassociated == frozenset({"s"})
+    with pytest.raises(ValueError) as caught:
+        schedule.split(approx_then_exact.j, 2)
+    where_first, where_second = first.where, second.where
+    assert str(caught.value) == (
+        f"split(approx_then_exact.j, 2): approx_then_exact.j names 2 loops, "
+        f"approx_then_exact.j[0] at {where_first} and approx_then_exact.j[1] at "
+        f"{where_second}; name one"
+    )
 
 
 @kernel
@@ -514,14 +524,14 @@ def test_a_renamed_ragged_reduction_is_still_a_ragged_fiber() -> None:
     renamed = lower_generic(term, "c").reduction_inames
     assert {"j", "j_0"} <= data_dependent_inames(term, renamed)
 
+    second = ragged_row_sums_twice.j[1]
     schedule = (
-        Schedule(ragged_row_sums_twice)
-        .split("j_0", 2, inner="k_in", outer="k_out")
-        .tag(k_in="l.0")
+        Schedule(ragged_row_sums_twice).split(second, 2).tag(second.inner, "l.0")
     )
     ok, reason = schedule.buildable
     assert not ok
-    assert "ragged fiber" in reason and "k_in" in reason
+    assert "ragged fiber" in reason
+    assert "ragged_row_sums_twice.j[1].inner" in reason
 
 
 @kernel
@@ -668,7 +678,7 @@ def guarded_inner(
     """The statement inside the inner loop skips the first row; the other not."""
     for r in y.dom:
         for j in a.dom[r]:
-            with when(r > 0):
+            if r > 0:
                 y[r] = y[r] + a[r, j]
         z[r] = 1.0
 
@@ -771,7 +781,7 @@ def test_statements_at_two_depths_agree_with_the_body_under_a_schedule() -> None
     square = Arr.from_numpy(np.arange(12.0).reshape(3, 4))
     for fn in (after_inner, before_inner):
         arrays = {"a": square, "y": Arr.zeros(3), "z": Arr.zeros(3)}
-        schedule = Schedule(fn).split("r", 2)
+        schedule = Schedule(fn).split(fn.r, 2)
         fact = LoopyExecutor().differential(fn, schedule, arrays)
         assert fact.status.value == "tested", (fn.__name__, fact.provenance)
 
@@ -1067,13 +1077,14 @@ def test_an_inner_bound_affine_in_the_outer_binder_is_not_a_ragged_fiber() -> No
     from loopty.schedule import Schedule, data_dependent_inames
 
     assert data_dependent_inames(lower_total.trace()) == frozenset()
-    schedule = Schedule(lower_total).split("j", 2, inner="ji", outer="jo").tag(
-        ji="l.0"
+    schedule = (
+        Schedule(lower_total).split(lower_total.j, 2).tag(lower_total.j.inner, "l.0")
     )
     ok, reason = schedule.buildable
     assert not ok
     assert "ragged fiber" not in reason
-    assert "nested in the reduction over i" in reason and "ji" in reason
+    assert "nested in the reduction over lower_total.i" in reason
+    assert "lower_total.j.inner" in reason
 
 
 def test_a_ragged_fiber_inside_a_statement_loop_is_still_one() -> None:
@@ -1106,7 +1117,9 @@ def test_a_ragged_fiber_nested_in_another_sum_is_still_one() -> None:
     assert data_dependent_inames(ragged_inside_a_sum.trace()) == frozenset(
         {"j", "i"}
     )
-    ok, reason = Schedule(ragged_inside_a_sum).tag(j="l.0").buildable
+    ok, reason = (
+        Schedule(ragged_inside_a_sum).tag(ragged_inside_a_sum.j, "l.0").buildable
+    )
     assert not ok
     assert "ragged fiber" in reason
 
@@ -1119,7 +1132,7 @@ def test_the_nested_axis_loopty_refuses_is_one_loopy_cannot_build(plain_opencl):
     from loopty.schedule import Schedule
 
     lp = plain_opencl
-    outer = Schedule(lower_total8, target="opencl").tag(i="l.0")
+    outer = Schedule(lower_total8, target="opencl").tag(lower_total8.i, "l.0")
     assert outer.buildable == (True, "")
     with warnings.catch_warnings(), declining():
         # Every work item stores the finished sum into ``s[0]``, the same
@@ -1128,10 +1141,10 @@ def test_the_nested_axis_loopty_refuses_is_one_loopy_cannot_build(plain_opencl):
         code = lp.generate_code_v2(outer.kernel).device_code()
     assert "get_local_id" in code
 
-    inner = Schedule(lower_total8, target="opencl").tag(j="l.0")
+    inner = Schedule(lower_total8, target="opencl").tag(lower_total8.j, "l.0")
     ok, reason = inner.buildable
     assert not ok
-    assert "nested in the reduction over i" in reason
+    assert "nested in the reduction over lower_total8.i" in reason
     with (
         pytest.raises(Exception, match="does not use all local hw axes"),
         declining(),
@@ -1190,10 +1203,11 @@ def test_a_reduction_on_a_concurrent_axis_that_is_not_local_is_refused(
     from loopty.schedule import Schedule
 
     lp = plain_opencl
-    schedule = Schedule(total8, target="opencl").tag(i=tag)
+    schedule = Schedule(total8, target="opencl").tag(total8.i, tag)
     ok, reason = schedule.buildable
     assert not ok
-    assert f"runs over i={tag!r}" in reason and "on a local axis (l.*)" in reason
+    assert f"runs over total8.i on {tag!r}" in reason
+    assert "on a local axis (l.*)" in reason
     with pytest.raises(Exception, match="only form of parallelism supported"):
         generated(lp, schedule)
 
@@ -1204,12 +1218,12 @@ def test_a_reduction_across_two_local_axes_is_refused(plain_opencl) -> None:
     lp = plain_opencl
     schedule = (
         Schedule(total8, target="opencl")
-        .split("i", 2, inner="ii", outer="io")
-        .tag(ii="l.0", io="l.1")
+        .split(total8.i, 2)
+        .tag({total8.i.inner: "l.0", total8.i.outer: "l.1"})
     )
     ok, reason = schedule.buildable
     assert not ok
-    assert "runs over ii, io on 2 local axes" in reason
+    assert "runs over total8.i.inner, total8.i.outer on 2 local axes" in reason
     with pytest.raises(Exception, match="more than one parallel iname"):
         generated(lp, schedule)
 
@@ -1227,20 +1241,26 @@ def test_an_unrolled_reduction_loop_is_a_sequence_as_loopy_reads_it(
     from loopty.schedule import Schedule
 
     lp = plain_opencl
-    split = Schedule(total8, target="opencl").split("i", 2, inner="ii", outer="io")
-    mixed = split.tag(ii="l.0", io="ilp")
+    split = Schedule(total8, target="opencl").split(total8.i, 2)
+    mixed = split.tag({total8.i.inner: "l.0", total8.i.outer: "ilp"})
     ok, reason = mixed.buildable
     assert not ok
-    assert "over ii in parallel and io in sequence (loopy unrolls io" in reason
+    assert (
+        "over total8.i.inner in parallel and total8.i.outer in sequence "
+        "(loopy unrolls total8.i.outer"
+    ) in reason
     with pytest.raises(Exception, match="both parallel and sequential"):
         generated(lp, mixed)
 
-    for privatized in (split.tag(ii="ilp"), Schedule(total8).tag(i="ilp")):
+    for privatized in (
+        split.tag(total8.i.inner, "ilp"),
+        Schedule(total8).tag(total8.i, "ilp"),
+    ):
         ok, reason = privatized.buildable
         assert not ok
         assert "on an ilp axis" in reason and "Tag it unr instead" in reason
 
-    unrolled = split.tag(ii="unr")
+    unrolled = split.tag(total8.i.inner, "unr")
     assert unrolled.buildable == (True, "")
     assert generated(lp, unrolled)
 
@@ -1249,15 +1269,15 @@ def test_a_local_reduction_needs_a_numeric_maximum_of_its_extent(plain_opencl):
     from loopty.schedule import Schedule
 
     lp = plain_opencl
-    symbolic = Schedule(triangle_rows, target="opencl").tag(j="l.0")
+    symbolic = Schedule(triangle_rows, target="opencl").tag(triangle_rows.j, "l.0")
     ok, reason = symbolic.buildable
     assert not ok
-    assert "runs over j on a local axis" in reason
-    assert "the extent of j is at most n" in reason
+    assert "runs over triangle_rows.j on a local axis" in reason
+    assert "the extent of triangle_rows.j is at most n" in reason
     with pytest.raises(Exception, match="a numeric maximum was not found"):
         generated(lp, symbolic)
 
-    fixed = Schedule(triangle_rows8, target="opencl").tag(j="l.0")
+    fixed = Schedule(triangle_rows8, target="opencl").tag(triangle_rows8.j, "l.0")
     assert fixed.buildable == (True, "")
     assert "get_local_id" in generated(lp, fixed)
 
@@ -1268,15 +1288,19 @@ def test_a_local_loop_around_a_local_reduction_needs_one_too(plain_opencl):
     from loopty.schedule import Schedule
 
     lp = plain_opencl
-    around = Schedule(rows_of_eight, target="opencl").tag(i="l.1", j="l.0")
+    around = Schedule(rows_of_eight, target="opencl").tag(
+        {rows_of_eight.i: "l.1", rows_of_eight.j: "l.0"}
+    )
     ok, reason = around.buildable
     assert not ok
-    assert "inside the loop i, which is on a local axis too" in reason
-    assert "the extent of i is at most n" in reason
+    assert "inside the loop rows_of_eight.i, which is on a local axis too" in reason
+    assert "the extent of rows_of_eight.i is at most n" in reason
     with pytest.raises(Exception, match="a numeric maximum was not found"):
         generated(lp, around)
 
-    grouped = Schedule(rows_of_eight, target="opencl").tag(i="g.0", j="l.0")
+    grouped = Schedule(rows_of_eight, target="opencl").tag(
+        {rows_of_eight.i: "g.0", rows_of_eight.j: "l.0"}
+    )
     assert grouped.buildable == (True, "")
     assert "get_group_id" in generated(lp, grouped)
 
@@ -1373,7 +1397,9 @@ def test_an_ilp_split_runs_its_lanes_in_one_loop_of_the_sum() -> None:
     from loopty.executor import emit_code
     from loopty.schedule import Schedule
 
-    schedule = Schedule(along_rows).split("q", 3).tag(q_inner="ilp")
+    schedule = (
+        Schedule(along_rows).split(along_rows.q, 3).tag(along_rows.q.inner, "ilp")
+    )
     assert {fact.status.value for fact in schedule.facts()} == {"decided"}
     code = emit_code(schedule)
     assert code.count("for (int32_t b = ") == 1, code
@@ -1396,7 +1422,7 @@ def added_up(m: Nat, x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
 def first_rows(x: Arr[Fin[n], Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
     """The first three rows summed, under a guard on the row."""
     for i in y.dom:
-        with when(i < 3):
+        if i < 3:
             y[i] = reduce_sum(x[i, j] for j in x.dom[i])
 
 
@@ -1411,11 +1437,13 @@ def test_a_sum_bounded_by_a_scalar_or_under_a_guard_names_no_loop() -> None:
         params = set(_domain_of(each.trace(), "j").get_var_names(isl.dim_type.param))
         assert "i" not in params, (each, params)
     x = np.arange(25.0).reshape(5, 5)
-    schedule = Schedule(first_rows).split("i", 2).tag(i_inner="ilp")
+    schedule = (
+        Schedule(first_rows).split(first_rows.i, 2).tag(first_rows.i.inner, "ilp")
+    )
     assert emit_code(schedule).count("for (int32_t j = ") == 1
     out = run(schedule, x=x, y=np.zeros(5))
     assert np.allclose(out["y"], np.where(np.arange(5) < 3, x.sum(axis=1), 0.0))
-    schedule = Schedule(added_up).split("i", 2).tag(i_inner="ilp")
+    schedule = Schedule(added_up).split(added_up.i, 2).tag(added_up.i.inner, "ilp")
     assert emit_code(schedule).count("for (int32_t j = ") == 1
     out = run(schedule, m=3, x=np.arange(5.0), y=np.zeros(5))
     assert np.allclose(out["y"], 3.0 * np.arange(5.0))
@@ -1423,18 +1451,24 @@ def test_a_sum_bounded_by_a_scalar_or_under_a_guard_names_no_loop() -> None:
 
 @kernel
 def never_summed(x: Arr[Fin[n], Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
-    """A sum under a guard that holds nowhere."""
+    """A sum on a branch that holds nowhere, and a copy on the one that holds."""
     for i in y.dom:
-        with when(i < 0):
+        if i < 0:
             y[i] = reduce_sum(x[i, j] for j in x.dom[i])
+        else:
+            y[i] = x[i, i]
 
 
-def test_a_sum_whose_statement_never_runs_keeps_its_bounds() -> None:
-    # Within an empty nest every set is the same one, and gist made j's
-    # domain the whole line; it is kept as it was, bounded.
-    assert _domain_of(never_summed.trace(), "j").is_bounded()
-    out = run(never_summed.trace(), x=np.arange(16.0).reshape(4, 4), y=np.ones(4))
-    assert np.array_equal(out["y"], np.ones(4))
+def test_a_branch_that_holds_nowhere_records_nothing() -> None:
+    # isl shows i < 0 empty in a loop over Fin[n]: the run stops there, and
+    # the sum is in no statement, while the else holds wherever the loop
+    # runs and is recorded with no guard.
+    term = never_summed.trace()
+    (stmt,) = term.stmts
+    assert stmt.guard is None
+    x = np.arange(16.0).reshape(4, 4)
+    out = run(term, x=x, y=np.ones(4))
+    assert np.array_equal(out["y"], np.diag(x))
 
 
 def test_an_ilp_split_around_a_triangle_runs_each_lane_in_turn() -> None:
@@ -1442,7 +1476,11 @@ def test_an_ilp_split_around_a_triangle_runs_each_lane_in_turn() -> None:
     # over j, and the result is the same.
     from loopty.schedule import Schedule
 
-    schedule = Schedule(triangle_rows).split("i", 2).tag(i_inner="ilp")
+    schedule = (
+        Schedule(triangle_rows)
+        .split(triangle_rows.i, 2)
+        .tag(triangle_rows.i.inner, "ilp")
+    )
     t = np.arange(25.0).reshape(5, 5)
     out = run(schedule, a=t, y=np.zeros(5))
     assert np.allclose(out["y"], np.tril(t).sum(axis=1))
@@ -1619,7 +1657,7 @@ def test_an_equality_guard_and_an_equality_condition_lower_and_run() -> None:
     @kernel
     def first(y: Arr[Fin[n], Real]):  # noqa: F821
         for i in y.dom:
-            with when(i == 0):
+            if i == 0:
                 y[i] = 1.0
 
     @kernel
@@ -1651,7 +1689,7 @@ def test_a_guard_against_a_real_scalar_agrees_on_the_c_target() -> None:
     @kernel
     def below(a: Real, y: Arr[Fin[n], Real]):  # noqa: F821
         for i in y.dom:
-            with when(i < a):
+            if i < a:
                 y[i] = 1.0
 
     fact = LoopyExecutor().differential(
@@ -1694,32 +1732,32 @@ def test_a_guard_that_reads_only_scalars_is_kept_in_the_compiled_kernel() -> Non
     @kernel
     def g_flag(flag: Bool, y: Arr[Fin[n], Real]):  # noqa: F821
         for i in y.dom:
-            with when(flag):
+            if flag:
                 y[i] = 1.0
 
     @kernel
     def g_real(a: Real, y: Arr[Fin[n], Real]):  # noqa: F821
         for i in y.dom:
-            with when(a > 0.5):
+            if a > 0.5:
                 y[i] = 1.0
 
     @kernel
     def g_cell(flag: Bool, y: Arr[Fin[n + 1], Real]):  # noqa: F821
-        with when(flag):
+        if flag:
             y[0] = 1.0
 
     @kernel
     def g_two(flag: Bool, x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
         for i in x.dom:
-            with when(flag):
+            if flag:
                 x[i] = 1.0
         for i in y.dom:
-            with when(flag):
+            if flag:
                 y[i] = 2.0
 
     @kernel
     def g_nest(flag: Bool, y: Arr[Fin[n], Fin[m], Real]):  # noqa: F821
-        with when(flag):
+        if flag:
             for i in y.dom:
                 for j in y.dom[i]:
                     y[i, j] = 1.0
@@ -1728,7 +1766,7 @@ def test_a_guard_that_reads_only_scalars_is_kept_in_the_compiled_kernel() -> Non
     def g_read(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
         # One cell of an array names no loop variable either.
         for i in y.dom:
-            with when(x[0] > 0.5):
+            if x[0] > 0.5:
                 y[i] = 1.0
 
     cases = (

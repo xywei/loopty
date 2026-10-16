@@ -155,10 +155,10 @@ def loopty_schedule(tile: str, layer: str = "single") -> Any:
     kern = ex.single_layer if layer == "single" else ex.double_layer
     return (
         Schedule(kern, target="opencl")
-        .split("t", GROUP[tile])
-        .tag(t_outer="g.0", t_inner="l.0")
-        .split("s", 256)
-        .prioritize("s_outer", "t_inner")
+        .split(kern.t, GROUP[tile])
+        .tag({kern.t.outer: "g.0", kern.t.inner: "l.0"})
+        .split(kern.s, 256)
+        .prioritize(kern.s.outer, kern.t.inner)
     )
 
 

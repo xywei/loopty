@@ -25,8 +25,8 @@ import pytest
 from lanky.ledger import Status
 from lanky.prelude import Int, Nat, Real
 
-from lines import where
-from loopty import Arr, Fin, Schedule, kernel, program, reduce_sum, when
+from lines import named, where
+from loopty import Arr, Fin, Schedule, kernel, program, reduce_sum
 from loopty.executor import LoopyExecutor, emit_code
 from loopty.named import domains_of
 from loopty.oracle import IslOracle
@@ -46,7 +46,7 @@ def flux(u: Arr[Fin[n], Real], f: Arr[Fin[n], Real]):  # noqa: F821
 def divergence(f: Arr[Fin[n], Real], rhs: Arr[Fin[n], Real]):  # noqa: F821
     """Centred divergence of the flux, inside the boundary."""
     for i in rhs.dom:
-        with when((i > 0) & (i + 1 < rhs.dom.size)):
+        if (i > 0) & (i + 1 < rhs.dom.size):
             rhs[i] = -(f[i + 1] - f[i - 1]) / 2
 
 
@@ -54,7 +54,7 @@ def divergence(f: Arr[Fin[n], Real], rhs: Arr[Fin[n], Real]):  # noqa: F821
 def interior_flux(u: Arr[Fin[n], Real], f: Arr[Fin[n], Real]):  # noqa: F821
     """The flux at the interior points only."""
     for j in u.dom:
-        with when((j > 0) & (j + 1 < u.dom.size)):
+        if (j > 0) & (j + 1 < u.dom.size):
             f[j] = 0.5 * u[j] * u[j]
 
 
@@ -76,7 +76,7 @@ def doubled(f: Arr[Fin[n], Real], g: Arr[Fin[n], Real]):  # noqa: F821
 def front(f: Arr[Fin[n], Real], h: Arr[Fin[n], Real]):  # noqa: F821
     """The front half of ``f``."""
     for x in h.dom:
-        with when(2 * x < h.dom.size):
+        if 2 * x < h.dom.size:
             h[x] = f[x]
 
 
@@ -84,7 +84,7 @@ def front(f: Arr[Fin[n], Real], h: Arr[Fin[n], Real]):  # noqa: F821
 def back(h: Arr[Fin[n], Real], rhs: Arr[Fin[n], Real]):  # noqa: F821
     """The back half of ``h``, plus one."""
     for i in rhs.dom:
-        with when(2 * i >= rhs.dom.size):
+        if 2 * i >= rhs.dom.size:
             rhs[i] = h[i] + 1.0
 
 
@@ -99,7 +99,7 @@ def bump(u: Arr[Fin[n], Real]):  # noqa: F821
 def update(f: Arr[Fin[n], Real], u: Arr[Fin[n], Real]):  # noqa: F821
     """One explicit step of Burgers' equation, in place."""
     for i in u.dom:
-        with when((i > 0) & (i + 1 < u.dom.size)):
+        if (i > 0) & (i + 1 < u.dom.size):
             u[i] = u[i] - (f[i + 1] - f[i - 1]) / 2
 
 
@@ -147,7 +147,7 @@ def down(
     """Each cell less the one below it."""
     for p in b.dom:
         for q in b.dom[p]:
-            with when(p + 1 < b.dom.size):
+            if p + 1 < b.dom.size:
                 b[p, q] = g[p + 1, q] - g[p, q]
 
 
@@ -346,7 +346,7 @@ def rows(a, z, g):
 def mark(u: Arr[Fin[n], Real], m: Arr[Fin[n], Real]):  # noqa: F821
     """One at the interior points."""
     for j in u.dom:
-        with when((j > 0) & (j + 1 < u.dom.size)):
+        if (j > 0) & (j + 1 < u.dom.size):
             m[j] = 1.0
 
 
@@ -358,7 +358,7 @@ def masked(
 ):
     """``f`` where ``m`` is set, a guard isl cannot state."""
     for i in y.dom:
-        with when(m[i] > 0.5):
+        if m[i] > 0.5:
             y[i] = f[i]
 
 
@@ -376,10 +376,10 @@ def marked(u, y):
 def bounded(f: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
     """Store the first and last cells of ``f``, then read every cell."""
     for k in f.dom:
-        with when(k == 0):
+        if k == 0:
             f[k] = 1.0
     for e in f.dom:
-        with when(e + 1 == f.dom.size):
+        if e + 1 == f.dom.size:
             f[e] = 2.0
     for i in y.dom:
         y[i] = f[i] + 1.0
@@ -389,7 +389,7 @@ def bounded(f: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
 def first_edge(f: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
     """Store the first cell of ``f``, then read every cell."""
     for k in f.dom:
-        with when(k == 0):
+        if k == 0:
             f[k] = 1.0
     for i in y.dom:
         y[i] = f[i] + 1.0
@@ -438,7 +438,7 @@ def triple(u: Arr[Fin[n], Int], f: Arr[Fin[n], Int]):  # noqa: F821
 def forward(f: Arr[Fin[n], Int], y: Arr[Fin[n], Int]):  # noqa: F821
     """Each cell less the one before it, but the last."""
     for i in y.dom:
-        with when(i + 1 < y.dom.size):
+        if i + 1 < y.dom.size:
             y[i] = f[i + 1] - f[i]
 
 
@@ -721,6 +721,15 @@ def statements(schedule: Schedule) -> list[tuple[str, str]]:
     return [(fact.kind, fact.status.value) for fact in schedule.facts()]
 
 
+#: The fact a program's schedule is made with, before its steps', where no
+#: read sees the zeros of the array the program makes, which the schedule
+#: then runs without (#290).
+MADE = ("definedness", "decided")
+
+#: The two facts of a cast, decided.
+CAST = [("bijective", "decided"), ("monotone", "decided")]
+
+
 # }}}
 
 
@@ -754,7 +763,9 @@ def test_a_consumer_that_reads_the_zeros_is_decided_with_the_cells() -> None:
         "every cell of f that shifted reads is one interior_flux stored before "
         "it or one of the zeros f was made with"
     )
-    reason = "shifted.S0 reads the zeros at f[0] and f[n - 1]"
+    reading = named(padded.term, "shifted.S0")
+    assert reading == f"y[i] = f[i] + 1.0 ({where(shifted, 'y[i] =')})"
+    reason = f"{reading} reads the zeros at f[0] and f[n - 1]"
     assert fact.provenance["reason"] == reason
     decided = IslOracle().establish(fact)
     assert decided.status is Status.DECIDED
@@ -768,12 +779,14 @@ def test_a_consumer_that_reads_the_zeros_is_decided_with_the_cells() -> None:
     )
     assert "reason" not in front_half.provenance
     assert back_half.provenance["reason"] == (
-        "back.S0 reads the zeros at h[a0] for a0 <= n - 1, 2*a0 >= n"
+        f"{named(between.term, 'back.S0')} reads the zeros at h[a0] for "
+        "a0 <= n - 1, 2*a0 >= n"
     )
     # halved_flux stores the first half of f, and divergence reads the rest.
     (top,) = definedness(halved)
     assert top.provenance["reason"] == (
-        "divergence.S0 reads the zeros at f[a0] for 2 <= a0 <= n - 1, 2*a0 >= n"
+        f"{named(halved.term, 'divergence.S0')} reads the zeros at f[a0] for "
+        "2 <= a0 <= n - 1, 2*a0 >= n"
     )
     for fact in (front_half, back_half, top):
         assert IslOracle().establish(fact).status is Status.DECIDED
@@ -784,13 +797,13 @@ from __future__ import annotations
 
 from lanky.prelude import Real
 
-from loopty import Arr, Fin, kernel, program, when
+from loopty import Arr, Fin, kernel, program
 
 
 @kernel
 def interior_flux(u: Arr[Fin[n], Real], f: Arr[Fin[n], Real]):
     for j in u.dom:
-        with when((j > 0) & (j + 1 < u.dom.size)):
+        if (j > 0) & (j + 1 < u.dom.size):
             f[j] = 0.5 * u[j] * u[j]
 
 
@@ -845,17 +858,21 @@ def test_a_cell_the_reader_stores_itself_is_a_zero_or_its_own() -> None:
     # of what bounded stored, and the reason says it is one or the other.
     (fact,) = definedness(edged)
     assert IslOracle().establish(fact).status is Status.DECIDED
+    term = edged.term
     assert fact.provenance["reason"] == (
-        "bounded.S2 reads f[0] and f[n - 1], the zeros there unless bounded.S0 "
-        "or bounded.S1 stored them before the read, which is not asked"
+        f"{named(term, 'bounded.S2')} reads f[0] and f[n - 1], the zeros there "
+        f"unless {named(term, 'bounded.S0')} or {named(term, 'bounded.S1')} "
+        "stored them before the read, which is not asked"
     )
     # Storing only the first, the last cell is a zero nobody stored, at
     # every size it is not the first.
     (fact,) = definedness(half_edged)
     assert IslOracle().establish(fact).status is Status.DECIDED
+    reading = named(half_edged.term, "first_edge.S1")
     assert fact.provenance["reason"] == (
-        "first_edge.S1 reads the zeros at f[n - 1] when n >= 2; first_edge.S1 "
-        "reads f[0], the zeros there unless first_edge.S0 stored them before "
+        f"{reading} reads the zeros at f[n - 1] when n >= 2; {reading} "
+        f"reads f[0], the zeros there unless "
+        f"{named(half_edged.term, 'first_edge.S0')} stored them before "
         "the read, which is not asked"
     )
 
@@ -866,9 +883,11 @@ def test_a_write_isl_cannot_list_may_have_stored_the_zeros_read() -> None:
     # the fact is decided, and the reason says the zeros may be gone.
     (fact,) = definedness(scattered_into)
     assert IslOracle().establish(fact).status is Status.DECIDED
+    term = scattered_into.term
     assert fact.provenance["reason"] == (
-        "shifted.S0 reads the zeros at f[a0] for 0 <= a0 <= n - 1, unless "
-        "scatter.S0 stored them, which isl cannot list"
+        f"{named(term, 'shifted.S0')} reads the zeros at f[a0] for "
+        f"0 <= a0 <= n - 1, unless {named(term, 'scatter.S0')} stored them, "
+        "which isl cannot list"
     )
 
 
@@ -884,7 +903,8 @@ def test_a_read_under_a_guard_isl_cannot_state_is_not_shown_to_see_zeros() -> No
         assert fact.status is Status.ASSUMED, fact.statement
         assert fact.term is None
         reason = fact.provenance["reason"]
-        assert f"masked.S0 reads {array} under a guard isl cannot state (m[" in reason
+        reading = named(marked.term, "masked.S0")
+        assert f"{reading} reads {array} under a guard isl cannot state (m[" in reason
     y = Arr.zeros(6)
     marked(Arr.from_numpy(velocity(6)), y)
     assert y.numpy()[0] == 0.0 and y.numpy()[-1] == 0.0
@@ -934,7 +954,7 @@ def test_an_edge_through_a_parameter_has_no_definedness_fact() -> None:
 def test_a_fusion_that_runs_a_dependence_backwards_is_refused_with_the_pair() -> None:
     schedule = Schedule(burgers, sizes={"n": 16})
     with pytest.raises(IllegalCast) as caught:
-        schedule.fuse("flux", "divergence")
+        schedule.fuse(burgers.flux.j, burgers.divergence.i)
     assert caught.value.fact.kind == "monotone"
     assert caught.value.fact.status is Status.REFUTED
     (source, source_at), (sink, sink_at), sizes = caught.value.witness
@@ -944,26 +964,31 @@ def test_a_fusion_that_runs_a_dependence_backwards_is_refused_with_the_pair() ->
     message = str(caught.value)
     # each statement by its text and line, at the names its loops have
     assert message.startswith(
-        "fuse(flux, divergence) illegal: f[j] = 0.5 * u[j] * u[j] "
+        "fuse(burgers.flux.j, burgers.divergence.i) illegal: f[j] = 0.5 * u[j] * u[j] "
         f"({where(flux, 'f[j] =')}) at j="
     )
     assert (
         "read by rhs[i] = -(f[i + 1] - f[i - 1]) / 2 "
         f"({where(divergence, 'rhs[i] =')}) at i="
     ) in message
-    # The refusal names the least shift that is accepted, which it checked.
+    # The refusal names the least shift that is accepted, which it checked,
+    # by the handles of the loops it fuses.
     assert message.endswith(
-        "fuse('flux', 'divergence', shift=1) runs every dependence between "
-        "them forward"
+        "fuse(burgers.flux.j, burgers.divergence.i, shift=1) runs every "
+        "dependence between them forward"
     )
     assert caught.value.fact.provenance["reason"] == message
 
 
 def test_the_fused_loop_is_one_loop_and_agrees_with_the_native_run() -> None:
-    fused = Schedule(burgers, sizes={"n": 16}).fuse("flux", "divergence", shift=1)
-    assert fused.history == ("fuse(flux, divergence, shift=1)",)
-    assert fused.key == "burgers[c].fuse('flux', 'divergence', shift=1)"
-    assert statements(fused) == [("bijective", "decided"), ("monotone", "decided")]
+    fused = Schedule(burgers, sizes={"n": 16}).fuse(
+        burgers.flux.j, burgers.divergence.i, shift=1
+    )
+    assert fused.history == ("fuse(burgers.flux.j, burgers.divergence.i, shift=1)",)
+    assert fused.key == (
+        "burgers[c].fuse(burgers.flux.j, burgers.divergence.i, shift=1)"
+    )
+    assert statements(fused) == [MADE, *CAST]
     loop = fused.term.stmt("flux.S0").inames[0]
     assert fused._layout.coords["divergence.S0"] == (loop,)
     entry = fused.kernel.default_entrypoint
@@ -979,8 +1004,8 @@ def test_the_fused_loop_is_one_loop_and_agrees_with_the_native_run() -> None:
 
 def test_a_fused_and_substituted_edge_of_integers_agrees_exactly() -> None:
     # Integers are exact: each schedule's run is compared bit for bit.
-    fused = Schedule(whole).fuse("triple", "forward", shift=1)
-    for schedule in (fused, fused.substitute("f")):
+    fused = Schedule(whole).fuse(whole.triple.j, whole.forward.i, shift=1)
+    for schedule in (fused, fused.substitute(whole.f)):
         for size in (1, 2, 7):
             inputs = {
                 "u": Arr.from_numpy(np.arange(size, dtype=np.int64) * 7 - 3),
@@ -999,7 +1024,7 @@ def test_a_fusion_is_a_map_per_statement_and_affine_takes_it_as_well() -> None:
     by_hand = Schedule(burgers).affine(
         f"{{ flux_S0[{j}] -> [k] : k = {j}; divergence_S0[{i}] -> [k] : k = {i} + 1 }}"
     )
-    assert statements(by_hand) == [("bijective", "decided"), ("monotone", "decided")]
+    assert statements(by_hand) == [MADE, *CAST]
     assert by_hand.order[-1] == "k"
     agrees(burgers, by_hand, burgers_inputs(9))
     with pytest.raises(ValueError, match="their maps have to make the same new ones"):
@@ -1009,7 +1034,7 @@ def test_a_fusion_is_a_map_per_statement_and_affine_takes_it_as_well() -> None:
 
 
 def test_a_fusion_is_replayed_when_retargeted() -> None:
-    fused = Schedule(burgers).fuse("flux", "divergence", shift=1)
+    fused = Schedule(burgers).fuse(burgers.flux.j, burgers.divergence.i, shift=1)
     again = fused.retarget("c-source")
     assert again.history == fused.history
     assert statements(again) == statements(fused)
@@ -1018,8 +1043,8 @@ def test_a_fusion_is_replayed_when_retargeted() -> None:
 def test_a_fusion_in_place_runs_the_writes_after_the_reads() -> None:
     # update writes u[i] in place, which flux reads at j = i: run one step
     # behind, flux has read it by then.
-    fused = Schedule(stepped).fuse("flux", "update", shift=1)
-    assert statements(fused) == [("bijective", "decided"), ("monotone", "decided")]
+    fused = Schedule(stepped).fuse(stepped.flux.j, stepped.update.i, shift=1)
+    assert statements(fused) == [MADE, *CAST]
     for size in (1, 3, 8):
         agrees(stepped, fused, {"u": Arr.from_numpy(velocity(size))})
 
@@ -1027,15 +1052,16 @@ def test_a_fusion_in_place_runs_the_writes_after_the_reads() -> None:
 def test_two_loops_fuse_with_a_shift_each() -> None:
     schedule = Schedule(squares, sizes={"n": 6, "m": 5})
     with pytest.raises(IllegalCast) as caught:
-        schedule.fuse("square2", "down")
+        schedule.fuse(squares.square2.j, squares.down.q)
     # Both fusions the refusal names were checked: the two loops one row
-    # apart, and the rows alone, one apart.
+    # apart, and the rows alone, one apart, each by the loops it goes down to.
     assert str(caught.value).endswith(
-        "fuse('square2', 'down', shift=(1, 0)) runs every dependence between "
-        "them forward, and so does fuse('square2', 'down', shift=1, loops=1)"
+        "fuse(squares.square2.j, squares.down.q, shift=(1, 0)) runs every "
+        "dependence between them forward, and so does "
+        "fuse(squares.square2.i, squares.down.p, shift=1)"
     )
-    fused = schedule.fuse("square2", "down", shift=(1, 0))
-    assert statements(fused) == [("bijective", "decided"), ("monotone", "decided")]
+    fused = schedule.fuse(squares.square2.j, squares.down.q, shift=(1, 0))
+    assert statements(fused) == [MADE, *CAST]
     for rows, cols in ((1, 1), (2, 3), (6, 5)):
         a = np.arange(rows * cols, dtype=float).reshape(rows, cols) / 7.0
         agrees(
@@ -1044,14 +1070,14 @@ def test_two_loops_fuse_with_a_shift_each() -> None:
             {"a": Arr.from_numpy(a), "b": Arr.from_numpy(np.zeros((rows, cols)))},
         )
     with pytest.raises(ValueError, match="one shift per loop"):
-        schedule.fuse("square2", "down", shift=1)
+        schedule.fuse(squares.square2.j, squares.down.q, shift=1)
 
 
 def test_a_statement_deeper_in_the_producer_moves_with_its_row() -> None:
     # rows_then_cells has a statement in r and one in r and c; the domain of
     # c is nested in r's, and moves along the producer's map with it.
-    fused = Schedule(rows).fuse("rows_then_cells", "row_sum")
-    assert statements(fused) == [("bijective", "decided"), ("monotone", "decided")]
+    fused = Schedule(rows).fuse(rows.rows_then_cells.r, rows.row_sum.w)
+    assert statements(fused) == [MADE, *CAST]
     assert fused.buildable == (True, "")
     for size, width in ((1, 1), (3, 2), (5, 4)):
         a = np.arange(size * width, dtype=float).reshape(size, width) + 1.0
@@ -1071,8 +1097,10 @@ def test_the_outer_loop_of_a_nest_fuses_with_a_loop_of_one_level() -> None:
     # leaves the nest; the fusion takes the outer one and cuts the domain
     # after it, as the lowering cuts a nest a statement leaves. Each row is
     # squared and then summed, in one loop over the rows.
-    fused = Schedule(squared_rows).fuse("square2", "row_total")
-    assert statements(fused) == [("bijective", "decided"), ("monotone", "decided")]
+    fused = Schedule(squared_rows).fuse(
+        squared_rows.square2.i, squared_rows.row_total.w
+    )
+    assert statements(fused) == [MADE, *CAST]
     assert fused.buildable == (True, "")
     loop = squared_rows.term.stmt("square2.S0").inames[0]
     entry = fused.kernel.default_entrypoint
@@ -1082,7 +1110,7 @@ def test_the_outer_loop_of_a_nest_fuses_with_a_loop_of_one_level() -> None:
         a = np.arange(rows * cols, dtype=float).reshape(rows, cols) / 3.0
         agrees(squared_rows, fused, {"a": Arr.from_numpy(a), "z": Arr.zeros(rows)})
     # And with the squares computed where the sum reads them, no g at all.
-    substituted = fused.substitute("g")
+    substituted = fused.substitute(squared_rows.g)
     assert "g" not in substituted.kernel.default_entrypoint.temporary_variables
     a = np.arange(12, dtype=float).reshape(3, 4)
     agrees(squared_rows, substituted, {"a": Arr.from_numpy(a), "z": Arr.zeros(3)})
@@ -1094,15 +1122,15 @@ def test_the_outer_loop_fuses_after_a_split_or_a_tile() -> None:
     # domain in the nest's order: loopy 2025.2 puts a split loop's two after
     # the others ([j, i_outer, i_inner]), and loopy main keeps namedisl's
     # order ([i_inner, i_outer, j_outer, j_inner] for the tile) (#192).
-    i, j = squared_rows.term.stmt("square2.S0").inames
+    i, j = squared_rows.square2.i, squared_rows.square2.j
     base = Schedule(squared_rows)
-    for steps, schedule in (
-        (2, base.split(i, 2)),
-        (2, base.tile(i, j, 2, 2)),
-        (1, base),
+    for steps, schedule, row in (
+        (2, base.split(i, 2), i.outer),
+        (2, base.tile(i, j, 2, 2), i.outer),
+        (1, base, i),
     ):
-        fused = schedule.fuse("square2", "row_total")
-        expected = [("bijective", "decided"), ("monotone", "decided")] * steps
+        fused = schedule.fuse(row, squared_rows.row_total.w)
+        expected = [MADE, *CAST * steps]
         assert statements(fused) == expected
         assert fused.buildable == (True, ""), fused.buildable
         for rows, cols in ((1, 1), (3, 4), (5, 3)):
@@ -1117,8 +1145,8 @@ def test_a_call_between_the_fused_runs_after_their_loop() -> None:
     # lowering's instruction dependencies are by array, and loopy found no
     # order for the three (a CycleError) until those were cut back to the
     # dependences the casts were checked against.
-    fused = Schedule(between).fuse("flux", "back")
-    assert statements(fused) == [("bijective", "decided"), ("monotone", "decided")]
+    fused = Schedule(between).fuse(between.flux.j, between.back.i)
+    assert statements(fused) == [MADE, *CAST]
     entry = fused.kernel.default_entrypoint
     insns = {insn.id: insn for insn in entry.instructions}
     assert "front_S0" not in insns["back_S0"].depends_on
@@ -1148,56 +1176,107 @@ def test_a_fusion_past_a_checked_point_is_refused_for_its_flag() -> None:
     for shift in (0, 1, 3):
         with pytest.raises(IllegalCast) as caught:
             Schedule(reversed_gather, sizes={"n": 5}).fuse(
-                "reverse_quiet", "gather", shift=shift
+                reversed_gather.reverse_quiet.i, reversed_gather.gather.i, shift=shift
             )
         assert caught.value.fact.kind == "monotone"
         (source, _), (sink, _), _sizes = caught.value.witness
         assert (source, sink) == (check, "gather.S0")
-        # the check is loopty's, with no source text, and named by its id
-        assert f"{check}[" in str(caught.value)
+        # the check is loopty's, with no source text: it is named by what it
+        # checks and the call it is before, and its flag as the check's
+        message = str(caught.value)
         assert (
-            f"writes {flag}[0], read by y[i] = f[idx[i]] ({where(gather, 'y[i] =')}) "
-            "at i="
-        ) in str(caught.value)
+            "the check of reversed_gather.idx before reversed_gather.gather "
+            f"({where(reversed_gather, ' gather(idx, x, y)')}) at idx["
+        ) in message
+        assert (
+            "writes the check's flag, read by y[i] = f[idx[i]] "
+            f"({where(gather, 'y[i] =')}) at i="
+        ) in message
+        assert check not in message and flag not in message
+        # and the fusion that does run the check in the producer's loop
+        assert message.endswith(
+            "; fuse(reversed_gather.reverse_quiet.i, "
+            "reversed_gather.gather.checks.idx) runs the check in "
+            "reversed_gather.reverse_quiet.i, each cell as it is written"
+        )
 
 
 def test_a_checked_point_fused_with_the_producer_stays_before_the_reads() -> None:
     # The check fused into the producer's loop checks each cell as it is
     # written, and gather still runs after the loop, where the flag is set
     # or not: the compiled program agrees, and stops where the native call
-    # is refused.
-    term = reversed_gather.term
-    ((flag, _message),) = term.checks
-    (check,) = [stmt.id for stmt in term.stmts if stmt.assignee.array == flag]
-    fused = Schedule(reversed_gather).fuse("reverse_quiet", check)
+    # is refused. The check's loop is gather's, by the parameter it checks.
+    check = reversed_gather.gather.checks.idx
+    assert repr(check) == "reversed_gather.gather.checks.idx"
+    assert check.where == where(reversed_gather, " gather(idx, x, y)")
+    assert list(reversed_gather.gather.checks) == ["idx"]
+    assert Schedule(reversed_gather).nest == (
+        "reversed_gather.reverse_quiet.i",
+        "reversed_gather.gather.checks.idx",
+        "reversed_gather.gather.i",
+    )
+    fused = Schedule(reversed_gather).fuse(reversed_gather.reverse_quiet.i, check)
+    assert fused.history == (
+        "fuse(reversed_gather.reverse_quiet.i, reversed_gather.gather.checks.idx)",
+    )
     assert statements(fused) == [("bijective", "decided"), ("monotone", "decided")]
     for size in (1, 2, 5):
         agrees(reversed_gather, fused, gather_inputs(size))
-    term = wrong_gather.term
-    ((flag, _message),) = term.checks
-    (check,) = [stmt.id for stmt in term.stmts if stmt.assignee.array == flag]
-    fused = Schedule(wrong_gather).fuse("number_up", check)
+    fused = Schedule(wrong_gather).fuse(
+        wrong_gather.number_up.i, wrong_gather.gather.checks.idx
+    )
     with pytest.raises(ValueError, match="is 4"):
         wrong_gather(**gather_inputs(4))
     with pytest.raises(ValueError, match="stops before gather"):
         LoopyExecutor().run(fused, **gather_inputs(4))
+    # a call with no check has none to name
+    with pytest.raises(AttributeError, match="has no check named idx"):
+        wrong_gather.number_up.checks.idx  # noqa: B018
 
 
 @pytest.mark.parametrize(
-    ("producer", "consumer", "shift", "error", "message"),
+    ("loops", "shift", "error", "message"),
     [
-        ("nothing", "divergence", 0, ValueError, "names no statement of burgers"),
-        ("divergence", "flux", 0, ValueError, "flux comes before divergence"),
-        ("flux", "flux.S0", 0, ValueError, "is named on both sides"),
-        ("flux", "divergence", True, TypeError, "a shift is a whole number"),
-        ("flux", "divergence", (1, 0), ValueError, "takes 1 whole number"),
+        (lambda: (burgers.divergence.i,), 0, ValueError, "names a loop of each"),
+        (
+            lambda: (burgers.divergence.i, burgers.flux.j),
+            0,
+            ValueError,
+            "runs before burgers.divergence.i in burgers; name the loops in the "
+            "order their calls run",
+        ),
+        (
+            lambda: (burgers.flux.j, burgers.flux.j),
+            0,
+            ValueError,
+            "run in one loop already",
+        ),
+        (
+            lambda: (burgers.flux.j, burgers.divergence.i),
+            True,
+            TypeError,
+            "a shift is a whole number",
+        ),
+        (
+            lambda: (burgers.flux.j, burgers.divergence.i),
+            (1, 0),
+            ValueError,
+            "takes 1 whole number",
+        ),
+        (
+            lambda: ("flux", "divergence"),
+            0,
+            TypeError,
+            r"fuse\(\) takes a loop handle such as burgers.flux.j or "
+            r"burgers.flux.j, not the string 'flux'|takes a loop handle",
+        ),
     ],
 )
-def test_a_fusion_names_two_sides_in_order(
-    producer: str, consumer: str, shift, error: type, message: str
+def test_a_fusion_names_loops_of_its_calls_in_order(
+    loops, shift, error: type, message: str
 ) -> None:
     with pytest.raises(error, match=message):
-        Schedule(burgers).fuse(producer, consumer, shift=shift)
+        Schedule(burgers).fuse(*loops(), shift=shift)
 
 
 def test_a_statement_s_map_moves_every_loop_of_the_step_it_runs_in() -> None:
@@ -1207,7 +1286,9 @@ def test_a_statement_s_map_moves_every_loop_of_the_step_it_runs_in() -> None:
     term = rows.term
     row = term.stmt("rows_then_cells.S0").inames[0]
     cell = term.stmt("rows_then_cells.S1").inames[1]
-    with pytest.raises(ValueError, match=f"S1 runs in {row} as well"):
+    # named by the id the map names it by, with its text and line
+    shown = rf"S1 \(g\[r, c\] = .*\) runs in {row} as well"
+    with pytest.raises(ValueError, match=shown):
         Schedule(rows).affine(
             f"{{ rows_then_cells_S0[{row}] -> [q] : q = {row}; "
             f"rows_then_cells_S1[{cell}] -> [q] : q = {cell} }}"
@@ -1221,7 +1302,9 @@ def test_loops_over_two_sizes_fuse_into_one_loop_bounded_by_both() -> None:
     # its own points. Without that, the schedule was decided and loopy could
     # write no loop ("unbounded optimum").
     for shift in (0, 2, -2):
-        fused = Schedule(two_sizes).fuse("doubled", "plus_one", shift=shift)
+        fused = Schedule(two_sizes).fuse(
+            two_sizes.doubled.k, two_sizes.plus_one.i, shift=shift
+        )
         assert fused.buildable == (True, ""), fused.buildable
         for n, m in ((1, 3), (3, 1), (2, 5), (5, 2), (1, 1)):
             agrees(
@@ -1237,9 +1320,9 @@ def test_loops_over_two_sizes_fuse_into_one_loop_bounded_by_both() -> None:
 
 
 def test_statements_of_one_loop_cannot_be_fused_into_it() -> None:
-    fused = Schedule(burgers).fuse("flux", "divergence", shift=1)
-    with pytest.raises(ValueError, match="already run in"):
-        fused.fuse("flux", "divergence")
+    fused = Schedule(burgers).fuse(burgers.flux.j, burgers.divergence.i, shift=1)
+    with pytest.raises(ValueError, match="run in one loop already, burgers.flux.j"):
+        fused.fuse(burgers.flux.j, burgers.divergence.i)
 
 
 def test_a_parallel_loop_after_fusion_is_refused_for_the_edge_it_carries() -> None:
@@ -1247,10 +1330,9 @@ def test_a_parallel_loop_after_fusion_is_refused_for_the_edge_it_carries() -> No
     # steps earlier: on a hardware axis those are two work items. The C
     # target has no hardware axes, but the casts are asked before the target
     # is.
-    fused = Schedule(burgers).fuse("flux", "divergence", shift=1)
-    loop = fused.order[-1]
+    fused = Schedule(burgers).fuse(burgers.flux.j, burgers.divergence.i, shift=1)
     with pytest.raises(IllegalCast, match="on another work item"):
-        fused.tag(**{loop: "g.0"})
+        fused.tag(burgers.divergence.i, "g.0")
 
 
 def test_two_passes_fuse_on_the_element_loop_and_no_deeper() -> None:
@@ -1259,8 +1341,9 @@ def test_two_passes_fuse_on_the_element_loop_and_no_deeper() -> None:
     # stores it. The refusal names that pair, and the fusion of fewer loops
     # that is accepted, which it checked.
     schedule = Schedule(two_passes)
+    first, second = two_passes.along
     with pytest.raises(IllegalCast) as caught:
-        schedule.fuse("along", "along@2")
+        schedule.fuse(first.a, second.a)
     assert caught.value.fact.kind == "monotone"
     (source, source_at), (sink, sink_at), _sizes = caught.value.witness
     assert (source, sink) == ("along.S0", "along@2.S0")
@@ -1269,13 +1352,15 @@ def test_two_passes_fuse_on_the_element_loop_and_no_deeper() -> None:
     assert source_at[element] == sink_at[later[0]]
     assert source_at[row] > sink_at[later[1]]
     assert str(caught.value).endswith(
-        "fuse('along', 'along@2', loops=1) runs every dependence between them "
-        "forward"
+        "fuse(two_passes.along[0].e, two_passes.along[1].e) runs every dependence "
+        "between them forward"
     )
-    fused = schedule.fuse("along", "along@2", loops=1)
-    assert fused.history == ("fuse(along, along@2, loops=1)",)
-    assert fused.key == "two_passes[c].fuse('along', 'along@2', loops=1)"
-    assert statements(fused) == [("bijective", "decided"), ("monotone", "decided")]
+    fused = schedule.fuse(first.e, second.e)
+    assert fused.history == ("fuse(two_passes.along[0].e, two_passes.along[1].e)",)
+    assert fused.key == (
+        "two_passes[c].fuse(two_passes.along[0].e, two_passes.along[1].e)"
+    )
+    assert statements(fused) == [MADE, *CAST]
     assert fused.buildable == (True, "")
     # One loop over the elements, and the two passes' row loops in it, one
     # after the other (the loops before them zero t).
@@ -1289,16 +1374,18 @@ def test_two_passes_fuse_on_the_element_loop_and_no_deeper() -> None:
         agrees(two_passes, fused, passes_inputs(elements, width))
 
 
-def test_loops_counts_the_outer_loops_a_fusion_takes() -> None:
-    # Two loops of two levels each fuse both by default, and one with
-    # loops=1: the shift is then one number, for the one loop.
+def test_the_loops_named_are_the_depth_a_fusion_goes_down_to() -> None:
+    # Two loops of two levels each fuse both, named at the inner loops, and
+    # the outer ones alone, named at the outer: the shift is then one
+    # number, for the one loop.
     whole_nest = Schedule(squares, sizes={"n": 6, "m": 5})
     loops = len(whole_nest.order)
-    assert len(whole_nest.fuse("square2", "down", shift=(1, 0)).order) == loops - 2
-    outer = whole_nest.fuse("square2", "down", shift=1, loops=1)
-    assert outer.history == ("fuse(square2, down, shift=1, loops=1)",)
+    both = whole_nest.fuse(squares.square2.j, squares.down.q, shift=(1, 0))
+    assert len(both.order) == loops - 2
+    outer = whole_nest.fuse(squares.square2.i, squares.down.p, shift=1)
+    assert outer.history == ("fuse(squares.square2.i, squares.down.p, shift=1)",)
     assert len(outer.order) == loops - 1
-    assert statements(outer) == [("bijective", "decided"), ("monotone", "decided")]
+    assert statements(outer) == [MADE, *CAST]
     for height, width in ((1, 1), (2, 3), (6, 5)):
         a = np.arange(height * width, dtype=float).reshape(height, width) / 7.0
         agrees(
@@ -1312,22 +1399,15 @@ def test_loops_counts_the_outer_loops_a_fusion_takes() -> None:
     assert again.order == outer.order
 
 
-@pytest.mark.parametrize(
-    ("loops", "error", "message"),
-    [
-        (0, ValueError, "takes from 1 to 2 of their outer loops, not 0"),
-        (3, ValueError, "takes from 1 to 2 of their outer loops, not 3"),
-        (True, TypeError, "a whole number counted from the outermost .*, not True"),
-        (1.0, TypeError, "a whole number counted from the outermost .*, not 1.0"),
-        # A loop's name is not how many: the message says what loops=1 fuses.
-        ("i", TypeError, r"\(loops=1 fuses i with p\), not 'i'"),
-    ],
-)
-def test_a_fusion_of_more_loops_than_both_sides_have_is_refused(
-    loops, error: type, message: str
-) -> None:
-    with pytest.raises(error, match=message):
-        Schedule(squares).fuse("square2", "down", loops=loops)
+def test_a_fusion_of_loops_at_two_depths_is_refused() -> None:
+    with pytest.raises(ValueError) as caught:
+        Schedule(squares).fuse(squares.square2.j, squares.down.p)
+    assert str(caught.value) == (
+        "fuse(squares.square2.j, squares.down.p): a fusion fuses each call's "
+        "loops down to the loop named, at one depth in every call, and the "
+        "loops named are squares.square2.j at depth 2 and squares.down.p at "
+        "depth 1"
+    )
 
 
 # }}}
@@ -1337,7 +1417,7 @@ def test_a_fusion_of_more_loops_than_both_sides_have_is_refused(
 
 
 def test_a_substituted_array_is_computed_where_it_is_read() -> None:
-    schedule = Schedule(burgers, sizes={"n": 16}).substitute("f")
+    schedule = Schedule(burgers, sizes={"n": 16}).substitute(burgers.f)
     assert schedule.substituted == ("f",)
     assert statements(schedule) == [
         ("definedness", "decided"),
@@ -1354,11 +1434,13 @@ def test_a_substituted_array_is_computed_where_it_is_read() -> None:
 
 def test_a_fused_array_is_substituted_into_the_fused_loop() -> None:
     schedule = (
-        Schedule(burgers).fuse("flux", "divergence", shift=1).substitute("f")
+        Schedule(burgers)
+        .fuse(burgers.flux.j, burgers.divergence.i, shift=1)
+        .substitute(burgers.f)
     )
     assert schedule.history == (
-        "fuse(flux, divergence, shift=1)",
-        "substitute('f')",
+        "fuse(burgers.flux.j, burgers.divergence.i, shift=1)",
+        "substitute(burgers.f)",
     )
     assert "f" not in schedule.kernel.default_entrypoint.temporary_variables
     for size in (1, 4, 11):
@@ -1370,8 +1452,12 @@ def test_a_fused_array_is_substituted_into_the_fused_loop() -> None:
 def test_a_substitution_drops_the_dependences_through_the_array() -> None:
     # Fused and substituted, nothing passes from one step of the loop to the
     # next, so it may go on a hardware axis; fused alone, it may not (above).
-    schedule = Schedule(burgers).fuse("flux", "divergence", shift=1).substitute("f")
-    tagged = schedule.tag(**{schedule.order[-1]: "g.0"})
+    schedule = (
+        Schedule(burgers)
+        .fuse(burgers.flux.j, burgers.divergence.i, shift=1)
+        .substitute(burgers.f)
+    )
+    tagged = schedule.tag(burgers.divergence.i, "g.0")
     monotone = [fact for fact in tagged.facts() if fact.kind == "monotone"][-1]
     assert monotone.status is Status.DECIDED
     assert "within one work item" in monotone.statement
@@ -1384,23 +1470,26 @@ def test_a_read_of_a_cell_the_producer_does_not_store_is_refused() -> None:
     # decides; computed where it is read, f would have no zeros to read, so
     # the substitution's own fact keeps the stricter claim and is refuted.
     with pytest.raises(IllegalCast) as caught:
-        Schedule(padded).substitute("f")
+        Schedule(padded).substitute(padded.f)
     fact = caught.value.fact
     assert (fact.kind, fact.status) == ("definedness", Status.REFUTED)
     assert fact.statement == (
-        "for substitute('f'), every cell of f that padded reads, interior_flux.S0 "
-        "has stored by the time it is read"
+        "for substitute(padded.f), every cell of padded.f that padded reads, "
+        "padded.interior_flux has stored by the time it is read"
     )
     message = str(caught.value)
-    assert message.startswith("substitute('f') illegal: shifted.S0 reads f[")
-    assert "which interior_flux.S0 does not store" in message
+    term = padded.term
+    assert message.startswith(
+        f"substitute(padded.f) illegal: {named(term, 'shifted.S0')} reads f["
+    )
+    assert f"which {named(term, 'interior_flux.S0')} does not store" in message
     assert "would see the zeros" in message
     assert len(fact.provenance["witness"]) == 1
     (program_fact,) = definedness(padded)
     assert IslOracle().establish(program_fact).status is Status.DECIDED
     # The same for h, whose back half back reads and front leaves zero.
-    with pytest.raises(IllegalCast, match="back.S0 reads h\\["):
-        Schedule(between).substitute("h")
+    with pytest.raises(IllegalCast, match=r"\(test_fusion.py:\d+\) reads h\["):
+        Schedule(between).substitute(between.h)
 
 
 def test_a_read_isl_cannot_list_refuses_the_substitution_undecided() -> None:
@@ -1408,7 +1497,7 @@ def test_a_read_isl_cannot_list_refuses_the_substitution_undecided() -> None:
     # cells idx names is not known, so the substitution is refused, and its
     # definedness fact is assumed with the reason, not refuted.
     with pytest.raises(IllegalCast) as caught:
-        Schedule(gathered_inside).substitute("f")
+        Schedule(gathered_inside).substitute(gathered_inside.f)
     fact = caught.value.fact
     assert (fact.kind, fact.status) == ("definedness", Status.ASSUMED)
     assert fact.decided_by is None
@@ -1418,7 +1507,7 @@ def test_a_read_isl_cannot_list_refuses_the_substitution_undecided() -> None:
 
 def test_a_read_before_the_producer_stores_the_cell_is_refused() -> None:
     with pytest.raises(IllegalCast) as caught:
-        Schedule(early, sizes={"n": 4}).substitute("f")
+        Schedule(early, sizes={"n": 4}).substitute(early.f)
     assert caught.value.fact.kind == "definedness"
     message = str(caught.value)
     assert f"y[i] = f[i] + 1.0 ({where(shifted, 'y[i] =')}) at i=" in message
@@ -1432,11 +1521,11 @@ def test_a_write_between_the_producer_and_a_read_is_refused() -> None:
     # bump writes u after flux read it and before divergence reads f: the
     # value computed again at the read would be the bumped one.
     with pytest.raises(IllegalCast) as caught:
-        Schedule(bumped, sizes={"n": 8}).substitute("f")
+        Schedule(bumped, sizes={"n": 8}).substitute(bumped.f)
     assert caught.value.fact.kind == "monotone"
     message = str(caught.value)
     assert message.startswith(
-        "substitute('f') illegal: rhs[i] = -(f[i + 1] - f[i - 1]) / 2 "
+        "substitute(bumped.f) illegal: rhs[i] = -(f[i + 1] - f[i - 1]) / 2 "
         f"({where(divergence, 'rhs[i] =')}) at i="
     )
     assert " reads u[" in message
@@ -1449,7 +1538,7 @@ def test_a_later_write_of_what_the_producer_read_waits_for_the_reads() -> None:
     # bump writes u after divergence has read f; computed again at the
     # read, f reads u, so bump has to wait for divergence, which nothing in
     # the lowered kernel said: bump depended on flux, which is gone.
-    schedule = Schedule(bumped_after).substitute("f")
+    schedule = Schedule(bumped_after).substitute(bumped_after.f)
     insns = {
         insn.id: insn for insn in schedule.kernel.default_entrypoint.instructions
     }
@@ -1459,10 +1548,14 @@ def test_a_later_write_of_what_the_producer_read_waits_for_the_reads() -> None:
     # Fused one step behind the divergence, bump writes u[k] in the step in
     # which the divergence reads it to compute f[k]: the divergence has to
     # come first in the step, and the kernel says so.
-    fused = Schedule(bumped_after).fuse("divergence", "bump", shift=1)
+    fused = Schedule(bumped_after).fuse(
+        bumped_after.divergence.i, bumped_after.bump.k, shift=1
+    )
     with pytest.raises(IllegalCast):
-        Schedule(bumped_after).fuse("divergence", "bump").substitute("f")
-    substituted = fused.substitute("f")
+        Schedule(bumped_after).fuse(
+            bumped_after.divergence.i, bumped_after.bump.k
+        ).substitute(bumped_after.f)
+    substituted = fused.substitute(bumped_after.f)
     insns = {
         insn.id: insn for insn in substituted.kernel.default_entrypoint.instructions
     }
@@ -1477,17 +1570,17 @@ def test_an_in_place_consumer_cannot_have_the_array_computed_again() -> None:
     with pytest.raises(
         IllegalCast, match=r"reads u\[1\], overwritten by the same statement at i=1"
     ):
-        Schedule(stepped).substitute("f")
+        Schedule(stepped).substitute(stepped.f)
     # Stored, the same program fuses and runs.
     agrees(
         stepped,
-        Schedule(stepped).fuse("flux", "update", shift=1),
+        Schedule(stepped).fuse(stepped.flux.j, stepped.update.i, shift=1),
         {"u": Arr.from_numpy(velocity(6))},
     )
 
 
 def test_a_read_through_an_index_array_is_substituted() -> None:
-    schedule = Schedule(gathered).substitute("f")
+    schedule = Schedule(gathered).substitute(gathered.f)
     for size in (1, 4, 7):
         idx = np.random.default_rng(size).permutation(size).astype(np.int64)
         agrees(
@@ -1504,19 +1597,24 @@ def test_a_read_through_an_index_array_is_substituted() -> None:
 @pytest.mark.parametrize(
     ("prog", "array", "message"),
     [
-        (burgers, "u", "u is a parameter of burgers, which its caller passes"),
-        (burgers, "g", "g is no array of burgers"),
-        (twice, "f", "f is written by flux.S0, flux@2.S0"),
+        (burgers, "u", "burgers.u is a parameter of burgers, which its caller passes"),
+        (
+            twice,
+            "f",
+            r"twice.f is written by twice.flux\[0\] and twice.flux\[1\]",
+        ),
         (halved, "f", r"stores f\[j // 2\]|at its own loop variables"),
         (summed, "f", "stores a sum"),
-        (unread, "f", "nothing in unread reads f"),
+        (unread, "f", "nothing in unread reads unread.f"),
     ],
 )
 def test_what_a_substitution_cannot_take_is_named(
     prog, array: str, message: str
 ) -> None:
     with pytest.raises(ValueError, match=message):
-        Schedule(prog).substitute(array)
+        Schedule(prog).substitute(getattr(prog, array))
+    with pytest.raises(AttributeError, match="burgers has no loop, array, call"):
+        burgers.g  # noqa: B018
 
 
 def test_a_substitution_through_two_arrays_is_refused_where_it_drops_a_dependence():
@@ -1524,42 +1622,45 @@ def test_a_substitution_through_two_arrays_is_refused_where_it_drops_a_dependenc
     # through two arrays that is what the first producer reads, which the
     # second step does not see. Where the first is computed from what nothing
     # writes, u, there is nothing to see, and the chain is substituted.
-    both = Schedule(chained).substitute("f").substitute("g")
+    both = Schedule(chained).substitute(chained.f).substitute(chained.g)
     agrees(chained, both, burgers_inputs(7))
     ids = {insn.id for insn in both.kernel.default_entrypoint.instructions}
     assert "divergence_S0" in ids and not ids & {"flux_S0", "doubled_S0"}
     # The other way round, the reader of f is gone already.
-    with pytest.raises(ValueError, match="doubled.S0 reads f and runs no more"):
-        Schedule(chained).substitute("g").substitute("f")
-    for array in ("f", "g"):
+    with pytest.raises(
+        ValueError, match="chained.doubled reads chained.f and runs no more"
+    ):
+        Schedule(chained).substitute(chained.g).substitute(chained.f)
+    for array in (chained.f, chained.g):
         agrees(chained, Schedule(chained).substitute(array), burgers_inputs(7))
     # Where something writes what the first read, the chain is refused: the
     # update reads g[i - 1] after it wrote u[i - 1], and g computed there
     # would be computed from the new u.
-    with pytest.raises(ValueError, match="doubled.S0 reads f, which is computed"):
-        Schedule(chained_in_place).substitute("f").substitute("g")
+    with pytest.raises(
+        ValueError, match="chained_in_place.doubled reads chained_in_place.f, which is"
+    ):
+        Schedule(chained_in_place).substitute(chained_in_place.f).substitute(chained_in_place.g)
 
 
 def test_a_statement_taken_out_leaves_no_loop_to_name() -> None:
-    schedule = Schedule(burgers).substitute("f")
+    schedule = Schedule(burgers).substitute(burgers.f)
     term = burgers.term
     gone = {term.stmt("flux.S0").inames[0], term.stmt("f.zeros").inames[0]}
     assert not gone & set(schedule.order)
     assert schedule.order == term.stmt("divergence.S0").inames
-    with pytest.raises(ValueError, match="is not an iname"):
-        schedule.tag(**{min(gone): "g.0"})
-    with pytest.raises(ValueError, match="runs no more"):
-        schedule.fuse("flux", "divergence")
-    loop = schedule.order[0]
-    split = schedule.split(loop, 4)
+    with pytest.raises(ValueError, match="is no loop after substitute"):
+        schedule.tag(burgers.flux.j, "g.0")
+    with pytest.raises(ValueError, match="is no loop after substitute"):
+        schedule.fuse(burgers.flux.j, burgers.divergence.i)
+    split = schedule.split(burgers.divergence.i, 4)
     assert [fact.status.value for fact in split.facts()][-2:] == ["decided"] * 2
     agrees(burgers, split, burgers_inputs(10))
 
 
 def test_an_array_is_substituted_once() -> None:
-    schedule = Schedule(burgers).substitute("f")
+    schedule = Schedule(burgers).substitute(burgers.f)
     with pytest.raises(ValueError, match="substituted already"):
-        schedule.substitute("f")
+        schedule.substitute(burgers.f)
 
 
 def test_a_substituted_value_is_converted_as_storing_it_converted_it() -> None:
@@ -1576,7 +1677,7 @@ def test_a_substituted_value_is_converted_as_storing_it_converted_it() -> None:
         y=Arr.zeros(9),
     )["y"]
     computed = LoopyExecutor().run(
-        Schedule(single).substitute("f"),
+        Schedule(single).substitute(single.f),
         u=Arr.from_numpy(u.copy()),
         t=Arr.from_numpy(np.zeros(9, dtype=np.float32)),
         y=Arr.zeros(9),
@@ -1584,7 +1685,7 @@ def test_a_substituted_value_is_converted_as_storing_it_converted_it() -> None:
     assert np.array_equal(stored, computed)
     assert not np.array_equal(computed, u * 0.1 * 10.0)
     # A Real stored in a Nat cell is truncated, and the result is exact.
-    schedule = Schedule(truncated).substitute("f")
+    schedule = Schedule(truncated).substitute(truncated.f)
     for size in (1, 4, 7):
         agrees(
             truncated,
@@ -1613,7 +1714,7 @@ def substituted_agrees(prog, array: str, inputs: dict) -> str:
     With the native program, by the differential fact, and bit for bit with
     the compiled program that stores ``array``.
     """
-    schedule = Schedule(prog).substitute(array)
+    schedule = Schedule(prog).substitute(getattr(prog, array))
     assert [fact.status.value for fact in schedule.facts()][:3] == ["decided"] * 3
     assert schedule.buildable == (True, "")
     agrees(prog, schedule, {name: value.copy() for name, value in inputs.items()})

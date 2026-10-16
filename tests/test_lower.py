@@ -28,6 +28,7 @@ from loopty.lower import (
     lower,
     lower_generic,
     numpy_dtype,
+    pyopencl_installed,
     target_for,
 )
 
@@ -299,7 +300,9 @@ def test_the_opencl_target_is_named_but_not_imported() -> None:
     opencl_host = InKernelOpenCLTarget.get_host_ast_builder(None)
     assert not opencl_host.can_implement_conditionals
     # Importing loopty, lowering, and running must never pull in pyopencl.
-    assert "pyopencl" not in sys.modules
+    # Where pyopencl is installed, ``import loopy`` imports it (#179).
+    if not pyopencl_installed():
+        assert "pyopencl" not in sys.modules
 
 
 # {{{ the loops outside an inner loop
@@ -472,7 +475,7 @@ def test_a_program_whose_intermediate_is_larger_than_the_stack_runs(tmp_path):
             import numpy as np
             from lanky.prelude import Real
 
-            from loopty import Arr, Fin, kernel, program, when
+            from loopty import Arr, Fin, kernel, program
             from loopty.executor import LoopyExecutor
 
             @kernel
@@ -483,7 +486,7 @@ def test_a_program_whose_intermediate_is_larger_than_the_stack_runs(tmp_path):
             @kernel
             def divergence(f: Arr[Fin[n], Real], rhs: Arr[Fin[n], Real]):
                 for i in rhs.dom:
-                    with when((i > 0) & (i + 1 < rhs.dom.size)):
+                    if (i > 0) & (i + 1 < rhs.dom.size):
                         rhs[i] = -(f[i + 1] - f[i - 1]) / 2
 
             @program

@@ -128,7 +128,7 @@ def _applied(name: str, value: Any) -> Any:
     """``name`` of ``value``: numpy's natively, a recorded call when traced.
 
     The call is lanky's, as every traced value is, so that it compares and
-    combines like one: ``when(sqrt(x[i]) > 1.5)`` is a guard, where a plain
+    combines like one: ``if sqrt(x[i]) > 1.5:`` is a branch, where a plain
     pymbolic call refused the comparison ("expressions don't have an order").
     """
     from lanky.terms import Call, Var

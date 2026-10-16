@@ -97,7 +97,8 @@ of every axis (:func:`loopty.obligations.cast_obligation`).
 
 A program zeroes each array it makes in a statement of its own, in loops the
 file never wrote. Those loops go on the axis of the loop that stores the
-array along the same axis of it, so ``fused.tag(i="g.0")`` zeroes each box's
+array along the same axis of it, so ``fused.on_groups(l2p.unpack.box)``
+zeroes each box's
 cells on the work item that stores them (see :meth:`Schedule.tag`), and the
 check asks about the zeros as about any statement.
 
@@ -144,8 +145,9 @@ step up to the one the fact is about, with every argument it was given
 (:meth:`Schedule.fact_id`). What a step means is the same on every target,
 so a cast's facts leave the target out, and a schedule retargeted
 (:meth:`Schedule.retarget`) shares them with the one it was retargeted from:
-a file that keeps ``fused`` for C and ``fused.retarget("opencl").tag(i="g.0")``
-for a device lists each fusion once. What the target builds is not, and a
+a file that keeps ``fused`` for C and
+``fused.retarget("opencl").on_groups(l2p.unpack.box)`` for a device lists each
+fusion once. What the target builds is not, and a
 ``buildable`` fact, like the agreement a run records, names the target before
 the steps. The definition is the module the
 kernel's file's path gives it, its qualified name and its line, through
@@ -294,6 +296,21 @@ from loopty import idx
 from loopty import oracle as isl_oracle
 from loopty.description import MapText, Unstatable, describe, map_text, map_text_of
 from loopty.flow import bounds_dimension
+from loopty.handles import (
+    Array,
+    Call,
+    Condition,
+    Handle,
+    Loop,
+    _Index,
+    _Several,
+    binders_of,
+    statement_names,
+)
+from loopty.handles import (
+    _index as _handles_of,
+)
+from loopty.hoist import hoist_invariants
 from loopty.isl_reading import declining_methods
 from loopty.lower import (
     Lowering,
@@ -306,7 +323,7 @@ from loopty.lower import (
 )
 from loopty.named import as_isl, domains_of, to_named, with_domains
 from loopty.obligations import IslOnly
-from loopty.source import instances_text
+from loopty.source import Named, as_spelled, instances_text
 from loopty.term import Stmt, Term, commutes
 from loopty.typing import layout_fact_ids
 
@@ -346,13 +363,13 @@ def _called_at() -> str:
     """``file:line`` of the code that called into loopty, or ``""``.
 
     The innermost frame outside this module that is no part of the standard
-    library or an installed package: the line of the step, ``.split("c",
-    4)``, which in a chain written over several lines is a line of its own,
-    or of ``Schedule(...)``. A step being replayed is at the line it was
-    first taken at (:func:`_replaying`). ``""`` where loopty or lanky made
-    the call, as ``loopty run`` makes a schedule for a kernel the file
-    schedules nowhere, or where no code of the user's calls: whoever asked
-    places its facts at the kernel then.
+    library or an installed package: the line of the step,
+    ``.split(mass_action.c, 4)``, which in a chain written over several lines
+    is a line of its own, or of ``Schedule(...)``. A step being replayed is
+    at the line it was first taken at (:func:`_replaying`). ``""`` where
+    loopty or lanky made the call, as ``loopty run`` makes a schedule for a
+    kernel the file schedules nowhere, or where no code of the user's calls:
+    whoever asked places its facts at the kernel then.
     """
     replayed = _REPLAYED_AT.get()
     if replayed is not None:
@@ -362,6 +379,10 @@ def _called_at() -> str:
         frame = frame.f_back
     while frame is not None:
         module = str(frame.f_globals.get("__name__", ""))
+        if module == __name__:
+            # a step taking another through a decorator: on_groups is a tag
+            frame = frame.f_back
+            continue
         if module.split(".", 1)[0] in ("loopty", "lanky"):
             return ""
         filename = frame.f_code.co_filename
@@ -430,12 +451,26 @@ class IllegalCast(TypeError):
     ``witness`` this witness when isl gave one. A substitution refused on a
     question isl could not answer carries it ``ASSUMED`` instead (see
     :meth:`Schedule.substitute`).
+
+    The witness names each statement by its id, as a map per statement and a
+    fact's provenance do: ``(('S0', {'t': 0, 'i': 8}), ('S0', {'t': 1, 'i':
+    7}), {'nt': 16, 'nx': 16})``. ``instances`` names its instances as the
+    message does, each statement by its text and line: ``('u[t + 1, i] = ...
+    (stencil_skew.py:62) at t=0, i=8', 'the same statement at t=1, i=7')``,
+    and is empty where the witness is no such pair.
     """
 
-    def __init__(self, message: str, witness: Any = None, fact: Any = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        witness: Any = None,
+        fact: Any = None,
+        instances: Sequence[str] = (),
+    ) -> None:
         super().__init__(message)
         self.witness = witness
         self.fact = fact
+        self.instances = tuple(instances)
 
 
 class UnbuildableSchedule(TypeError):
@@ -1553,7 +1588,8 @@ def _zeros_tags(
     is stored: along an axis of the array that every statement storing it
     stores along a loop of its own on one group or local axis, the same for
     each, the zeros' loop along that axis goes on that axis too.
-    ``fused.tag(i="g.0")`` then zeroes each box's cells on the work item of
+    ``fused.on_groups(l2p.unpack.box)`` then zeroes each box's cells on the
+    work item of
     the box's work group that stores them, before it stores them.
 
     A loop the schedule has tagged keeps its tag. An axis of the array along
@@ -1723,6 +1759,13 @@ def _concurrent(tag: Any) -> bool:
     return isinstance(_loopy_tag(tag), ConcurrentTag)
 
 
+def _tags_text(draft: _Draft, names: Iterable[str]) -> str:
+    """``tag(spmv.j.inner, 'l.0')``: the tags of loops, as the steps wrote them."""
+    return ", ".join(
+        f"tag({draft.show(name)}, {draft.tags[name]!r})" for name in names
+    )
+
+
 def _shown_tag(draft: _Draft, name: str, tag: Any) -> str:
     """The tag on a loop as the schedule was given it (``ilp``, not ``ilp.unr``)."""
     return draft.tags.get(name, str(tag))
@@ -1756,7 +1799,7 @@ def _instruction_text(draft: _Draft, insn_id: str) -> str:
     """An instruction of the kernel, in the words of the term."""
     statement = _statement_of(draft, insn_id)
     if statement is not None:
-        return f"statement {statement}"
+        return f"the statement {draft.show_stmt(statement)}"
     return f"the instruction {insn_id}, which reads the length of a ragged row,"
 
 
@@ -1816,10 +1859,13 @@ def _unbuildable_reason(draft: _Draft) -> str | None:
         if draft.reductions.get(name) in draft.nested_in
     )
     if nested:
-        names = ", ".join(nested)
+        names = ", ".join(map(draft.show, nested))
         outer = draft.nested_in[draft.reductions[nested[0]]]
         around = ", ".join(
-            sorted(name for name, key in draft.reductions.items() if key == outer)
+            draft.show(name)
+            for name in sorted(
+                name for name, key in draft.reductions.items() if key == outer
+            )
         )
         return (
             f"the parallel tag on {names} puts a hardware axis on a reduction "
@@ -1875,7 +1921,7 @@ def _ragged_reason(draft: _Draft) -> str | None:
     concurrent = {name for name, tag in draft.tags.items() if _concurrent(tag)}
     inside = sorted(concurrent & draft.data_dependent)
     if inside:
-        names = ", ".join(inside)
+        names = ", ".join(draft.show(name) for name in inside)
         if all(_hardware_axis(draft.tags[name]) for name in inside):
             return (
                 f"the parallel tag on {names} sits inside a loop whose bound "
@@ -1884,9 +1930,9 @@ def _ragged_reason(draft: _Draft) -> str | None:
                 "Parallelize an enclosing loop with a size known at launch "
                 "instead, such as the rows of a CSR product"
             )
-        tags = ", ".join(f"{name}={draft.tags[name]!r}" for name in inside)
+        tags = _tags_text(draft, inside)
         return (
-            f"the tag {tags} makes a loop inside a ragged fiber concurrent, "
+            f"{tags} makes a loop inside a ragged fiber concurrent, "
             "and loopy will not run a concurrent loop (a hardware axis, ilp or "
             "vec) in a domain with a data-dependent parameter, which the "
             "fiber's is: its bound comes from an array. Leave the fiber's loop "
@@ -1914,17 +1960,20 @@ def _ragged_reason(draft: _Draft) -> str | None:
             for other in domain.get_var_names(isl.dim_type.set)
             if other != name and other in draft.data_dependent
         ]
-        beside = f", beside the ragged fiber {fibers[0]}" if fibers else ""
+        beside = (
+            f", beside the ragged fiber {draft.show(fibers[0])}" if fibers else ""
+        )
         shown = _shown_tag(
             draft, name, next(tag for tag in tags[name] if _concurrent(tag))
         )
+        loop = draft.show(name)
         return (
-            f"the tag {name}={shown!r} makes the loop {name} concurrent, and "
-            f"loopy defines {name} in one domain with the length of a ragged "
+            f"tag({loop}, {shown!r}) makes the loop {loop} concurrent, and "
+            f"loopy defines {loop} in one domain with the length of a ragged "
             f"row{beside}, which is read out of an array inside the row's "
             "loop; loopy will not run a concurrent loop (a hardware axis, ilp "
             "or vec) in a domain with a data-dependent parameter. Put the axis "
-            f"on the row's loop or one outside it instead, or leave {name} "
+            f"on the row's loop or one outside it instead, or leave {loop} "
             "sequential"
         )
     return None
@@ -1985,7 +2034,8 @@ def _reduction_reason(draft: _Draft, key: str, inames: Sequence[str]) -> str | N
     fact that holds only on some runs is not a fact, so it is refused; ``unr``
     unrolls the sum in order and builds.
     """
-    accumulated = draft.reduction_info.get(key, (key, ""))[0]
+    accumulated = draft.show_array(draft.reduction_info.get(key, (key, ""))[0])
+    show = draft.show
     roles = {name: _reduction_role(draft.tags.get(name)) for name in inames}
     local = sorted(name for name, role in roles.items() if role == "local")
     sequential = sorted(
@@ -1998,26 +2048,29 @@ def _reduction_reason(draft: _Draft, key: str, inames: Sequence[str]) -> str | N
     if local and sequential:
         unrolled = [n for n in sequential if roles[n] in ("unrolled", "ilp")]
         how = (
-            f" (loopy unrolls {', '.join(unrolled)}, which is a sequence)"
+            f" (loopy unrolls {', '.join(map(show, unrolled))}, which is a "
+            "sequence)"
             if unrolled
             else ""
         )
         return (
-            f"the reduction into {accumulated} runs over {', '.join(local)} "
-            f"in parallel and {', '.join(sequential)} in sequence{how}, and "
+            f"the reduction into {accumulated} runs over "
+            f"{', '.join(map(show, local))} in parallel and "
+            f"{', '.join(map(show, sequential))} in sequence{how}, and "
             "loopy generates code only for a reduction whose inames are all one "
             "or all the other. loopty has no split_reduction transform to offer "
             "as the remedy"
         )
     if len(local) > 1:
         return (
-            f"the reduction into {accumulated} runs over {', '.join(local)} on "
+            f"the reduction into {accumulated} runs over "
+            f"{', '.join(map(show, local))} on "
             f"{len(local)} local axes, and loopy sums a reduction across one "
             "local axis at most, and only when that axis is the whole of it. "
             "loopty has no split_reduction transform to offer as the remedy"
         )
     if refused:
-        tags = ", ".join(f"{name}={draft.tags[name]!r}" for name in refused)
+        tags = ", ".join(f"{show(name)} on {draft.tags[name]!r}" for name in refused)
         return (
             f"the reduction into {accumulated} runs over {tags}, and loopy "
             "runs a reduction in parallel only across the work items of a "
@@ -2027,7 +2080,8 @@ def _reduction_reason(draft: _Draft, key: str, inames: Sequence[str]) -> str | N
         )
     if privatized:
         return (
-            f"the reduction into {accumulated} runs over {', '.join(privatized)} "
+            f"the reduction into {accumulated} runs over "
+            f"{', '.join(map(show, privatized))} "
             "on an ilp axis, and loopy privatizes the accumulator along it and "
             "then accepts or refuses the instruction that initializes it outside "
             "the loop depending on Python's string hash seed, so the code cannot "
@@ -2061,21 +2115,22 @@ def _extent_reason(draft: _Draft, key: str, inames: Sequence[str]) -> str | None
         for name in draft.coords.get(statement, ())
         if _reduction_role(draft.tags.get(name)) == "local"
     ]
-    accumulated = draft.reduction_info.get(key, (key, ""))[0]
+    accumulated = draft.show_array(draft.reduction_info.get(key, (key, ""))[0])
     for name in (*local, *around):
         extent = _unbounded_extent(draft.kernel, name)
         if extent is None:
             continue
+        loop = draft.show(name)
         whose = (
-            f"the reduction into {accumulated} runs over {name} on a local axis"
+            f"the reduction into {accumulated} runs over {loop} on a local axis"
             if name in local
             else f"the reduction into {accumulated} runs on a local axis inside "
-            f"the loop {name}, which is on a local axis too"
+            f"the loop {loop}, which is on a local axis too"
         )
         return (
             f"{whose}, and loopy sums such a reduction in local memory, in an "
             "array with a cell per work item whose shape has to be a number "
-            f"when the code is generated; the extent of {name} is {extent}, "
+            f"when the code is generated; the extent of {loop} is {extent}, "
             "which no number bounds while the sizes it names are free. Declare "
             "that extent as a number (Fin[8] rather than Fin[n]), or run the "
             "reduction in sequence"
@@ -2105,7 +2160,9 @@ def _unbounded_extent(kernel: Any, iname: str) -> str | None:
     return None
 
 
-def _enclosing_loops(kernel: Any) -> dict[str, dict[str, str]]:
+def _enclosing_loops(
+    kernel: Any, show: Any = lambda name: name
+) -> dict[str, dict[str, str]]:
     """For each loop of ``kernel``, the loops loopy nests it inside, and why.
 
     Read off loopy's own ``find_loop_nest_around_map``, the nesting both of
@@ -2119,7 +2176,8 @@ def _enclosing_loops(kernel: Any) -> dict[str, dict[str, str]]:
     + reduce_sum(val[r, j] for j in val.dom[r])`` shares one domain with ``r``
     and is still nested in it, because the length of row ``r`` is assigned in
     ``r`` and outside ``k``. The loops a loop is nested in are these, and the
-    ones those are nested in, in turn, each with the reason in words.
+    ones those are nested in, in turn, each with the reason in words, each
+    loop named by ``show``.
     """
     from loopy.schedule import find_loop_nest_around_map
 
@@ -2135,11 +2193,14 @@ def _enclosing_loops(kernel: Any) -> dict[str, dict[str, str]]:
     def why(inner: str, outer: str) -> str:
         if outer in named.get(inner, ()):
             return (
-                f"the domain of {inner} names {outer}, as a ragged fiber's "
-                "names its row"
+                f"the domain of {show(inner)} names {show(outer)}, as a ragged "
+                "fiber's names its row"
             )
         others = ", ".join(sorted(insns[outer] - insns[inner]))
-        return f"{outer} runs every instruction {inner} runs, and {others} as well"
+        return (
+            f"{show(outer)} runs every instruction {show(inner)} runs, and "
+            f"{others} as well"
+        )
 
     out: dict[str, dict[str, str]] = {}
     for name in sorted(direct):
@@ -2151,7 +2212,11 @@ def _enclosing_loops(kernel: Any) -> dict[str, dict[str, str]]:
                 continue
             reached[current] = reason
             pending.extend(
-                (outer, f"{reason}, and {current} is nested in {outer} in turn")
+                (
+                    outer,
+                    f"{reason}, and {show(current)} is nested in {show(outer)} "
+                    "in turn",
+                )
                 for outer in sorted(direct.get(current, ()))
             )
         out[name] = reached
@@ -2191,12 +2256,15 @@ def _sum_place_reason(draft: _Draft) -> str | None:
         if key is None:
             continue
         stmt_id = key.rsplit(":", 1)[0]
-        loops = ", ".join(draft.sums.get(key, (name,)))
+        show = draft.show
+        stmt = draft.show_stmt(stmt_id)
+        loops = ", ".join(map(show, draft.sums.get(key, (name,))))
         tag = draft.tags.get(name)
         if tag is not None and parallel_tag(tag):
             return (
-                f"the loop {name} of the sum over {loops} in {stmt_id} is "
-                f"tagged {tag!r} and ordered outside {', '.join(sorted(placed))}, "
+                f"the loop {show(name)} of the sum over {loops} in {stmt} is "
+                f"tagged {tag!r} and ordered outside "
+                f"{', '.join(map(show, sorted(placed)))}, "
                 "and loopy realizes a concurrent loop of a sum where it realizes "
                 "the sum, inside every loop of its statement. Leave it in "
                 "sequence, or name the statement's loops before it"
@@ -2205,16 +2273,17 @@ def _sum_place_reason(draft: _Draft) -> str | None:
             loop for loop in placed if not _privatizing(draft.tags.get(loop, ""))
         )
         if sequential:
-            shown = ", ".join(sequential)
+            shown = ", ".join(map(show, sequential))
+            first = show(sequential[0])
             return (
-                f"the loop {name} of the sum over {loops} in {stmt_id} is "
+                f"the loop {show(name)} of the sum over {loops} in {stmt} is "
                 f"ordered outside {shown}, which runs in sequence: loopy keeps "
                 "one accumulator for the sum, so it would run the sum inside "
-                f"every loop of {stmt_id} anyway, in another order than the one "
-                f"this schedule's facts were checked for. Tag {sequential[0]} "
-                f"'ilp', tag({sequential[0]}='ilp'), which gives each of its "
-                "iterations an accumulator of its own, or on a device put it on "
-                f"a hardware axis, tag({sequential[0]}='l.0')"
+                f"every loop of {stmt} anyway, in another order than the one "
+                f"this schedule's facts were checked for. Tag {first} 'ilp', "
+                f"tag({first}, 'ilp'), which gives each of its iterations an "
+                "accumulator of its own, or on a device put it on a hardware "
+                f"axis, tag({first}, 'l.0')"
             )
     return None
 
@@ -2272,7 +2341,8 @@ def _nest_reason(draft: _Draft) -> str | None:
     """
     if draft.kernel is None:
         return None
-    around = _enclosing_loops(draft.kernel)
+    show = draft.show
+    around = _enclosing_loops(draft.kernel, show)
     layout = _Layout(stmt_ids=tuple(draft.coords), coords=dict(draft.coords))
     for nest in _nests(layout, draft.order, draft.tags).values():
         for position, loop in enumerate(nest):
@@ -2280,13 +2350,15 @@ def _nest_reason(draft: _Draft) -> str | None:
                 why = around.get(loop, {}).get(inner)
                 if why is None:
                     continue
+                outer_shown, inner_shown = show(loop), show(inner)
                 return (
-                    f"the loop {loop} is ordered outside {inner}, but loopy "
-                    f"nests it inside {inner}: {why}. So loopy cannot run the "
-                    "order that was checked: it would drop the loop priority "
-                    "and run a nest of its own choosing, which the cast facts "
-                    f"say nothing about. Order {inner} outside {loop}, as "
-                    f"interchange({inner!r}, {loop!r}) does"
+                    f"the loop {outer_shown} is ordered outside {inner_shown}, "
+                    f"but loopy nests it inside {inner_shown}: {why}. So loopy "
+                    "cannot run the order that was checked: it would drop the "
+                    "loop priority and run a nest of its own choosing, which "
+                    f"the cast facts say nothing about. Order {inner_shown} "
+                    f"outside {outer_shown}, as "
+                    f"interchange({inner_shown}, {outer_shown}) does"
                 )
     return None
 
@@ -2344,7 +2416,8 @@ def _axis_reason(draft: _Draft) -> str | None:
     )
     if auto:
         return (
-            f"the tag l.auto on {', '.join(auto)} asks loopy to choose a local "
+            f"the tag l.auto on {', '.join(map(draft.show, auto))} asks loopy to "
+            "choose a local "
             "axis, and loopy chooses one only inside its own transforms "
             "(precompute, buffer_array); a kernel that still has one is "
             "refused when loopy prepares it for code generation. Name the "
@@ -2382,9 +2455,9 @@ def _axis_reason(draft: _Draft) -> str | None:
                     else ""
                 )
                 return (
-                    f"{what} runs in two loops tagged {shown}, {first} and "
-                    f"{name}, and {rule}{why}. Put one of the two on another "
-                    "axis, or leave it sequential"
+                    f"{what} runs in two loops tagged {shown}, {draft.show(first)} "
+                    f"and {draft.show(name)}, and {rule}{why}. Put one of the two "
+                    "on another axis, or leave it sequential"
                 )
 
     grid_tags = (GroupInameTag, LocalInameTag)
@@ -2423,7 +2496,7 @@ def _axis_reason(draft: _Draft) -> str | None:
                 outer = draft.nested_in.get(outer)
             runs.append(
                 (
-                    f"the sum over {', '.join(names)} in {what}",
+                    f"the sum over {', '.join(map(draft.show, names))} in {what}",
                     names,
                     base | set(names) | set(around),
                 )
@@ -2447,13 +2520,15 @@ def _axis_reason(draft: _Draft) -> str | None:
             )
             statement = _statement_of(draft, insn.id)
             remedy = (
-                f"put a loop of statement {statement} on {shown} as well"
+                f"put a loop of the statement {draft.show_stmt(statement)} on "
+                f"{shown} as well"
                 if statement is not None
                 else "put the axis on the row's loop or one outside it"
             )
             return (
-                f"{subject} runs in no loop on {shown}, the {kind} axis {loop} "
-                f"is on: {why}. Leave {loop} sequential, or {remedy}"
+                f"{subject} runs in no loop on {shown}, the {kind} axis "
+                f"{draft.show(loop)} is on: {why}. Leave {draft.show(loop)} "
+                f"sequential, or {remedy}"
             )
 
     for kind, cls, letter in (
@@ -2470,7 +2545,7 @@ def _axis_reason(draft: _Draft) -> str | None:
                 continue
             above = min(number for number in numbers if number > axis)
             return (
-                f"the loop {numbers[above]} is on the {kind} axis "
+                f"the loop {draft.show(numbers[above])} is on the {kind} axis "
                 f"{letter}.{above}, and no loop of the kernel is on "
                 f"{letter}.{axis}: loopy numbers the {kind} axes of a kernel "
                 "from 0 up, with none left out. Use "
@@ -2548,12 +2623,13 @@ def _unroll_reason(draft: _Draft) -> str | None:
             if name in draft.data_dependent
             else _extent_text(draft.kernel, name)
         )
+        loop = draft.show(name)
         return (
-            f"the loop {name} is tagged {shown}, and loopy {how}, so the number "
+            f"the loop {loop} is tagged {shown}, and loopy {how}, so the number "
             f"of its iterations has to be a number when the code is generated; "
-            f"the extent of {name} is {extent}, which no number bounds while "
+            f"the extent of {loop} is {extent}, which no number bounds while "
             "the sizes it names are free. Split it by a fixed factor and tag "
-            f"the inner loop instead, as split({name!r}, 4) makes one of "
+            f"the inner loop instead, as split({loop}, 4) makes one of "
             "length 4, or declare the extent as a number (Fin[8] rather than "
             "Fin[n])"
         )
@@ -2630,9 +2706,9 @@ def _privatized_reason(draft: _Draft) -> str | None:
                     "number, so it compares its variable with the whole array"
                 )
             return (
-                f"the length of a ragged row is read inside the loop {name}, "
-                f"which is tagged {shown}, and {what}. Leave {name} "
-                "sequential, or unroll it (unr) instead"
+                f"the length of a ragged row is read inside the loop "
+                f"{draft.show(name)}, which is tagged {shown}, and {what}. Leave "
+                f"{draft.show(name)} sequential, or unroll it (unr) instead"
             )
         vectorized = [
             name for name in loops if isinstance(privatizing[name], VectorizeTag)
@@ -2645,13 +2721,14 @@ def _privatized_reason(draft: _Draft) -> str | None:
         if vectorized and local:
             what = _instruction_text(draft, insn.id)
             return (
-                f"the sum over {', '.join(local)} in {what} runs on a local "
-                f"axis inside the loop {vectorized[0]}, which is tagged vec, "
+                f"the sum over {', '.join(map(draft.show, local))} in {what} runs "
+                f"on a local axis inside the loop {draft.show(vectorized[0])}, "
+                "which is tagged vec, "
                 "and loopy cannot generate working code for it: it keeps the partial "
                 "sums of a reduction on a local axis in an array in local "
                 "memory, and a temporary written inside a vec loop as a vector "
-                f"along it. Leave {vectorized[0]} sequential, or unroll it "
-                "(unr) instead"
+                f"along it. Leave {draft.show(vectorized[0])} sequential, or "
+                "unroll it (unr) instead"
             )
     return None
 
@@ -2752,8 +2829,9 @@ def _atomic_reason(draft: _Draft) -> str | None:
         dtype = getattr(getattr(var, "dtype", None), "numpy_dtype", None)
         if dtype is None or str(dtype) in _ATOMIC_DTYPES:
             continue
+        shown = draft.show_array(array)
         return (
-            f"atomic({array!r}) asks for atomic updates of {array}, which holds "
+            f"atomic({shown}) asks for atomic updates of {shown}, which holds "
             f"{dtype}, and loopy's {draft.target} target has atomic updates of "
             f"{', '.join(_ATOMIC_DTYPES[:-1])} and {_ATOMIC_DTYPES[-1]} values "
             "only. Keep the updates in no two work items at once instead, or "
@@ -2792,14 +2870,19 @@ def _target_reason(draft: _Draft) -> str | None:
     if hardware:
         order = {name: k for k, name in enumerate(draft.order)}
         hardware.sort(key=lambda pair: (order.get(pair[0], len(order)), pair[0]))
-        shown = ", ".join(
-            f"{name}={_shown_tag(draft, name, tag)!r}" for name, tag in hardware
+        placed = [
+            f"{draft.show(name)} on {_shown_tag(draft, name, tag)}"
+            for name, tag in hardware
+        ]
+        shown = (
+            f"the loop {placed[0]} is on a hardware axis"
+            if len(placed) == 1
+            else f"the loops {_joined(placed)} are on hardware axes"
         )
         return (
-            f"the tag {shown} puts a loop on a hardware axis, and the C target "
-            "has none: loopy's C code runs in one thread, with no groups or "
-            "work items to spread a loop over. Retarget to opencl, or leave the "
-            "loop sequential"
+            f"{shown}, and the C target has none: loopy's C code runs in one "
+            "thread, with no groups or work items to spread a loop over. "
+            "Retarget to opencl, or leave the loop sequential"
         )
     vectorized = {
         name
@@ -2812,11 +2895,11 @@ def _target_reason(draft: _Draft) -> str | None:
             continue
         what = _instruction_text(draft, insn.id)
         return (
-            f"the loop {loops[0]} is tagged vec, and loopy keeps a temporary "
-            f"written inside it, the accumulator of the sum in {what}, as a "
-            "vector along it; the C target has no vector types to declare it "
-            f"with. Leave {loops[0]} sequential, unroll it (unr), or retarget "
-            "to opencl"
+            f"the loop {draft.show(loops[0])} is tagged vec, and loopy keeps a "
+            f"temporary written inside it, the accumulator of the sum in {what}, "
+            "as a vector along it; the C target has no vector types to declare "
+            f"it with. Leave {draft.show(loops[0])} sequential, unroll it (unr), "
+            "or retarget to opencl"
         )
     return None
 
@@ -2916,6 +2999,151 @@ class _Draft:
     #: atomically (see :meth:`Schedule._concurrent_updates`); not carried to
     #: the next step.
     concurrent: set[str] = field(default_factory=set)
+    #: What the step did to the loops, for the handles that name them (see
+    #: :meth:`Schedule._moved_loops`): a loop it renamed, ``j`` to ``i`` by a
+    #: fusion; a loop it replaced by two, a split's outer and inner; and the
+    #: loops a map named that no loop had been.
+    renamed: dict[str, str] = field(default_factory=dict)
+    children: dict[str, tuple[str, str]] = field(default_factory=dict)
+    made: list[str] = field(default_factory=list)
+    #: How a message names a loop of the draft, by its path
+    #: (:meth:`Schedule._shown`); a loop's own name until the step's are known.
+    shown: Any = None
+
+    #: How a message names an array and a statement of the term.
+    array_shown: Any = None
+    stmt_shown: Any = None
+
+    def show(self, name: str) -> str:
+        """A loop of the draft by its path, as everything printed names it."""
+        return name if self.shown is None else self.shown(name)
+
+    def show_array(self, name: str) -> str:
+        """An array of the term by its path, ``l2p.R``."""
+        return name if self.array_shown is None else self.array_shown(name)
+
+    def show_stmt(self, stmt_id: str) -> str:
+        """A statement as the source writes it, with its line."""
+        return stmt_id if self.stmt_shown is None else self.stmt_shown(stmt_id)
+
+
+@dataclass(frozen=True)
+class _Gone:
+    """What became of a loop no step left: the step's text and what it made.
+
+    ``made`` are the handles of the loops that replaced it (a split's two),
+    and ``why`` says what happened where nothing did (a substitution took
+    out every statement that ran in it).
+    """
+
+    step: str
+    made: tuple[Any, ...] = ()
+    why: str = ""
+
+
+def _defined_at(root: Any) -> str:
+    """`` (defined at spmv.py:102)`` for a kernel or a program, or ``""``."""
+    where = getattr(root, "where", None) or getattr(_term_of(root), "where", "")
+    return f" (defined at {where})" if where else ""
+
+
+def _first_loops(
+    index: _Index,
+    term: Term,
+    order: Sequence[str],
+    reduction_inames: Mapping[str, Sequence[str]],
+) -> dict[tuple, tuple[str, ...]]:
+    """The loop each loop of the source is before any step, by its handle's key.
+
+    A ``for`` loop is the iname of its name; a sum's binder is the loop of
+    each reduction it binds, as the lowering named it (a sum's binder is
+    renamed there when two sums share it, see
+    :attr:`loopty.lower.Lowering.reduction_inames`). Two sums of one binder
+    name are told apart in the order of the source. A loop of a program's
+    checked point is the iname the program made for it
+    (:func:`loopty.handles.checks_of`).
+    """
+    lowered: dict[str, list[str]] = {}
+    for stmt in term.stmts:
+        for position, (reduction, _enclosing) in enumerate(
+            _reduction_nesting(stmt.expr)
+        ):
+            names = reduction_inames.get(f"{stmt.id}:{position}", reduction.inames)
+            for name, low in zip(reduction.inames, names, strict=False):
+                if low not in lowered.setdefault(name, []):
+                    lowered[name].append(low)
+    binders = binders_of(term)
+    summed: dict[str, list[Any]] = {}
+    for binder in binders:
+        if binder.sum:
+            summed.setdefault(binder.name, []).append(binder)
+    out: dict[tuple, tuple[str, ...]] = {}
+    for binder in binders:
+        if not binder.sum:
+            names: tuple[str, ...] = (binder.name,) if binder.name in order else ()
+        else:
+            found = lowered.get(binder.name, [])
+            same = summed[binder.name]
+            if len(same) > 1 and len(found) == len(same):
+                names = (found[same.index(binder)],)
+            else:
+                names = tuple(found)
+        if names:
+            out[(binder, None, ())] = names
+    # the loops of a program's checked points, which no line binds
+    for binder in index.check_binders:
+        if binder.name in order:
+            out[(binder, None, ())] = (binder.name,)
+    return out
+
+
+def _names_index(source: Any, term: Term) -> _Index:
+    """The names a handle of what a schedule schedules can have."""
+    if isinstance(source, Term):
+        return _Index(term, source)
+    try:
+        index = _handles_of(source)
+    except Exception:  # noqa: BLE001 - an object whose term is the one given
+        return _Index(term, source)
+    return index if index.term is term else _Index(term, source)
+
+
+class _MadeLoops:
+    """The loops the maps of a schedule's steps named: :attr:`Schedule.loops`."""
+
+    def __init__(self, schedule: Schedule) -> None:
+        self._schedule = schedule
+
+    def __getattr__(self, name: str) -> Loop:
+        if name.startswith("_"):
+            raise AttributeError(name)
+        schedule = self._schedule
+        made = [key[1] for key in schedule._loops if key[0] is None]
+        if name not in made:
+            listed = ", ".join(made) if made else "none"
+            raise AttributeError(
+                f"{schedule!r} has no loop {name} a map of affine(...) named; the "
+                f"loops its maps named are {listed}, and the loops of the source "
+                f"are reached from {schedule._handles.name}"
+            )
+        return Loop(schedule._handles, None, (), name)
+
+    def __dir__(self) -> list[str]:
+        return [key[1] for key in self._schedule._loops if key[0] is None]
+
+
+def _axis(axis: Any, method: str, loop: Any) -> int:
+    """A hardware axis, a whole number from 0, or a ``ValueError``."""
+    if isinstance(axis, bool) or not isinstance(axis, int) or axis < 0:
+        raise ValueError(
+            f"{method}({loop!r}, axis={axis!r}): an axis is a whole number from 0"
+        )
+    return axis
+
+
+def _article(word: str) -> str:
+    """``a`` or ``an`` before ``word``."""
+    return "an" if word[:1] in "aeiou" else "a"
 
 
 @dataclass(frozen=True, eq=False)
@@ -3070,6 +3298,22 @@ class Defined:
 
 
 @dataclass(frozen=True)
+class _Definedness:
+    """The answer of :meth:`Schedule._defined`, for a fact to be made of.
+
+    ``status`` is ``"decided"``, ``"refuted"`` or ``"assumed"``; ``why`` is
+    the refusal in words, after the step that is refused, and empty when
+    decided; ``term`` the claim for Lean.
+    """
+
+    status: str
+    witness: Any
+    detail: str
+    why: str
+    term: Any
+
+
+@dataclass(frozen=True)
 class _Settled:
     """isl's verdict on a fact a step decided when it was taken: ``ok``."""
 
@@ -3151,7 +3395,7 @@ class Schedule:
     is built again from its kernel, on its target and with its sizes unless
     others are given, and its steps are replayed, each cast checked again, as
     :meth:`retarget` replays them; its example inputs come too. So
-    ``Schedule(Schedule(k).split("i", 2))`` is that split of ``k``, and
+    ``Schedule(Schedule(k).split(k.i, 2))`` is that split of ``k``, and
     ``Schedule(Schedule(k, target="opencl"))`` an OpenCL schedule (#135),
     where the steps and the target were dropped and the outer schedule was
     one of ``k`` alone, which ``loopty run`` compared with ``k`` and found
@@ -3266,6 +3510,13 @@ class Schedule:
                 for iname in reduction_inames.get(key, reduction.inames):
                     self._reductions[iname] = key
                 self._sums[key] = tuple(reduction_inames.get(key, reduction.inames))
+        #: The names a handle can have (:mod:`loopty.handles`), and the loops
+        #: of the kernel each loop of the source is now, by its handle's key:
+        #: a tuple of names, or what became of it (see :meth:`_loop_names`).
+        self._handles = _names_index(kernel, self._term)
+        self._loops: dict[tuple, Any] = _first_loops(
+            self._handles, self._term, order, reduction_inames
+        )
         self._reassoc: frozenset[str] = frozenset()
         self._data_dependent = data_dependent_inames(self._term, reduction_inames)
         self._history: tuple[str, ...] = ()
@@ -3326,6 +3577,12 @@ class Schedule:
         self._reindex = isl.Map.identity(
             self._instances.get_space().map_from_set()
         ).intersect_domain(self._instances)
+        #: The arrays the program makes whose zeros no read sees, each with
+        #: the ``definedness`` fact that shows it, and the others' with why
+        #: a read may see them; the first are not zeroed (#290).
+        self._unseen: dict[str, Any] = {}
+        self._kept: dict[str, tuple[str, str]] = {}
+        self._drop_unseen_zeros()
 
     # {{{ plumbing
 
@@ -3368,6 +3625,9 @@ class Schedule:
             sums=dict(self._sums),
             outside=dict(self._outside),
             atomic=set(self._atomic),
+            shown=self._shown,
+            array_shown=self._shown_array,
+            stmt_shown=self._stmt_shown,
         )
 
     @property
@@ -3379,7 +3639,7 @@ class Schedule:
     def where(self) -> str:
         """``file:line`` the schedule is written at, which its run is placed at.
 
-        The line of its last step, ``.tag(c_inner="ilp")``, or of
+        The line of its last step, ``.tag(c.inner, "ilp")``, or of
         ``Schedule(...)`` before any: where the schedule that runs is
         finished. Each fact of a step is at the step's own line, and an
         assumption at its ``.assume(...)``. A schedule made where no code of
@@ -3430,12 +3690,24 @@ class Schedule:
         share their loops, and each runs at the points of its own image only,
         which its instruction's predicates state.
 
+        Each sum's operands that read none of its binders are computed before
+        it, once per iteration of the loops around it
+        (:func:`loopty.hoist.hoist_invariants`): here, after every step, and
+        not in the kernel the steps transform and check, so that no step and
+        no fact sees the temporaries they are kept in.
+
         ``None`` once a step could not be written as a loopy kernel at all,
         which only :meth:`affine` can cause; the schedule's ``buildable`` fact
         says why, and :meth:`require_buildable` refuses before anything reads
         this.
         """
-        return self._code
+        made = self.__dict__.get("_hoisted")
+        if made is None or made[0] is not self._code:
+            # A clone shares this with the schedule it was made from until a
+            # step gives it code of its own.
+            made = (self._code, hoist_invariants(self._code))
+            self._hoisted = made
+        return made[1]
 
     @property
     def strides(self) -> dict[str, str]:
@@ -3463,12 +3735,29 @@ class Schedule:
 
     @property
     def order(self) -> tuple[str, ...]:
-        """The loop nest, outermost first."""
+        """The loop nest, outermost first, as the kernel names its loops."""
         return tuple(self._order)
 
     @property
+    def nest(self) -> tuple[str, ...]:
+        """The loop nest, outermost first, each loop by its handle's path.
+
+        :attr:`order` as everything printed names the loops
+        (:mod:`loopty.handles`): ``l2p.unpack.box`` for a loop the source
+        wrote, ``l2p.R.zeros[0]`` for a loop the program zeroes an array it
+        makes in.
+        """
+        return tuple(self._shown(name) for name in self._order)
+
+    @property
     def tags(self) -> dict[str, str]:
-        """Iname tags applied so far."""
+        """The tags applied so far, by the kernel's names for the loops.
+
+        loopy's view, as :attr:`order` is: the loops the program zeroes its
+        arrays in, which take the tag of the loop that stores them, are
+        among them (``i_2`` in ``examples/l2p.py``'s ``on_a_gpu``). The
+        steps that put them, by handle, are :attr:`history`.
+        """
         return dict(self._tags)
 
     @property
@@ -3551,14 +3840,14 @@ class Schedule:
         The kernel's name, the target in brackets, and every step as it was
         called, with every argument it was given::
 
-            spmv[c].split('j', 2, inner='j_in', outer='j_out').realize('y', tree=True)
+            spmv[c].split(spmv.j, 2).realize(spmv.y, tree=True)
 
         The steps are the recipes :meth:`retarget` replays, so two schedules
-        with one key are one schedule. :attr:`history` and the repr are for
-        reading and leave out what does not change the text (``split(j, 2)``
-        does not name its halves), which two different schedules can differ
-        in. The facts are not named by this key, which names the kernel by
-        its name, and two kernels can share a name; see :meth:`fact_id`.
+        with one key are one schedule; a handle is written as its path, as
+        the step was written. :attr:`history` and the repr are for reading,
+        and write a window :meth:`contract` found out in full. The facts are
+        not named by this key, which names the kernel by its name, and two
+        kernels can share a name; see :meth:`fact_id`.
         """
         return _key(self._term.name, self._target, self._steps)
 
@@ -3570,15 +3859,15 @@ class Schedule:
         target and the steps as :attr:`key` writes them, and ``detail``
         after them::
 
-            agreement:spmv.spmv@102:[c].split('j', 2, inner='j_in', outer='j_out')
+            agreement:spmv.spmv@102:[c].split(spmv.j, 2)
 
         That is the id of the agreement a run of the schedule records
         (:func:`loopty.executor.agreement`). A cast fact's is ``cast:`` and
         the steps up to the one it is about, without the target, then its
-        kind: ``cast:spmv.spmv@102:split('j', 2, inner='j_in',
-        outer='j_out'):bijective``, the same for the schedule on every
-        target; a ``buildable`` fact's names the target. Keyed by the
-        definition, as every fact of the kernel itself is, so that two
+        kind: ``cast:spmv.spmv@102:split(spmv.j, 2):bijective``, the same for
+        the schedule on every target; a ``buildable`` fact's names the
+        target. Keyed by the definition, as every fact of the kernel itself
+        is, so that two
         kernels of one name scheduled in one file, one defined there and one
         imported, keep their facts apart (#75); a term scheduled with no
         kernel behind it is named by its name.
@@ -3606,17 +3895,358 @@ class Schedule:
 
     def __repr__(self) -> str:
         steps = "".join(f".{step}" for step in self._history)
-        return f"Schedule({self._term.name}, target={self._target!r}){steps}"
+        return f"Schedule({self._handles.name}, target={self._target!r}){steps}"
+
+    # }}}
+
+    # {{{ handles
+
+    @property
+    def loops(self) -> Any:
+        """The loops a map of :meth:`affine` named, by name: ``diamond.loops.a``.
+
+        A loop a step made of a loop of the source is that loop's handle's
+        child (``h.outer`` after a split) or the handle itself (after a
+        fusion); a loop a map named that no loop had been named is the
+        schedule's own, and this is where its handle is.
+        """
+        return _MadeLoops(self)
+
+    def _loop_names(self, handle: Any, text: str, what: str = "loop") -> tuple:
+        """The loops of the kernel a loop handle names now, by the steps so far.
+
+        Refused with a ``TypeError`` for what is no loop handle, a string
+        among them, naming the handle to write (:meth:`_wanted`); with a
+        ``ValueError`` for a handle of another kernel, a name that names
+        several (``p.scale.k`` where ``scale`` is called twice), and a
+        loop a step replaced or took out, naming the step.
+        """
+        if isinstance(handle, _Several):
+            raise ValueError(f"{text}: {handle.message}")
+        if not isinstance(handle, Loop):
+            raise TypeError(self._wanted(handle, text, "loop", what))
+        self._own(handle, text)
+        key = (handle.binder, handle.made, handle.part)
+        found = self._loops.get(key)
+        if isinstance(found, tuple):
+            return found
+        if isinstance(found, _Gone):
+            raise ValueError(f"{text}: {self._gone_text(handle, found)}")
+        # a child of a loop no split made, or of one a step replaced
+        for depth in range(len(handle.part) - 1, -1, -1):
+            parent = (handle.binder, handle.made, handle.part[:depth])
+            above = self._loops.get(parent)
+            shown = Loop(self._handles, handle.binder, handle.part[:depth], handle.made)
+            if isinstance(above, _Gone):
+                raise ValueError(f"{text}: {self._gone_text(shown, above)}")
+            if isinstance(above, tuple):
+                raise ValueError(
+                    f"{text}: {handle!r} is a loop a split of {shown!r} makes, and "
+                    f"{shown!r} is not split; split it first, split({shown!r}, ...)"
+                )
+        if handle.made is not None:
+            index = self._handles
+            raise ValueError(
+                f"{text}: {index.name} has no loop {handle.made}, "
+                f"{index.contents(())}, and no map of affine(...) in {self!r} "
+                "named one"
+            )
+        raise ValueError(
+            f"{text}: {handle!r} runs no statement of {self._handles.name}, so "
+            "it is no loop of its kernel"
+        )
+
+    def _loop(self, handle: Any, text: str, what: str = "loop") -> str:
+        """The one loop of the kernel a loop handle names now; see :meth:`_loop_names`.
+
+        A sum's binder bound in two statements is a loop of each, and a step
+        that takes one loop is refused it, naming them.
+        """
+        names = self._loop_names(handle, text, what)
+        if len(names) > 1:
+            raise ValueError(
+                f"{text}: {handle!r} binds a sum that {len(names)} statements "
+                "compute, each in a loop of its own, and the step takes one loop"
+            )
+        return names[0]
+
+    def _array(self, handle: Any, text: str) -> str:
+        """The term's array an array handle names: a string is refused naming it."""
+        if isinstance(handle, _Several):
+            raise ValueError(f"{text}: {handle.message}")
+        if not isinstance(handle, Array):
+            raise TypeError(self._wanted(handle, text, "array", "array"))
+        self._own(handle, text)
+        return handle.name
+
+    def _own(self, handle: Handle, text: str) -> None:
+        """Refuse a handle of another kernel, naming this schedule's own."""
+        root = handle.root
+        if root is self._source or _term_of(root) is self._term:
+            return
+        mine = self._handles.name
+        suggestion = ""
+        if isinstance(handle, Loop) and handle.binder is not None:
+            same = [
+                Loop(self._handles, binder).path
+                for binder in self._handles.binders
+                if binder.binder == handle.binder.binder
+            ]
+            if same:
+                suggestion = f"; write {_joined(same, 'or')}"
+        elif isinstance(handle, Array):
+            same = [
+                self._handles.array_path((), name)
+                for name in self._handles.root_arrays
+                if name == handle.name
+            ]
+            if same:
+                suggestion = f"; write {same[0]}"
+        theirs = getattr(root, "__name__", None) or _term_of(root).name
+        if theirs == mine:
+            # two kernels of one name: a file loaded twice, or a factory's
+            theirs = f"another {theirs}{_defined_at(root)}"
+            mine = f"the {mine}{_defined_at(self._source)}"
+        raise ValueError(
+            f"{text}: {handle!r} names something of {theirs}, and this "
+            f"schedule is of {mine}: a handle is a path from what is scheduled"
+            f"{suggestion}"
+        )
+
+    def _wanted(self, value: Any, text: str, kind: str, what: str) -> str:
+        """Why ``value`` is refused where a handle of ``kind`` is taken, with one.
+
+        The handle suggested is computed from what the schedule has: for a
+        string, the loops or arrays the string names in the source; for a
+        handle of another kind, one of the right kind.
+        """
+        method = text.split("(", 1)[0]
+        if isinstance(value, str):
+            found = self._named_like(value, kind)
+            example = _joined(found, "or") if found else self._an_example(kind, method)
+            given = f"the string {value!r}"
+        else:
+            found = []
+            example = self._an_example(kind, method)
+            given = (
+                f"the {type(value).__name__.lower()} {value!r}"
+                if isinstance(value, Handle)
+                else f"{type(value).__name__} {value!r}"
+            )
+        if not example:
+            return f"{method}() takes {_article(what)} {what} handle, not {given}"
+        return (
+            f"{method}() takes {_article(what)} {what} handle such as {example}, "
+            f"not {given}"
+        )
+
+    def _named_like(self, name: str, kind: str) -> list[str]:
+        """The handles of this schedule a string names: the loops or arrays called so.
+
+        A loop by its binder or by the name the kernel has for it now, and an
+        array by its name, each printed as its handle is.
+        """
+        if kind == "array":
+            # the term's own array by that name, or else each call's
+            index = self._handles
+            if name in index.root_arrays:
+                return [index.array_path((), name)]
+            out = [
+                index.array_path(labels, param)
+                for labels, site in index.sites.items()
+                for param, _array in site.arrays
+                if param == name
+            ]
+            return list(dict.fromkeys(out))
+        out: dict[tuple[str, ...], str] = {}
+        for key, names in self._loops.items():
+            if not isinstance(names, tuple):
+                continue
+            binder, made, part = key
+            spelled = made if binder is None else binder.binder
+            if (
+                name in names
+                or (not part and spelled == name)
+                or (part and name == f"{spelled}_{'_'.join(part)}")
+            ):
+                # one loop, after a fusion, is named once, as it is printed
+                out.setdefault(names, self._shown(names[0]))
+        return list(dict.fromkeys(out.values()))
+
+    def _an_example(self, kind: str, method: str = "") -> str:
+        """A handle of ``kind`` this schedule has, to name in a refusal.
+
+        For ``contract`` and ``substitute``, which store an array a program
+        makes, one the program makes, where it has one.
+        """
+        if kind == "array":
+            index = self._handles
+            names = list(index.root_arrays)
+            if method in ("contract", "substitute"):
+                made = {name for name, _typ in self._term.temporaries}
+                names.sort(key=lambda name: name not in made)
+            for name in names:
+                return index.array_path((), name)
+            return ""
+        for key, names in self._loops.items():
+            if isinstance(names, tuple):
+                return Loop(self._handles, key[0], key[2], key[1]).path
+        return ""
+
+    def _gone_text(self, handle: Loop, gone: _Gone) -> str:
+        """``split(h, 16) replaced l2p.reconstruct.a by ...``: why a loop is gone."""
+        if gone.made:
+            made = _joined([repr(child) for child in gone.made])
+            return f"{gone.step} replaced {handle!r} by {made}"
+        return f"{handle!r} is no loop after {gone.step}: {gone.why}"
+
+    def _shown(self, name: str, loops: Mapping[tuple, Any] | None = None) -> str:
+        """A loop of the kernel by its path, as everything printed names it.
+
+        The first handle that reaches it, the producer's after a fusion, or a
+        loop's own name where the handle's binder named it; a loop the
+        program made to zero an array it makes, which no source wrote, by
+        the array, ``l2p.R.zeros``. ``loops`` are the loops after a step,
+        the schedule's own by default.
+        """
+        loops = self._loops if loops is None else loops
+        best = None
+        for key, names in loops.items():
+            if not isinstance(names, tuple) or name not in names:
+                continue
+            binder, made, part = key
+            own = (made if binder is None else binder.name) == name and not part
+            if best is None or (own and not best[0]):
+                best = (own, key)
+        if best is not None:
+            binder, made, part = best[1]
+            return Loop(self._handles, binder, part, made).path
+        for stmt in self._term.stmts:
+            if stmt.id.endswith(".zeros") and name in stmt.inames:
+                array = stmt.assignee.array
+                path = f"{self._handles.array_path((), array)}.zeros"
+                if len(stmt.inames) > 1:
+                    path += f"[{stmt.inames.index(name)}]"
+                return path
+        for prefix in ("_outer", "_inner"):
+            if name.endswith(prefix):
+                return f"{self._shown(name[: -len(prefix)], loops)}.{prefix[1:]}"
+        return name
+
+    def _statement_names(self) -> Named:
+        """The term's statements as a message names them, by the schedule's paths."""
+        return statement_names(self._term, self._handles)
+
+    def _stmt_shown(self, stmt_id: str) -> str:
+        """A statement as the source writes it, with its line, or its id.
+
+        A statement loopty adds by what it is (:class:`loopty.source.Named`).
+        """
+        return self._statement_names()(stmt_id)
+
+    def _mapped_shown(self, stmt_id: str) -> str:
+        """A statement a map names by its id, with its text: ``S0 (u[t + 1, i] =
+        ..., stencil_skew.py:62)``, which tells the reader which one it is."""
+        shown = self._stmt_shown(stmt_id)
+        if shown == stmt_id or not shown.endswith(")"):
+            return stmt_id
+        text, _, where = shown[:-1].rpartition(" (")
+        return f"{stmt_id} ({text}, {where})"
+
+    def _stmts_shown(self, stmt_ids: Iterable[str], word: str = "or") -> str:
+        """Statements as a reader knows them: by their call, or as written.
+
+        A statement of a program's call is named by the call's path,
+        ``l2p.reconstruct``, once for all of the call's; a statement of the
+        kernel's own body as the source writes it, with its line.
+        """
+        calls: dict[str, tuple[str, ...]] = {}
+        for scope in self._term.scopes:
+            for stmt_id in scope.statements:
+                calls[stmt_id] = (scope.call,)
+        for call in self._term.calls:
+            for stmt_id in call.statements:
+                calls.setdefault(stmt_id, (*call.within, call.label))
+        out: list[str] = []
+        for stmt_id in stmt_ids:
+            if stmt_id in calls:
+                out.append(self._handles.scope_path(calls[stmt_id]))
+            else:
+                out.append(self._stmt_shown(stmt_id))
+        return _joined(list(dict.fromkeys(out)), word)
+
+    def _shown_array(self, name: str) -> str:
+        """An array of the term by its path: ``l2p.R``.
+
+        The flag a program's checked point sets is no array of the source:
+        it is the check's flag.
+        """
+        if name in self._handles.root_arrays:
+            return self._handles.array_path((), name)
+        if any(flag == name for flag, _message in self._term.checks):
+            return "the check's flag"
+        return name
+
+    def _moved_loops(self, draft: _Draft, text: str) -> dict[tuple, Any]:
+        """The loops each loop of the source is after a step, from the draft.
+
+        A loop the step renamed is the new name (the consumer's loops after
+        a fusion are the producer's), a loop it replaced by two is gone,
+        naming the two, which are its handle's children, and a loop that no
+        statement runs in any more, as after a substitution, is gone. A loop
+        a map named that no loop had been is the schedule's own
+        (:attr:`loops`).
+        """
+        live = set(draft.order) | set(draft.reductions)
+        out: dict[tuple, Any] = {}
+        for key, names in self._loops.items():
+            if not isinstance(names, tuple):
+                out[key] = names
+                continue
+            binder, made, part = key
+            handle = Loop(self._handles, binder, part, made)
+            moved = tuple(dict.fromkeys(draft.renamed.get(n, n) for n in names))
+            split = [name for name in moved if name in draft.children]
+            if split:
+                out[key] = _Gone(text, (handle.outer, handle.inner))
+                for side, position in (("outer", 0), ("inner", 1)):
+                    out[(binder, made, (*part, side))] = tuple(
+                        draft.children[name][position] for name in split
+                    )
+                continue
+            kept = tuple(name for name in moved if name in live)
+            if kept:
+                out[key] = kept
+            elif any(name in draft.renamed or name not in live for name in moved):
+                replaced = [
+                    Loop(self._handles, None, (), name)
+                    for name in draft.made
+                ]
+                out[key] = (
+                    _Gone(text, tuple(replaced))
+                    if replaced and text.startswith("affine(")
+                    else _Gone(text, why="no statement that still runs runs in it")
+                )
+        for name in draft.made:
+            out.setdefault((None, name, ()), (name,))
+        return out
 
     # }}}
 
     # {{{ transformations
 
-    def tag(self, **inames: str) -> Schedule:
-        """Tag inames with target coordinates, such as ``r="g.0"``.
+    def tag(self, loop: Any = None, tag: str | None = None, **names: Any) -> Schedule:
+        """Put a loop on a target coordinate, loopy's tag: ``tag(spmv.r, "g.0")``.
+
+        ``loop`` is a loop handle (:mod:`loopty.handles`) and ``tag`` the
+        coordinate in loopy's words: ``"g.0"`` a work group axis, ``"l.0"``
+        a work item axis, ``"ilp"``, ``"vec"``, ``"unr"``. Several loops are
+        tagged in one step as loopy's ``tag_inames`` takes them, a dict:
+        ``tag({h.outer: "g.0", h.inner: "l.0"})``. :meth:`on_groups` and
+        :meth:`on_items` are the same step, for the two hardware axes.
 
         A tag is a coordinate in the target's execution type, and the parallel
-        ones are the interesting case: they remove the iname from the order, so
+        ones are the interesting case: they remove the loop from the order, so
         tagging a loop that carries a dependence is rejected here rather than
         producing a race at run time. A hardware axis (``g.*``, ``l.*``) is
         the launch grid besides, and nothing orders two of its work items, so
@@ -3627,47 +4257,136 @@ class Schedule:
         work item of it (see "Work items" in the module docstring).
 
         The zeros of an array a program makes go where the array is stored:
-        ``fused.tag(i="g.0")`` zeroes each box's cells of ``C`` on the work
-        item that stores them, since every statement that stores ``C``
-        stores it along ``i`` (:func:`_zeros_tags`). So a device schedule of
-        a program names only the loops its file wrote, and its steps and
-        facts say ``tag(i='g.0')``, as written.
+        ``fused.tag(l2p.unpack.box, "g.0")`` zeroes each box's cells of ``C``
+        on the work item that stores them, since every statement that stores
+        ``C`` stores it along that loop (:func:`_zeros_tags`). So a device
+        schedule of a program names only the loops its file wrote, and its
+        steps and facts say ``tag(l2p.unpack.box, 'g.0')``, as written.
 
-        A name that is neither a loop nor the loop of a reduction, and a tag
-        loopy cannot read, are refused with a ``ValueError`` before anything
-        else, as :meth:`split` refuses an unknown loop. loopy's own
-        ``tag_inames`` refuses both too, but it is not asked once a step has
-        left the schedule with no kernel (see :attr:`kernel`), and the steps
-        after that one are still checked, so that their facts say what the
-        schedule is.
+        A loop handle a step replaced, and a tag loopy cannot read, are
+        refused with a ``ValueError`` before anything else, as :meth:`split`
+        refuses one; a string where a handle is taken is a ``TypeError``
+        naming the handle. loopy's own ``tag_inames`` refuses an unknown tag
+        too, but it is not asked once a step has left the schedule with no
+        kernel (see :attr:`kernel`), and the steps after that one are still
+        checked, so that their facts say what the schedule is.
 
         A tag goes on after the steps that replace its loop: :meth:`split`,
         :meth:`tile` and :meth:`affine` refuse a loop that carries one, and
         the loops they make are tagged for themselves.
+
+        loopty 0.3's keywords, ``tag(i="g.0")``, and loopy's own string,
+        ``tag("i:g.0")``, are a ``TypeError`` that writes the step with the
+        loop's handle, ``tag(l2p.unpack.box, 'g.0')``.
+        """
+        if names or (isinstance(loop, str) and tag is None and ":" in loop):
+            raise TypeError(self._tag_spelled(loop, names))
+        return self._tag(loop, tag)
+
+    def _tag_spelled(self, loop: Any, names: Mapping[str, Any]) -> str:
+        """Why ``tag(i="g.0")`` or ``tag("i:g.0")`` is refused, with the step to write.
+
+        Each name is a loop's as the kernel or 0.3 named it, which the loops
+        of this schedule called so are written for, by their handles
+        (:meth:`_named_like`); a name none is called is given an example.
+        """
+        if names:
+            pairs = list(names.items())
+            given = "the keyword" + ("s " if len(pairs) > 1 else " ") + ", ".join(
+                f"{name}={value!r}" for name, value in pairs
+            )
+        else:
+            name, _colon, value = loop.partition(":")
+            pairs = [(name.strip(), value.strip())]
+            given = f"the string {loop!r}"
+        found = [self._named_like(name, "loop") for name, _value in pairs]
+        example = self._an_example("loop") or "k.i"
+        if len(pairs) == 1:
+            ((_name, value),) = pairs
+            written = _joined(
+                [f"tag({path}, {value!r})" for path in found[0] or [example]], "or"
+            )
+        else:
+            written = (
+                "tag({"
+                + ", ".join(
+                    f"{(paths or [example])[0]}: {value!r}"
+                    for paths, (_name, value) in zip(found, pairs, strict=True)
+                )
+                + "})"
+            )
+        if all(found):
+            return (
+                f"tag() takes a loop handle and its tag, not {given}: write {written}"
+            )
+        return (
+            f"tag() takes a loop handle and its tag, such as {written}, not {given}"
+        )
+
+    def _tag(
+        self,
+        loop: Any,
+        tag: str | None,
+        text: str | None = None,
+        recipe: tuple[str, tuple, dict] | None = None,
+    ) -> Schedule:
+        """:meth:`tag`, written as ``text`` and ``recipe`` where they are given.
+
+        :meth:`on_groups` and :meth:`on_items` are this step written in
+        words, and their facts and history say it as they were written.
         """
         from loopy.kernel.data import parse_tag
 
-        draft = self._draft()
-        unknown = [
-            name
-            for name in inames
-            if name not in draft.order and name not in draft.reductions
-        ]
-        if unknown:
-            raise ValueError(
-                _not_loops(
-                    self._term, unknown, (*draft.order, *draft.reductions)
+        if isinstance(loop, Mapping):
+            if tag is not None:
+                raise TypeError(
+                    "tag() takes a loop and its tag, or a dict of loops and tags, "
+                    "not both"
                 )
-            )
-        for name, tag in inames.items():
+            pairs = list(loop.items())
+            recipe = recipe or ("tag", (dict(loop),), {})
+            text = text or "tag({" + ", ".join(f"{h!r}: {t!r}" for h, t in pairs) + "})"
+        else:
+            if tag is None:
+                if isinstance(loop, str):
+                    raise TypeError(self._wanted(loop, "tag()", "loop", "loop"))
+                raise TypeError(
+                    f"tag({loop!r}) names no tag; tag(loop, 'g.0') puts a loop on "
+                    "a work group axis, as loopy's tags read"
+                )
+            pairs = [(loop, tag)]
+            recipe = recipe or ("tag", (loop, tag), {})
+            text = text or f"tag({loop!r}, {tag!r})"
+        if not pairs:
+            raise ValueError("tag({}) names no loop to tag")
+        draft = self._draft()
+        inames: dict[str, str] = {}
+        given: dict[str, Any] = {}
+        for handle, value in pairs:
+            if not isinstance(value, str):
+                raise TypeError(
+                    f"{text}: a tag is loopy's text, such as 'g.0', not {value!r}"
+                )
+            for name in self._loop_names(handle, text):
+                if name in inames and inames[name] != value:
+                    # two handles of one loop, as after a fusion, given two tags
+                    raise ValueError(
+                        f"{text}: {given[name]!r} and {handle!r} are one loop, "
+                        f"{self._shown(name)}, which takes one tag, not "
+                        f"{inames[name]!r} and {value!r}"
+                    )
+                inames[name] = value
+                given.setdefault(name, handle)
+        for name, value in inames.items():
             try:
-                parse_tag(tag)
+                parse_tag(value)
             except ValueError as exc:
                 raise ValueError(
-                    f"tag({name}={tag!r}): loopy cannot read the tag: {exc}"
+                    f"{text}: loopy cannot read the tag {value!r} of "
+                    f"{self._shown(name)}: {exc}"
                 ) from exc
-        for name, tag in inames.items():
-            if name not in draft.reductions or not parallel_tag(tag):
+        for name, value in inames.items():
+            if name not in draft.reductions or not parallel_tag(value):
                 continue
             # Running the pieces of a reduction at the same time sums them in an
             # order the source did not write, which is a reassociation and needs
@@ -3677,21 +4396,22 @@ class Schedule:
             # found would read the wrong contract.
             accumulated, exactness = draft.reduction_info[draft.reductions[name]]
             if exactness == "exact":
+                shown = self._shown_array(accumulated)
                 message = (
-                    f"tag({name}={tag!r}) illegal: it would run the pieces of "
-                    f"the accumulation into {accumulated} at the same time, "
-                    "which reassociates an exact reduction"
+                    f"{text} illegal: it would run the pieces of the "
+                    f"accumulation into {shown} at the same time, which "
+                    "reassociates an exact reduction"
                 )
                 raise IllegalCast(
                     message,
                     witness=None,
                     fact=self._fact(
                         "exactness",
-                        f"the accumulation into {accumulated} may be reassociated",
+                        f"the accumulation into {shown} may be reassociated",
                         status="refuted",
                         witness=None,
                         detail=f"the accumulation into {accumulated} is exact",
-                        step=("tag", (), dict(inames)),
+                        step=recipe,
                         reason=message,
                         about=accumulated,
                     ),
@@ -3704,40 +4424,79 @@ class Schedule:
         draft.kernel = _transformed(
             draft.kernel, lp.tag_inames, {**dict(inames), **zeros}
         )
-        if any(str(tag).split(".")[0] in ("ilp", "vec") for tag in inames.values()):
+        if any(str(value).split(".")[0] in ("ilp", "vec") for value in inames.values()):
             draft.kernel = _transformed(draft.kernel, _expecting_v1_scheduler)
-        text = "tag(" + ", ".join(f"{k}={v!r}" for k, v in inames.items()) + ")"
-        return self._commit(draft, text, ("tag", (), dict(inames)))
+        return self._commit(draft, text, recipe)
 
-    def split(
-        self,
-        iname: str,
-        factor: int,
-        inner: str | None = None,
-        outer: str | None = None,
-    ) -> Schedule:
-        """Split ``iname`` by ``factor`` into an outer and an inner iname.
+    def on_groups(self, loop: Any, axis: int = 0) -> Schedule:
+        """Run each value of a loop in a work group of its own: ``tag(loop, "g.0")``.
+
+        The same step as :meth:`tag` with ``"g.<axis>"``, in words: the loop
+        is the launch grid's axis ``axis`` across work groups, which nothing
+        orders, so a dependence between two of its values is refused. Its
+        facts and :attr:`history` say it as it is written,
+        ``on_groups(l2p.unpack.box)``.
+        """
+        number = _axis(axis, "on_groups", loop)
+        kwargs = {"axis": number} if number else {}
+        recipe = ("on_groups", (loop,), kwargs)
+        return self._tag(loop, f"g.{number}", _call_text(recipe), recipe)
+
+    def on_items(self, loop: Any, axis: int = 0) -> Schedule:
+        """Run each value of a loop on a work item of its own: ``tag(loop, "l.0")``.
+
+        The same step as :meth:`tag` with ``"l.<axis>"``: the loop is the
+        axis ``axis`` of the work items of a group, which a barrier can order
+        only through local memory, so a dependence between two of its values
+        through global memory is refused. Its facts and :attr:`history` say it
+        as it is written, ``on_items(spmv.j.inner)``.
+        """
+        number = _axis(axis, "on_items", loop)
+        kwargs = {"axis": number} if number else {}
+        recipe = ("on_items", (loop,), kwargs)
+        return self._tag(loop, f"l.{number}", _call_text(recipe), recipe)
+
+    def split(self, loop: Any, factor: int, **names: Any) -> Schedule:
+        """Split a loop by ``factor`` into two: ``loop.outer`` and ``loop.inner``.
+
+        ``split(spmv.j, 2)`` runs ``j = 2 * j.outer + j.inner``, and the two
+        loops it makes are the handle's children, ``spmv.j.outer`` and
+        ``spmv.j.inner``, which the steps after it name (:mod:`loopty.handles`);
+        a split of one of them makes grandchildren, ``spmv.j.inner.outer``.
 
         A loop that carries a tag is refused with a ``ValueError``, a sum's
         loop as well, whether or not the schedule still has a kernel: split
         it before tagging the loops it makes (see :meth:`_refuse_tagged`).
+        loopty 0.3's ``inner=`` and ``outer=`` are a ``TypeError``: the two
+        loops are the handle's.
         """
-        inner = inner or f"{iname}_inner"
-        outer = outer or f"{iname}_outer"
+        if names:
+            shown = (
+                [repr(loop)]
+                if isinstance(loop, Loop)
+                else self._named_like(loop, "loop")
+                if isinstance(loop, str)
+                else []
+            )
+            path = shown[0] if len(shown) == 1 else "loop"
+            given = ", ".join(f"{name}=" for name in names)
+            raise TypeError(
+                f"split() takes no {given}: the loops a split makes are the "
+                f"handle's, {path}.outer and {path}.inner"
+            )
+        text = f"split({loop!r}, {factor})"
+        recipe = ("split", (loop, factor), {})
+        iname = self._loop(loop, text)
+        inner = f"{iname}_inner"
+        outer = f"{iname}_outer"
         self._refuse_tagged(
-            (iname,),
-            f"split({iname}, {factor})",
-            "split it before tagging the loops it makes",
+            (iname,), text, "split it before tagging the loops it makes"
         )
         if iname in self._reductions:
-            return self._split_reduction(iname, factor, inner, outer)
-        if iname not in self._order:
-            raise ValueError(
-                _not_loops(self._term, [iname], (*self._order, *self._reductions))
-            )
+            return self._split_reduction(iname, factor, inner, outer, text, recipe)
         _check_factor(factor)
         draft = self._draft()
-        text = f"split({iname}, {factor})"
+        self._check_new_names(draft, (outer, inner), (iname,), text)
         self._reindex_into(
             draft,
             _reindexing(
@@ -3749,6 +4508,7 @@ class Schedule:
         )
         position = draft.order.index(iname)
         draft.order[position : position + 1] = [outer, inner]
+        draft.children[iname] = (outer, inner)
         draft.kernel = _transformed(
             draft.kernel,
             lp.split_iname,
@@ -3757,9 +4517,7 @@ class Schedule:
             inner_iname=inner,
             outer_iname=outer,
         )
-        return self._commit(
-            draft, text, ("split", (iname, factor), {"inner": inner, "outer": outer})
-        )
+        return self._commit(draft, text, recipe)
 
     def _reindex_into(
         self,
@@ -3858,9 +4616,10 @@ class Schedule:
                 if part is None:
                     outside = [name for name in inputs if name not in coords]
                     raise ValueError(
-                        f"{text}: {stmt_id} runs in {', '.join(inside)} but not "
-                        f"in {', '.join(outside)}, and the map mixes them, so it "
-                        "has no part that moves the loops of that statement alone"
+                        f"{text}: {self._stmt_shown(stmt_id)} runs in "
+                        f"{', '.join(inside)} but not in {', '.join(outside)}, "
+                        "and the map mixes them, so it has no part that moves "
+                        "the loops of that statement alone"
                     )
                 own = part
             first = min(coords.index(name) for name in inside)
@@ -3934,9 +4693,10 @@ class Schedule:
                     "make, so their maps have to make the same new ones"
                 )
                 raise ValueError(
-                    f"{text}: the map of {stmt_id} takes [{', '.join(ins)}] to "
-                    f"[{', '.join(outs)}] and the map of {other} takes "
-                    f"[{', '.join(other_ins)}] to [{', '.join(other_outs)}]; {why}"
+                    f"{text}: the map of {self._mapped_shown(stmt_id)} takes "
+                    f"[{', '.join(ins)}] to [{', '.join(outs)}] and the map of "
+                    f"{self._mapped_shown(other)} takes [{', '.join(other_ins)}] "
+                    f"to [{', '.join(other_outs)}]; {why}"
                 )
             for name in ins:
                 taken.setdefault(name, (stmt_id, ins))
@@ -3949,30 +4709,33 @@ class Schedule:
             if not inside:
                 if piece is not None:
                     raise ValueError(
-                        f"{text}: {stmt_id} does not run in {', '.join(ins)}, so "
-                        "its map has no loop of it to move"
+                        f"{text}: {self._mapped_shown(stmt_id)} does not run in "
+                        f"{', '.join(ins)}, so its map has no loop of it to move"
                     )
                 continue
             if piece is None:
                 raise ValueError(
-                    f"{text}: {stmt_id} runs in {', '.join(inside)} and is given "
-                    "no map; with a map per statement, every statement in the "
-                    "loops the maps name needs one"
+                    f"{text}: {self._mapped_shown(stmt_id)} runs in "
+                    f"{', '.join(inside)} and is given no map; with a map per "
+                    "statement, every statement in the loops the maps name "
+                    "needs one"
                 )
             outside = [name for name in ins if name not in coords]
             if outside:
                 mine = [name for name in ins if name in coords]
                 raise ValueError(
-                    f"{text}: {stmt_id} runs in {', '.join(mine)} but not in "
-                    f"{', '.join(outside)}, and a map per statement moves "
-                    "statements that run in every loop it names"
+                    f"{text}: {self._mapped_shown(stmt_id)} runs in "
+                    f"{', '.join(mine)} but not in {', '.join(outside)}, and a "
+                    "map per statement moves statements that run in every loop "
+                    "it names"
                 )
             extra = [name for name in inside if name not in ins]
             if extra:
                 owner = taken[extra[0]][0]
                 raise ValueError(
-                    f"{text}: {stmt_id} runs in {', '.join(extra)} as well, which "
-                    f"the map of {owner} moves and its own does not; a "
+                    f"{text}: {self._mapped_shown(stmt_id)} runs in "
+                    f"{', '.join(extra)} as well, which the map of "
+                    f"{self._mapped_shown(owner)} moves and its own does not; a "
                     "statement's map moves every loop of the step it runs in"
                 )
 
@@ -4034,12 +4797,19 @@ class Schedule:
         if not tagged:
             return
         carried = " and ".join(
-            f"{name} carries the tag {self._tags[name]!r}" for name in tagged
+            f"{self._shown(name)} carries the tag {self._tags[name]!r}"
+            for name in tagged
         )
         raise ValueError(f"{text}: {carried}; {fix}")
 
     def _split_reduction(
-        self, iname: str, factor: int, inner: str, outer: str
+        self,
+        iname: str,
+        factor: int,
+        inner: str,
+        outer: str,
+        text: str,
+        recipe: tuple[str, tuple, dict],
     ) -> Schedule:
         """Split a reduction iname: the instances are untouched, the sum is not.
 
@@ -4050,10 +4820,8 @@ class Schedule:
         """
         _check_factor(factor)
         draft = self._draft()
-        text = f"split({iname}, {factor})"
-        if inner == outer:
-            raise ValueError(f"{text}: {inner} is named twice among the new loops")
         self._check_new_names(draft, (outer, inner), (iname,), text)
+        draft.children[iname] = (outer, inner)
         key = draft.reductions.pop(iname)
         draft.reductions[inner] = key
         draft.reductions[outer] = key
@@ -4078,14 +4846,10 @@ class Schedule:
             inner_iname=inner,
             outer_iname=outer,
         )
-        return self._commit(
-            draft,
-            text,
-            ("split", (iname, factor), {"inner": inner, "outer": outer}),
-        )
+        return self._commit(draft, text, recipe)
 
-    def interchange(self, *inames: str) -> Schedule:
-        """Reorder the named loops into the order given.
+    def interchange(self, *loops: Any) -> Schedule:
+        """Reorder the named loops into the order given: ``interchange(k.b, k.a)``.
 
         With two names this is the familiar interchange; with more it is a
         permutation. The instances are untouched, so the bijection is trivial and
@@ -4098,8 +4862,10 @@ class Schedule:
         then runs outside them: sumpy's CPU tile of a layer potential,
 
             (Schedule(lpot, target="opencl")
-             .split("t", 16).tag(t_outer="g.0", t_inner="l.0")
-             .split("s", 256).prioritize("s_outer", "t_inner"))
+             .split(lpot.t, 16)
+             .tag({lpot.t.outer: "g.0", lpot.t.inner: "l.0"})
+             .split(lpot.s, 256)
+             .prioritize(lpot.s.outer, lpot.t.inner))
 
         adds 256 sources at a time to the sum of each of 16 targets. Each
         sum still adds its terms in its own order, its loops outer first, so
@@ -4116,24 +4882,21 @@ class Schedule:
         a statement loop before a loop of a sum puts the sum's loop back
         inside it.
         """
-        return self._reorder(
-            inames, f"interchange({', '.join(inames)})", "interchange"
-        )
+        return self._reorder(loops, "interchange")
 
-    def prioritize(self, *inames: str) -> Schedule:
+    def prioritize(self, *loops: Any) -> Schedule:
         """Alias of :meth:`interchange`, in loopy's vocabulary."""
-        return self._reorder(
-            inames, f"prioritize({', '.join(inames)})", "prioritize"
-        )
+        return self._reorder(loops, "prioritize")
 
-    def _reorder(self, inames: Sequence[str], text: str, method: str) -> Schedule:
-        unknown = [
-            iname
-            for iname in inames
-            if iname not in self._order and iname not in self._reductions
-        ]
-        if unknown:
-            raise ValueError(f"not inames of {self._term.name}: {unknown}")
+    def _reorder(self, handles: Sequence[Any], method: str) -> Schedule:
+        text = f"{method}({', '.join(repr(handle) for handle in handles)})"
+        inames = [self._loop(handle, text) for handle in handles]
+        twice = [name for name in dict.fromkeys(inames) if inames.count(name) > 1]
+        if twice:
+            raise ValueError(
+                f"{text}: {', '.join(self._shown(name) for name in twice)} is "
+                "named twice"
+            )
         loops = [iname for iname in inames if iname in self._order]
         draft = self._draft()
         positions = sorted(draft.order.index(iname) for iname in loops)
@@ -4141,7 +4904,7 @@ class Schedule:
             draft.order[position] = iname
         if len(loops) < len(inames):
             self._place_sums(draft, inames, text)
-        return self._commit(draft, text, (method, tuple(inames), {}))
+        return self._commit(draft, text, (method, tuple(handles), {}))
 
     def _place_sums(self, draft: _Draft, inames: Sequence[str], text: str) -> None:
         """Record where each loop of a sum in ``inames`` runs; see :meth:`interchange`.
@@ -4155,24 +4918,27 @@ class Schedule:
         loop of a sum nested in another, and an inner loop of a sum outside
         a loop its outer loop is not.
         """
+        show = self._shown
         for iname in inames:
             if iname not in draft.reductions:
                 continue
             key = draft.reductions[iname]
             stmt_id = key.rsplit(":", 1)[0]
-            binders = ", ".join(draft.sums[key])
+            stmt = self._stmt_shown(stmt_id)
+            binders = ", ".join(show(name) for name in draft.sums[key])
             if key in draft.nested_in:
                 raise ValueError(
-                    f"{text}: {iname} is a loop of a sum nested in another sum "
-                    f"of {stmt_id}, which runs inside that sum's loops; only "
+                    f"{text}: {show(iname)} is a loop of a sum nested in another "
+                    f"sum of {stmt}, which runs inside that sum's loops; only "
                     "the loops of an outermost sum are ordered against the "
                     "loops of their statement"
                 )
             named = [name for name in inames if draft.reductions.get(name) == key]
             if named != [name for name in draft.sums[key] if name in named]:
                 raise ValueError(
-                    f"{text}: {', '.join(named)} are loops of one sum of "
-                    f"{stmt_id}, which adds its terms in the order of its loops, "
+                    f"{text}: {', '.join(show(name) for name in named)} are loops "
+                    f"of one sum of {stmt}, which adds its terms in the order of "
+                    "its loops, "
                     f"outermost first ({binders}); reordering them would "
                     "reassociate it"
                 )
@@ -4185,8 +4951,9 @@ class Schedule:
             foreign = [name for name in after if name not in nest]
             if foreign:
                 raise ValueError(
-                    f"{text}: {iname} is a loop of the sum over {binders} in "
-                    f"{stmt_id}, which does not run in {', '.join(foreign)}"
+                    f"{text}: {show(iname)} is a loop of the sum over {binders} "
+                    f"in {stmt}, which does not run in "
+                    f"{', '.join(show(name) for name in foreign)}"
                 )
             if after:
                 first = min(nest.index(name) for name in after)
@@ -4199,23 +4966,27 @@ class Schedule:
                     outer, frozenset()
                 )
                 if missing:
-                    stmt_id = key.rsplit(":", 1)[0]
+                    stmt = self._stmt_shown(key.rsplit(":", 1)[0])
                     raise ValueError(
-                        f"{text}: {inner} runs inside {outer} in the sum over "
-                        f"{', '.join(loops)} in {stmt_id}, so it can run outside "
-                        f"{', '.join(sorted(missing))} only where {outer} does; "
-                        f"name {outer} first"
+                        f"{text}: {show(inner)} runs inside {show(outer)} in the "
+                        f"sum over {', '.join(show(name) for name in loops)} in "
+                        f"{stmt}, so it can run outside "
+                        f"{', '.join(show(name) for name in sorted(missing))} only "
+                        f"where {show(outer)} does; name {show(outer)} first"
                     )
 
     def tile(
         self,
-        first: str,
-        second: str,
+        first: Any,
+        second: Any,
         first_factor: int,
         second_factor: int,
     ) -> Schedule:
         """Split two loops and interchange the pieces, tiling the nest.
 
+        ``tile(jacobi.t, jacobi.i, 8, 8)`` makes the four loops a split of
+        each makes, ``jacobi.t.outer``, ``jacobi.i.outer``, ``jacobi.t.inner``
+        and ``jacobi.i.inner`` in that order, which the steps after it name.
         One cast, not three: the tiles are what the user asked for, so the
         witness of a rejection names the tiling and not the interchange inside
         it. The reindexing is one affine map, the two splits side by side,
@@ -4224,26 +4995,36 @@ class Schedule:
         refused, as :meth:`split` refuses one: tile the loops before tagging
         the loops the tiling makes.
         """
-        for iname in (first, second):
-            if iname not in self._order:
+        text = f"tile({first!r}, {second!r}, {first_factor}, {second_factor})"
+        recipe = ("tile", (first, second, first_factor, second_factor), {})
+        names = [self._loop(first, text), self._loop(second, text)]
+        for name in names:
+            if name not in self._order:
                 raise ValueError(
-                    _not_loops(self._term, [iname], (*self._order, *self._reductions))
+                    f"{text}: {self._shown(name)} is a loop of a sum, which runs "
+                    "inside one instance of its statement; a tiling takes two loops "
+                    "of the statements"
                 )
-        if first == second:
-            raise ValueError(f"tile() needs two different loops, not {first!r} twice")
+        if names[0] == names[1]:
+            raise ValueError(
+                f"{text}: a tiling needs two different loops, and "
+                f"{first!r} and {second!r} are one loop"
+            )
+        first_name, second_name = names
         for factor in (first_factor, second_factor):
             _check_factor(factor)
-        text = f"tile({first},{second},{first_factor},{second_factor})"
         self._refuse_tagged(
-            (first, second), text, "tile before tagging the loops the tiling makes"
+            (first_name, second_name),
+            text,
+            "tile before tagging the loops the tiling makes",
         )
         draft = self._draft()
-        outer_first, inner_first = f"{first}_outer", f"{first}_inner"
-        outer_second, inner_second = f"{second}_outer", f"{second}_inner"
+        outer_first, inner_first = f"{first_name}_outer", f"{first_name}_inner"
+        outer_second, inner_second = f"{second_name}_outer", f"{second_name}_inner"
         self._reindex_into(
             draft,
             _reindexing(
-                (first, second),
+                (first_name, second_name),
                 (outer_first, inner_first, outer_second, inner_second),
                 [
                     f"a0 = {first_factor} * b0 + b1",
@@ -4255,11 +5036,12 @@ class Schedule:
             text,
         )
         for iname, factor, outer, inner in (
-            (first, first_factor, outer_first, inner_first),
-            (second, second_factor, outer_second, inner_second),
+            (first_name, first_factor, outer_first, inner_first),
+            (second_name, second_factor, outer_second, inner_second),
         ):
             position = draft.order.index(iname)
             draft.order[position : position + 1] = [outer, inner]
+            draft.children[iname] = (outer, inner)
             draft.kernel = _transformed(
                 draft.kernel,
                 lp.split_iname,
@@ -4272,42 +5054,48 @@ class Schedule:
         positions = sorted(draft.order.index(iname) for iname in wanted)
         for position, iname in zip(positions, wanted, strict=True):
             draft.order[position] = iname
-        return self._commit(
-            draft,
-            text,
-            ("tile", (first, second, first_factor, second_factor), {}),
-        )
+        return self._commit(draft, text, recipe)
 
-    def skew(self, iname: str, by: str, factor: int = 1) -> Schedule:
-        """Skew ``iname`` by ``factor`` times ``by``, making tiling legal.
+    def skew(self, loop: Any, by: Any, factor: int = 1) -> Schedule:
+        """Skew a loop by ``factor`` times another, making tiling legal.
 
-        The instances are renamed, so this is the one transformation whose
-        bijectivity is a real question, and the reason a skew makes a rectangular
-        tiling legal is visible in the map: the dependence vectors it adds to
-        every instance are exactly what stops a tile boundary from running a sink
-        before its source.
+        ``skew(jacobi.i, by=jacobi.t)`` runs ``i + t`` where ``i`` ran, and
+        both loops keep their handles. The instances are renamed, so this is
+        the one transformation whose bijectivity is a real question, and the
+        reason a skew makes a rectangular tiling legal is visible in the map:
+        the dependence vectors it adds to every instance are exactly what
+        stops a tile boundary from running a sink before its source.
 
-        A skew is the affine map ``(by, iname) -> (by, iname + factor * by)``
+        A skew is the affine map ``(by, loop) -> (by, loop + factor * by)``
         with both loops keeping their names, and it is checked and applied to
         the kernel exactly as :meth:`affine` would apply that map. The loop
         order is unchanged.
         """
-        if iname not in self._order or by not in self._order:
-            raise ValueError(f"not inames of {self._term.name}: {iname}, {by}")
-        if iname == by:
-            raise ValueError(f"skew() needs two different loops, not {iname!r} twice")
-        draft = self._draft()
-        text = f"skew({iname}, by={by!r}" + (
+        text = f"skew({loop!r}, by={by!r}" + (
             f", factor={factor})" if factor != 1 else ")"
         )
+        recipe = ("skew", (loop,), {"by": by, "factor": factor})
+        iname = self._loop(loop, text)
+        other = self._loop(by, text)
+        for name in (iname, other):
+            if name not in self._order:
+                raise ValueError(
+                    f"{text}: {self._shown(name)} is a loop of a sum, which runs "
+                    "inside one instance of its statement; a skew takes loops of "
+                    "the statements"
+                )
+        if iname == other:
+            raise ValueError(
+                f"{text}: a skew needs two different loops, and {loop!r} and "
+                f"{by!r} are one loop"
+            )
+        draft = self._draft()
         mapping = _reindexing(
-            (by, iname), (by, iname), ["b0 = a0", f"b1 = a1 + {factor} * a0"]
+            (other, iname), (other, iname), ["b0 = a0", f"b1 = a1 + {factor} * a0"]
         )
         self._reindex_into(draft, mapping, text)
         self._affine_into(draft, mapping)
-        return self._commit(
-            draft, text, ("skew", (iname,), {"by": by, "factor": factor})
-        )
+        return self._commit(draft, text, recipe)
 
     def affine(self, mapping: Any) -> Schedule:
         """Reindex loops along an injective affine map, checked like every cast.
@@ -4383,12 +5171,19 @@ class Schedule:
         pieces: Mapping[str, isl.Map] | None,
         text: str,
         recipe: tuple[str, tuple, dict],
+        renamed: Mapping[str, str] | None = None,
     ) -> Schedule:
         """The step that moves loops along one map, or a map per statement.
 
         :meth:`affine` and :meth:`fuse` are this step, the first with the
         map it is given and the second with the maps it builds; ``recorded``
         is the map as the step is written, and ``recipe`` how it is replayed.
+        ``renamed`` says which loop each loop the step replaces is now, for
+        the handles (:meth:`_moved_loops`): a fusion's consumer's loops are
+        the producer's. Without it, a loop the map keeps the name of is that
+        loop still, as after a skew, the others are gone, and the loops the
+        map names that no loop had been are the schedule's own
+        (:attr:`loops`).
         """
         mapping = recorded if pieces is None else next(iter(pieces.values()))
         draft = self._draft()
@@ -4402,9 +5197,13 @@ class Schedule:
         tagged = sorted(name for name in inputs if name in draft.tags)
         if tagged:
             raise ValueError(
-                f"{text}: {', '.join(tagged)} carries a tag; apply the map "
-                "before tagging the loops it makes"
+                f"{text}: {', '.join(self._shown(name) for name in tagged)} "
+                "carries a tag; apply the map before tagging the loops it makes"
             )
+        if renamed is not None:
+            draft.renamed.update(renamed)
+        else:
+            draft.made.extend(name for name in outputs if name not in inputs)
         positions = sorted(draft.order.index(name) for name in inputs)
         if len(outputs) == len(inputs):
             for position, name in zip(positions, outputs, strict=True):
@@ -4517,184 +5316,367 @@ class Schedule:
         return kernel.with_kernel(entry.copy(instructions=insns))
 
     def fuse(
-        self,
-        producer: str,
-        consumer: str,
-        shift: int | Sequence[int] = 0,
-        loops: int | None = None,
+        self, *loops: Any, shift: int | Sequence[int] = 0, **spelled: Any
     ) -> Schedule:
-        """Run the consumer's loops inside the producer's, ``shift`` steps behind.
+        """Run the calls of the named loops in one loop nest, along those loops.
 
-        ``producer`` and ``consumer`` name statements: a statement by its id
-        (``S0``, ``flux.S0``), or a call of a program by its label (``flux``,
-        ``step@2``), which names every statement of the call and not the
-        checked points before it (see :meth:`_fused_side`). The producer's
-        come first in the term. The step is :meth:`affine` with a map per
-        statement that this method builds, and it is checked as that is. The
-        producer's loops keep their names and their values; the consumer's
-        loops, as many as both have, outermost first, become the producer's,
-        ``shift`` steps behind:
+        Each handle names a loop of one call (or of one loop nest of a
+        kernel), and the fusion fuses, in each, the loops from the
+        outermost down to and including the named one, which has to be at
+        the same depth in every call::
+
+            fuse(l2p.unpack.box, l2p.reconstruct.box, l2p.evaluate.box)
+
+        runs each box's stored coefficients, its triangle and its targets
+        before the next box's. The calls run in the order the program calls
+        them, so the loops are named in that order, and inside the fused
+        loops each call's statements come after those of the call before it,
+        so a value a later call reads in the step it is written is already
+        there. After the step the handles are one loop, which every later
+        step can name by any of them, and which is printed by the first.
+
+        The step is :meth:`affine` with a map per statement that this method
+        builds, and it is checked as that is. The first call's loops keep
+        their names and their values; each later call's loops become the
+        first's, ``shift`` steps behind the call before it::
 
             { flux_S0[j] -> [j]; divergence_S0[i] -> [j] : j = i + 1 }
 
-        is ``fuse("flux", "divergence", shift=1)``. Every other statement in
-        those loops moves with the side whose loops it runs in. Inside the
-        fused loops the producer's statements come first, as they did in the
-        term, so a value the consumer reads in the step it is written is
-        already there. One shift per fused loop, or one number for a single
-        loop.
+        is ``fuse(burgers_rhs.flux.j, burgers_rhs.divergence.i, shift=1)``.
+        Every other statement in those loops moves with the call whose loops
+        it runs in. One shift per fused loop, outermost first, or one number
+        for a single loop.
 
-        ``loops`` fuses only that many of the outer loops, and leaves the
-        loops inside them one after the other, the producer's first. Two
-        passes over elements, the second of which reads every cell of the
-        element the first wrote, fuse on the element loop and no deeper::
+        Naming a loop above the innermost fuses only the loops down to it,
+        and leaves the loops inside them one after the other, the first
+        call's first. Two passes over elements, the second of which reads
+        every cell of the element the first wrote, fuse on the element loop
+        and no deeper::
 
-            Schedule(weak_grad).fuse("along_r", "along_s", loops=1)
+            Schedule(weak_grad).fuse(weak_grad.along_r.e, weak_grad.along_s.e)
 
         runs, for each element, all of ``along_r`` and then all of
         ``along_s``; fusing both loops would read a cell of the element
-        before ``along_r`` stores it, and is refused with that pair. Without
-        ``loops``, every loop both sides have is fused.
+        before ``along_r`` stores it, and is refused with that pair.
 
-        The two sides' loops have to be in sequence, not one inside the
-        other. The fused loops are the outer loops of each side's nest, and a
-        nest the lowering wrote as one domain is cut after them (see
+        The calls' loops have to be in sequence, not one inside the other.
+        The fused loops are the outer loops of each call's nest, and a nest
+        the lowering wrote as one domain is cut after them (see
         :func:`_cut_for`); a fusion the kernel rewrite cannot write otherwise
         leaves the casts decided and the kernel refused as unbuildable, as
-        :meth:`affine` leaves a map it cannot write. A fusion
-        that runs a dependence backwards is refused with the pair of
-        instances and the cell between them, as every cast is, and the
-        message names the fusions it checked that are accepted: the least
+        :meth:`affine` leaves a map it cannot write. A fusion that runs a
+        dependence backwards is refused with the pair of instances and the
+        cell between them, as every cast is, and the message names the
+        fusions it checked that are accepted, by their handles: the least
         shift that runs every dependence forward, when a number per loop
-        gives it, and the deepest fusion of fewer loops, with ``loops``.
+        gives it, and the deepest fusion of fewer loops.
+
+        A program's checked point (where nothing decided what a call
+        requires of an array an earlier call wrote) runs before the call in a
+        loop of its own, the call's ``checks``: fused with the loop that
+        writes the array, ``fuse(p.reverse_quiet.i, p.gather.checks.idx)``,
+        each cell is checked as it is written, and the call still runs after
+        the whole check.
+
+        loopty 0.3's spellings, calls by name and ``loops=``,
+        ``fuse("unpack", "reconstruct", loops=1)``, are a ``TypeError`` that
+        writes the step with handles, ``fuse(l2p.unpack.box,
+        l2p.reconstruct.box)``.
         """
-        return self._fuse(producer, consumer, shift, loops, hint=True)
+        if spelled or any(isinstance(item, str | Call) for item in loops):
+            raise TypeError(self._fuse_spelled(loops, spelled))
+        return self._fuse(loops, shift, hint=True)
+
+    def _fuse_spelled(self, items: Sequence[Any], spelled: Mapping[str, Any]) -> str:
+        """Why 0.3's ``fuse("unpack", "reconstruct", loops=1)`` is refused.
+
+        A call, by its name or its handle, is fused down to its innermost
+        loop every call named has, or to its ``loops``-th, and each loop is
+        written by its handle.
+        """
+        unknown = [name for name in spelled if name != "loops"]
+        if unknown:
+            return f"fuse() got an unexpected keyword argument {unknown[0]!r}"
+        depth = spelled.get("loops")
+        nests = [self._nest_of(item) for item in items]
+        written = ""
+        if items and all(nests):
+            count = depth if isinstance(depth, int) else min(len(n) for n in nests)
+            if 1 <= count <= min(len(nest) for nest in nests):
+                handles = [repr(self._handle_of(nest[count - 1])) for nest in nests]
+                written = f"fuse({', '.join(handles)})"
+        bad = next((item for item in items if isinstance(item, str | Call)), None)
+        if bad is None:
+            head = (
+                "fuse() takes no loops=: it fuses each call's loops down to the loop "
+                "named of it"
+            )
+        else:
+            given = (
+                f"the string {bad!r}" if isinstance(bad, str) else f"the call {bad!r}"
+            )
+            head = (
+                "fuse() takes a loop handle of each call, the loop it fuses down to, "
+                f"not {given}"
+            )
+        if written:
+            return f"{head}: write {written}"
+        example = self._an_example("loop")
+        return f"{head}, such as {example}" if example else head
+
+    def _nest_of(self, item: Any) -> list[str]:
+        """The loops around every statement of a call or of a loop, outermost first.
+
+        ``item`` is a loop handle, a call's handle, or a call by the name of
+        its kernel or its label, as 0.3 named one; ``[]`` for anything else.
+        """
+        stmts: list[str] = []
+        if isinstance(item, Loop):
+            try:
+                stmts = self._fused_side(self._loop(item, "fuse()"))
+            except (TypeError, ValueError):
+                return []
+        else:
+            labels: tuple[str, ...] | None = None
+            if isinstance(item, Call) and item.root is self._handles.root:
+                labels = item._labels
+            elif isinstance(item, str):
+                index = self._handles
+                sites = [
+                    site
+                    for site in index.sites
+                    if site[-1] == item
+                    or (
+                        index.sites[site].kernel == item
+                        and len(index.calls.get(site[:-1], {}).get(item, ())) == 1
+                    )
+                ]
+                labels = sites[0] if len(sites) == 1 else None
+            if labels is None:
+                return []
+            calls = {(scope.call,): scope.statements for scope in self._term.scopes}
+            for call in self._term.calls:
+                calls.setdefault((*call.within, call.label), call.statements)
+            stmts = [
+                stmt_id
+                for stmt_id in calls.get(labels, ())
+                if stmt_id not in self._gone
+            ]
+        nests = [
+            [loop for loop in self._order if loop in self._layout.coords[stmt_id]]
+            for stmt_id in stmts
+        ]
+        common: list[str] = []
+        for loops in zip(*nests, strict=False):
+            if any(loop != loops[0] for loop in loops):
+                break
+            common.append(loops[0])
+        return common if nests else []
 
     def _fuse(
         self,
-        producer: str,
-        consumer: str,
+        handles: Sequence[Any],
         shift: int | Sequence[int],
-        loops: int | None,
         hint: bool,
     ) -> Schedule:
         """:meth:`fuse`, with ``hint`` saying whether a refusal names a fix."""
         given = shift if isinstance(shift, int) else tuple(shift)
-        options = []
-        if given:
-            options.append(f"shift={given!r}")
-        if loops is not None:
-            options.append(f"loops={loops!r}")
-        text = f"fuse({', '.join([producer, consumer, *options])})"
-        kwargs: dict[str, Any] = {}
-        if given:
-            kwargs["shift"] = given
-        if loops is not None:
-            kwargs["loops"] = loops
-        recipe = ("fuse", (producer, consumer), kwargs)
-        first = self._fused_side(producer, text)
-        second = self._fused_side(consumer, text)
-        both = sorted(set(first) & set(second))
-        if both:
+        options = [f"shift={given!r}"] if given else []
+        text = f"fuse({', '.join([*(repr(h) for h in handles), *options])})"
+        kwargs: dict[str, Any] = {"shift": given} if given else {}
+        recipe = ("fuse", tuple(handles), kwargs)
+        if len(handles) < 2:
             raise ValueError(
-                f"{text}: {', '.join(both)} is named on both sides of the fusion"
+                f"{text}: a fusion names a loop of each of two calls or more, the "
+                "loop each is fused down to"
             )
+        named = [self._loop(handle, text) for handle in handles]
+        for handle, name in zip(handles, named, strict=True):
+            if name not in self._order:
+                raise ValueError(
+                    f"{text}: {handle!r} is a loop of a sum, which runs inside one "
+                    "instance of its statement; a fusion fuses loops of statements"
+                )
+        sides = [self._fused_side(name) for name in named]
+        nests = [
+            self._fused_nest(side, name, handle, text)
+            for side, name, handle in zip(sides, named, handles, strict=True)
+        ]
+        depths = [len(nest) for nest in nests]
+        if len(set(depths)) > 1:
+            listed = _joined(
+                f"{handle!r} at depth {depth}"
+                for handle, depth in zip(handles, depths, strict=True)
+            )
+            raise ValueError(
+                f"{text}: a fusion fuses each call's loops down to the loop named, "
+                f"at one depth in every call, and the loops named are {listed}"
+            )
+        depth = depths[0]
+        for k in range(1, len(handles)):
+            for j in range(k):
+                common = sorted(set(sides[j]) & set(sides[k]))
+                shared = [name for name in nests[j] if name in nests[k]]
+                if common or shared:
+                    loop = shared[0] if shared else named[k]
+                    raise ValueError(
+                        f"{text}: {handles[j]!r} and {handles[k]!r} run in one "
+                        f"loop already, {self._shown(loop)}"
+                    )
         position = self._layout.index
-        if max(position(s) for s in first) > min(position(s) for s in second):
-            raise ValueError(
-                f"{text}: {consumer} comes before {producer} in "
-                f"{self._term.name}; the producer is the one that comes first"
-            )
-        mine = self._fused_loops(first, producer, text)
-        theirs = self._fused_loops(second, consumer, text)
-        depth = _fused_depth(
-            loops, (producer, mine), (consumer, theirs), text
-        )
-        mine, theirs = mine[:depth], theirs[:depth]
-        shared = [name for name in mine if name in theirs]
-        if shared:
-            raise ValueError(
-                f"{text}: {producer} and {consumer} already run in "
-                f"{', '.join(shared)}"
-            )
+        for k in range(1, len(handles)):
+            if max(position(s) for s in sides[k - 1]) > min(
+                position(s) for s in sides[k]
+            ):
+                raise ValueError(
+                    f"{text}: {handles[k]!r} runs before {handles[k - 1]!r} in "
+                    f"{self._handles.name}; name the loops in the order their "
+                    "calls run"
+                )
         shifts = _shifts(given, depth, text)
-        identity = _reindexing(mine, mine, [f"b{k} = a{k}" for k in range(depth)])
-        behind = _reindexing(
-            theirs,
-            mine,
-            [f"b{k} = a{k} + ({shifts[k]})" for k in range(depth)],
-        )
+        first = nests[0]
+        identity = _reindexing(first, first, [f"b{k} = a{k}" for k in range(depth)])
+        maps = [identity]
+        for k, nest in enumerate(nests[1:], start=1):
+            maps.append(
+                _reindexing(
+                    nest,
+                    first,
+                    [f"b{j} = a{j} + ({k * shifts[j]})" for j in range(depth)],
+                )
+            )
         pieces: dict[str, isl.Map] = {}
         for stmt_id, coords in self._layout.coords.items():
             if stmt_id in self._gone:
                 continue
-            if set(coords) & set(mine):
-                pieces[stmt_id] = identity
-            elif set(coords) & set(theirs):
-                pieces[stmt_id] = behind
+            for nest, piece in zip(nests, maps, strict=True):
+                if set(coords) & set(nest):
+                    pieces[stmt_id] = piece
+                    break
+        renamed = {
+            nest[j]: first[j] for nest in nests[1:] for j in range(depth)
+        }
         try:
-            return self._moved(identity, pieces, text, recipe)
+            return self._moved(identity, pieces, text, recipe, renamed=renamed)
         except IllegalCast as exc:
             if not hint or exc.fact is None or exc.fact.kind != "monotone":
                 raise
-            accepted = self._accepted_fusions(
-                producer, consumer, (first, second), (mine, theirs), shifts, loops
-            )
-            if not accepted:
+            accepted = self._accepted_fusions(sides, nests, shifts)
+            checked = self._fused_check(handles, exc.witness)
+            if not accepted and checked is None:
                 raise
-            message = f"{exc}; {accepted[0]} runs every dependence between them " + (
-                "forward"
-                if len(accepted) == 1
-                else f"forward, and so does {accepted[1]}"
-            )
+            fixes = []
+            if accepted:
+                fixes.append(
+                    f"{accepted[0]} runs every dependence between them "
+                    + (
+                        "forward"
+                        if len(accepted) == 1
+                        else f"forward, and so does {accepted[1]}"
+                    )
+                )
+            if checked is not None:
+                fixes.append(checked)
+            message = f"{exc}; " + "; ".join(fixes)
             provenance = {**exc.fact.provenance, "reason": message}
             fact = dataclasses.replace(exc.fact, provenance=provenance)
-            raise IllegalCast(message, witness=exc.witness, fact=fact) from None
+            raise IllegalCast(
+                message, witness=exc.witness, fact=fact, instances=exc.instances
+            ) from None
+
+    def _fused_check(self, handles: Sequence[Any], witness: Any) -> str | None:
+        """The fusion of a checked point that a refused fusion ran past, or ``None``.
+
+        Where the program checks, between two calls, what the second requires
+        of an array the first wrote, the second reads the check's flag, so it
+        runs after the whole check and fusing the two calls is refused with
+        that read. The check itself fuses with the first call's loop,
+        ``fuse(p.reverse_quiet.i, p.gather.checks.idx)``, checking each cell
+        as it is written; it is named when the checker accepts it.
+        """
+        if not witness:
+            return None
+        (source_id, _coords), _sink, _sizes = witness
+        found = self._handles.check_stmts.get(source_id)
+        if found is None:
+            return None
+        inames = self._term.stmt(source_id).inames
+        loops = [
+            binder for binder in self._handles.check_binders if binder.name in inames
+        ]
+        for producer in handles:
+            try:
+                name = self._loop(producer, "fuse()")
+                depth = len(
+                    self._fused_nest(self._fused_side(name), name, producer, "fuse()")
+                )
+            except (TypeError, ValueError):
+                continue
+            if depth > len(loops):
+                continue
+            check = Loop(self._handles, loops[depth - 1])
+            try:
+                self._fuse([producer, check], 0, hint=False)
+            except (IllegalCast, ValueError):
+                continue
+            return (
+                f"fuse({producer!r}, {check!r}) runs the check in {producer!r}, "
+                "each cell as it is written"
+            )
+        return None
 
     def _accepted_fusions(
         self,
-        producer: str,
-        consumer: str,
-        sides: tuple[Sequence[str], Sequence[str]],
-        fused: tuple[Sequence[str], Sequence[str]],
+        sides: Sequence[Sequence[str]],
+        nests: Sequence[Sequence[str]],
         shifts: tuple[int, ...],
-        loops: int | None,
     ) -> list[str]:
         """The fusions of a refused one that the checker accepts, as written.
 
         First the same loops at the least shift per loop that runs the
-        dependences between the two sides forward, when there is one (see
+        dependences between each two calls forward, when there is one (see
         :meth:`_least_shift`); then the deepest fusion of fewer loops, at no
-        shift, or at its own least shift. Each is checked before it is named.
+        shift, or at its own least shift. Each is checked before it is named,
+        by the handles of the loops it fuses down to.
         """
-        first, second = sides
-        mine, theirs = fused
-        depth = len(mine)
+        depth = len(nests[0])
         out: list[str] = []
 
-        def accepted(shift: tuple[int, ...], count: int | None) -> bool:
+        def handles_at(count: int) -> list[Loop]:
+            return [self._handle_of(nest[count - 1]) for nest in nests]
+
+        def accepted(shift: tuple[int, ...], count: int) -> bool:
             value: int | tuple[int, ...] = shift[0] if len(shift) == 1 else shift
             try:
-                self._fuse(producer, consumer, value, count, hint=False)
+                self._fuse(handles_at(count), value, hint=False)
             except (IllegalCast, ValueError):
                 return False
             return True
 
-        def written(shift: tuple[int, ...], count: int | None) -> str:
-            options = [repr(producer), repr(consumer)]
+        def written(shift: tuple[int, ...], count: int) -> str:
+            options = [repr(handle) for handle in handles_at(count)]
             if any(shift):
                 value = shift[0] if len(shift) == 1 else shift
                 options.append(f"shift={value!r}")
-            if count is not None:
-                options.append(f"loops={count}")
             return f"fuse({', '.join(options)})"
 
-        least = self._least_shift(first, second, mine, theirs)
-        if least is not None and least != shifts and accepted(least, loops):
-            out.append(written(least, loops))
+        def least(count: int) -> tuple[int, ...] | None:
+            found = [0] * count
+            for k in range(1, len(nests)):
+                pair = self._least_shift(
+                    sides[k - 1], sides[k], nests[k - 1][:count], nests[k][:count]
+                )
+                if pair is None:
+                    return None
+                found = [max(a, b) for a, b in zip(found, pair, strict=True)]
+            return tuple(found)
+
+        smallest = least(depth)
+        if smallest is not None and smallest != shifts and accepted(smallest, depth):
+            out.append(written(smallest, depth))
         for count in range(depth - 1, 0, -1):
             candidates = [(0,) * count]
-            fewer = self._least_shift(first, second, mine[:count], theirs[:count])
+            fewer = least(count)
             if fewer is not None and any(fewer):
                 candidates.append(fewer)
             found = next(
@@ -4705,59 +5687,49 @@ class Schedule:
                 break
         return out
 
-    def _fused_side(self, name: str, text: str) -> list[str]:
-        """The statements one side of :meth:`fuse` names, in term order.
+    def _handle_of(self, name: str) -> Loop:
+        """The handle a loop of the kernel is printed by (see :meth:`_shown`)."""
+        best = None
+        for key, names in self._loops.items():
+            if not isinstance(names, tuple) or name not in names:
+                continue
+            binder, made, part = key
+            own = (made if binder is None else binder.name) == name and not part
+            if best is None or (own and not best[0]):
+                best = (own, key)
+        if best is None:
+            raise ValueError(f"{name} is no loop of the source of {self!r}")
+        binder, made, part = best[1]
+        return Loop(self._handles, binder, part, made)
 
-        A call's label names the call's own statements, its scope's (see
-        :class:`loopty.term.Scope`), and not the checked points the program
-        put before it (``gather.check.perm``): those check what an earlier
-        call left for this one, and a fusion that would run the call before
-        them is refused for the flag they set, which the call reads. Those a
-        substitution took out run no more, and are left out; a side that
-        names only such statements is refused.
+    def _fused_side(self, name: str) -> list[str]:
+        """The statements that run in a loop, in term order, which :meth:`fuse` moves.
+
+        Those a substitution took out run no more, and are left out.
         """
-        ids = self._layout.stmt_ids
-        calls = {scope.call: scope.statements for scope in self._term.scopes}
-        named = (
-            [name]
-            if name in ids
-            else [stmt_id for stmt_id in calls[name] if stmt_id in ids]
-            if name in calls
-            else [stmt_id for stmt_id in ids if stmt_id.startswith(f"{name}.")]
-            or [stmt_id for stmt_id in ids if _sanitize(stmt_id) == name]
-        )
-        if not named:
-            raise ValueError(
-                f"{text}: {name!r} names no statement of {self._term.name} and "
-                f"no call of it; its statements are {', '.join(ids)}"
-            )
-        live = [stmt_id for stmt_id in named if stmt_id not in self._gone]
-        if not live:
-            raise ValueError(
-                f"{text}: {', '.join(named)} runs no more: a substitution took "
-                "it out of the kernel"
-            )
-        return live
+        return [
+            stmt_id
+            for stmt_id in self._layout.stmt_ids
+            if stmt_id not in self._gone and name in self._layout.coords[stmt_id]
+        ]
 
-    def _fused_loops(
-        self, stmts: Sequence[str], name: str, text: str
+    def _fused_nest(
+        self, stmts: Sequence[str], name: str, handle: Any, text: str
     ) -> tuple[str, ...]:
-        """The loops every statement of one side runs in, outermost first."""
+        """The loops from the outermost down to ``name``, around every statement."""
         nests = [
             [loop for loop in self._order if loop in self._layout.coords[stmt_id]]
             for stmt_id in stmts
         ]
-        common: list[str] = []
-        for loops in zip(*nests, strict=False):
-            if any(loop != loops[0] for loop in loops):
-                break
-            common.append(loops[0])
-        if not common:
+        if not nests:
+            raise ValueError(f"{text}: no statement runs in {handle!r}")
+        prefixes = {tuple(nest[: nest.index(name) + 1]) for nest in nests}
+        if len(prefixes) > 1:
             raise ValueError(
-                f"{text}: the statements {name} names, {', '.join(stmts)}, run in "
-                "no loop all of them share, and a fusion moves loops"
+                f"{text}: the statements in {handle!r} run in different loops "
+                "around it, and a fusion moves the loops around them"
             )
-        return tuple(common)
+        return next(iter(prefixes))
 
     def _least_shift(
         self,
@@ -4874,7 +5846,7 @@ class Schedule:
             draft.kernel = None
             draft.unbuildable = reason
 
-    def pack(self, *arrays: str) -> Schedule:
+    def pack(self, *handles: Any) -> Schedule:
         """Store arrays over a polyhedral domain packed, a row at a time.
 
         An array over ``Where[...]``, ``Sigma[...]`` or a union is boxed unless
@@ -4891,13 +5863,15 @@ class Schedule:
         that stores them so. A domain with a row that is not an interval
         cannot be packed and is refused when it is lowered.
         """
-        if not arrays:
+        text = f"pack({', '.join(repr(handle) for handle in handles)})"
+        if not handles:
             raise ValueError("pack() names the arrays to store packed")
-        for name in arrays:
+        arrays = [self._array(handle, text) for handle in handles]
+        for handle, name in zip(handles, arrays, strict=True):
             if name not in self._lowering.storage:
                 raise ValueError(
-                    f"pack({name!r}): {name} is not an array over a Where, Sigma "
-                    f"or union domain of {self._term.name}, and a dense or "
+                    f"{text}: {handle!r} is not an array over a Where, Sigma or "
+                    f"union domain of {self._handles.name}, and a dense or "
                     "ragged array is stored one way"
                 )
         layouts = {**self._layouts, **dict.fromkeys(arrays, "packed")}
@@ -4907,13 +5881,13 @@ class Schedule:
         out._made_at = self._made_at
         out = _replaying(out, self._steps, self._steps_at)
         out = out._clone()
-        out._steps = (*out._steps, ("pack", tuple(arrays), {}))
+        out._steps = (*out._steps, ("pack", tuple(handles), {}))
         out._steps_at = (*out._steps_at, _called_at())
-        out._history = (*out._history, f"pack({', '.join(arrays)})")
+        out._history = (*out._history, text)
         out._examples = None if self._examples is None else dict(self._examples)
         return out
 
-    def substitute(self, array: str) -> Schedule:
+    def substitute(self, handle: Any) -> Schedule:
         """Compute an array the program makes where it is read, and store none of it.
 
         ``f = Arr.zeros_like(u)`` in a program is a temporary of its kernel
@@ -4968,39 +5942,45 @@ class Schedule:
         window of cells that are live at once (:meth:`contract`) is the other
         way of storing it less, and an array is stored one way or the other.
         """
-        text = f"substitute({array!r})"
-        recipe = ("substitute", (array,), {})
+        text = f"substitute({handle!r})"
+        recipe = ("substitute", (handle,), {})
+        array = self._array(handle, text)
         term = self._term
+        name = self._handles.name
         if array not in dict(term.temporaries) or array in dict(term.checks):
             what = (
-                f"a parameter of {term.name}, which its caller passes and sees"
+                f"a parameter of {name}, which its caller passes and sees"
                 if array in term.param_names
-                else f"the flag of a checked point of {term.name}"
+                else f"the flag of a checked point of {name}"
                 if array in dict(term.checks)
-                else f"no array of {term.name}"
+                else f"no array of {name}"
             )
             raise ValueError(
-                f"{text}: {array} is {what}, and only an array the program "
+                f"{text}: {handle!r} is {what}, and only an array the program "
                 "makes with Arr.zeros_like or Arr.zeros is its own to store or not"
             )
         if array in self._substituted:
-            raise ValueError(f"{text}: {array} is substituted already")
+            raise ValueError(f"{text}: {handle!r} is substituted already")
         if array in self._windows:
             raise ValueError(
-                f"{text}: {array} is kept in a window, "
+                f"{text}: {handle!r} is kept in a window, "
                 f"{self._windows[array].placement}, and a window is computed once"
             )
         zeros = f"{array}.zeros"
         writers = [stmt for stmt in term.stmts if stmt.assignee.array == array]
         producers = [stmt for stmt in writers if stmt.id != zeros]
         if len(producers) != 1:
-            which = ", ".join(stmt.id for stmt in producers) or "no statement"
+            which = (
+                self._stmts_shown((stmt.id for stmt in producers), "and")
+                if producers
+                else "no statement"
+            )
             raise ValueError(
-                f"{text}: {array} is written by {which}, and a substitution "
+                f"{text}: {handle!r} is written by {which}, and a substitution "
                 "computes the value of the one statement that stores it"
             )
         (producer,) = producers
-        why = _not_pointwise(producer, array, term)
+        why = _not_pointwise(producer, array, term, self._statement_names())
         if why is not None:
             raise ValueError(f"{text}: {why}")
         # The reads of the producer move to the readers, and a window is
@@ -5013,13 +5993,14 @@ class Schedule:
             }
         )
         if windowed:
-            kept = windowed[0]
+            placement = self._windows[windowed[0]].placement
+            kept = self._shown_array(windowed[0])
             raise ValueError(
-                f"{text}: {producer.id} computes {array} from {kept}, which is kept "
-                f"in a window, {self._windows[kept].placement}, so computing "
-                f"{array} where it is read would read {kept} where its slot may "
-                f"hold another cell; keep {kept} in a window or compute {array} "
-                "where it is read, not both"
+                f"{text}: {self._stmts_shown([producer.id])} computes {handle!r} "
+                f"from {kept}, which is kept in a window, {placement}, so "
+                f"computing {handle!r} where it is read would read {kept} where "
+                f"its slot may hold another cell; keep {kept} in a window or "
+                f"compute {handle!r} where it is read, not both"
             )
         readers = [
             stmt
@@ -5031,7 +6012,9 @@ class Schedule:
             )
         ]
         if not readers:
-            raise ValueError(f"{text}: nothing in {term.name} reads {array}")
+            raise ValueError(
+                f"{text}: nothing in {self._handles.name} reads {handle!r}"
+            )
         # The dependences carried over are those of what the producer reads,
         # at the instances that read the array; a statement an earlier
         # substitution took out reads nothing, and an array it computes is
@@ -5051,22 +6034,29 @@ class Schedule:
         )
         if taken or through:
             how = (
-                f"{taken[0]} reads {array} and runs no more"
+                f"{self._stmts_shown(taken[:1])} reads {handle!r} and runs no more"
                 if taken
-                else f"{producer.id} reads {through[0]}, which is computed where "
-                "it is read"
+                else f"{self._stmts_shown([producer.id])} reads "
+                f"{self._shown_array(through[0])}, which is computed where it is "
+                "read"
             )
             raise ValueError(
                 f"{text}: {how}, after an earlier substitution; a substitution "
                 "through two arrays is not done, so substitute only one of them"
             )
 
-        fact = self._definedness_fact([producer], readers, array, text, recipe)
+        # the zeros no read sees were dropped where the schedule was made, on
+        # the fact a substitution asks, which it rests on as it stands
+        unseen = self._unseen.get(array)
+        fact = unseen or self._definedness_fact(
+            [producer], readers, array, text, recipe
+        )
         if fact.status.value != "decided":
             raise IllegalCast(
                 fact.provenance["reason"],
                 witness=fact.provenance.get("witness"),
                 fact=fact,
+                instances=self._witnessed(fact.provenance.get("witness")),
             )
         gone = {stmt.id for stmt in writers}
         staged = self._clone()
@@ -5114,7 +6104,8 @@ class Schedule:
         staged._flow_note = (
             f"those of {term.name} with {array} computed where it is read: the "
             f"dependences of {', '.join(sorted(gone))} dropped, and those of "
-            f"{producer.id}'s reads carried over to the reads of {array}"
+            f"{self._stmt_shown(producer.id)}'s reads carried over to the reads "
+            f"of {array}"
         )
         staged._reindex = self._reindex.intersect_domain(staged._origin)
         staged._instances = staged._reindex.range().coalesce()
@@ -5128,7 +6119,11 @@ class Schedule:
         draft = staged._draft()
         if draft.kernel is not None:
             ids = self._lowering.insn_ids
-            removed = [ids[stmt.id] for stmt in writers if stmt.id == zeros]
+            removed = [
+                ids[stmt.id]
+                for stmt in writers
+                if stmt.id == zeros and zeros not in self._gone
+            ]
             kernel, reason = _substituted_kernel(
                 draft.kernel,
                 array,
@@ -5144,7 +6139,7 @@ class Schedule:
             draft,
             text,
             recipe,
-            leading=(fact,),
+            leading=() if unseen is not None else (fact,),
             gone=frozenset(gone),
             substituted=(array, producer, tuple(readers)),
         )
@@ -5156,7 +6151,7 @@ class Schedule:
 
     def contract(
         self,
-        array: str,
+        handle: Any,
         placement: Any = None,
         *,
         registers: bool | None = None,
@@ -5167,8 +6162,10 @@ class Schedule:
         an array, only a few cells of the array are live at any step, and the
         array can be kept in that many::
 
-            fused = Schedule(burgers_rhs).fuse("flux", "divergence", shift=1)
-            fused.contract("f")
+            fused = Schedule(burgers_rhs).fuse(
+                burgers_rhs.flux.j, burgers_rhs.divergence.i, shift=1
+            )
+            fused.contract(burgers_rhs.f)
 
         reads ``f[j]`` and ``f[j - 2]`` at step ``j``, so ``f`` is kept in
         three slots, ``f[j]`` in slot ``j % 3``, and no flux is computed
@@ -5181,7 +6178,7 @@ class Schedule:
         quasi-affine, a sum of the indices times numbers with ``//`` and ``%``
         by a number. An array over a domain is placed by the domain's
         binders: sumpy's L2P, fused box by box, keeps one box's triangle,
-        ``contract("R")`` finds ``lambda i, a, b: (a, b)``.
+        ``contract(l2p.R)`` finds ``lambda box, a, b: (a, b)``.
 
         That is a storage decision and not a reordering, and it is legal when
         three things hold, each asked before anything is rewritten:
@@ -5232,6 +6229,7 @@ class Schedule:
         """
         from loopty import window as win
 
+        array = self._array(handle, f"contract({handle!r})")
         term = self._term
         arrtype = term.array_types.get(array)
         # an array over a domain has the domain's points as its cells, one
@@ -5244,7 +6242,7 @@ class Schedule:
             if domain is None
             else domain.ndim
         )
-        head = f"contract({array!r})"
+        head = f"contract({handle!r})"
         given = (
             None
             if placement is None
@@ -5253,16 +6251,18 @@ class Schedule:
         kwargs: dict[str, Any] = {}
         if registers is not None:
             kwargs["registers"] = registers
-        recipe = ("contract", (array,) if given is None else (array, given), kwargs)
+        recipe = (
+            "contract", (handle,) if given is None else (handle, given), kwargs
+        )
         text = _call_text(recipe)
         if array in self._substituted:
             raise ValueError(
-                f"{text}: {array} is computed where it is read already, so no "
+                f"{text}: {handle!r} is computed where it is read already, so no "
                 "cell of it is kept"
             )
         if array in self._windows:
             raise ValueError(
-                f"{text}: {array} is kept in a window already, "
+                f"{text}: {handle!r} is kept in a window already, "
                 f"{self._windows[array].placement}"
             )
         # A substitution moved its producer's reads to where the array it
@@ -5276,12 +6276,21 @@ class Schedule:
                 for kind, name, _indices, _part in _accesses(through, term)
             ):
                 raise ValueError(
-                    f"{text}: substitute({computed!r}) computes {computed} from "
-                    f"{array} where {computed} is read, so {array} is read there "
-                    f"too, which a window is not taken over; keep {array} in a "
-                    f"window or compute {computed} where it is read, not both"
+                    f"{text}: {record.text} computes {self._shown_array(computed)} "
+                    f"from {handle!r} where it is read, so {handle!r} is read "
+                    f"there too, which a window is not taken over; keep "
+                    f"{handle!r} in a window or compute "
+                    f"{self._shown_array(computed)} where it is read, not both"
                 )
-        producers, readers = win.preconditions(term, array, self._gone, text)
+        producers, readers = win.preconditions(
+            term,
+            array,
+            self._gone,
+            text,
+            self._stmt_shown,
+            shown=self._shown_array,
+            owner=self._handles.name,
+        )
         statements = {
             *(producer.id for producer in producers),
             *(reader.id for reader in readers),
@@ -5301,10 +6310,12 @@ class Schedule:
             }
         )
         if tagged:
-            tags = ", ".join(f"{loop} on {self._tags[loop]}" for loop in tagged)
+            tags = ", ".join(
+                f"{self._shown(loop)} on {self._tags[loop]}" for loop in tagged
+            )
             raise ValueError(
                 f"{text}: {tags} runs its instances in no order, and a window is "
-                f"taken over an order; contract {array} before tagging, and the "
+                f"taken over an order; contract {handle!r} before tagging, and the "
                 "tag is then checked against the window"
             )
         # a loop a sum runs outside of orders none of its instances either
@@ -5319,12 +6330,15 @@ class Schedule:
         )
         if outside:
             raise ValueError(
-                f"{text}: a sum runs outside {', '.join(outside)}, which then "
+                f"{text}: a sum runs outside "
+                f"{', '.join(self._shown(loop) for loop in outside)}, which then "
                 f"orders none of its instances, and a window is taken over an "
-                f"order; contract {array} before prioritize"
+                f"order; contract {handle!r} before prioritize"
             )
 
-        fact = self._definedness_fact(
+        # as for a substitution: the zeros dropped where the schedule was made
+        unseen = self._unseen.get(array)
+        fact = unseen or self._definedness_fact(
             producers, readers, array, text, recipe, losing="a window would not"
         )
         if fact.status.value != "decided":
@@ -5332,6 +6346,7 @@ class Schedule:
                 fact.provenance["reason"],
                 witness=fact.provenance.get("witness"),
                 fact=fact,
+                instances=self._witnessed(fact.provenance.get("witness")),
             )
 
         layout = self._origin_layout
@@ -5359,7 +6374,9 @@ class Schedule:
         before = win.earlier(schedule, self._origin)
         if domain is None:
             sizes = tuple(_plain(size) for size in arrtype.axes)
-            names = _cell_names(producers, rank)
+            names = _cell_names(
+                producers, rank, {*term.sizes, *term.param_names, *self._params}
+            )
         else:
             # the box the domain's binders span, which the array is stored in
             sizes = tuple(_plain(size) for size in domain.box())
@@ -5386,11 +6403,11 @@ class Schedule:
             chosen = smallest()
             if chosen is None:
                 raise ValueError(
-                    f"{text}: every cell of {array} is still to be read while the "
-                    "others are stored, in the order as it stands, so no window "
-                    f"is smaller than {array}; fuse its readers with "
-                    f"{_joined(stmt.id for stmt in producers)} first, so that "
-                    "fewer cells are live at once"
+                    f"{text}: every cell of {handle!r} is still to be read while "
+                    "the others are stored, in the order as it stands, so no "
+                    f"window is smaller than {handle!r}; fuse its readers with "
+                    f"{self._stmts_shown((stmt.id for stmt in producers), 'and')} "
+                    "first, so that fewer cells are live at once"
                 )
         else:
             chosen = given
@@ -5398,7 +6415,7 @@ class Schedule:
 
         extents = win.extents_of(chosen, cell_set(arrtype), sizes, text, array)
         # the step as it reads, the window it keeps the array in written out
-        shown = _call_text(("contract", (array, chosen), kwargs))
+        shown = _call_text(("contract", (handle, chosen), kwargs))
         literal = all(isinstance(extent, int) for extent in extents)
         window = Window(
             array=array,
@@ -5414,8 +6431,8 @@ class Schedule:
         if clobbered is not None and given is not None:
             # the refusal names the fix: the window that keeps every read
             fix = (
-                f"; no window of {array} is smaller than {array} in the order as "
-                "it stands"
+                f"; no window of {handle!r} is smaller than {handle!r} in the "
+                "order as it stands"
             )
             try:
                 other = smallest()
@@ -5431,7 +6448,7 @@ class Schedule:
                     shown,
                 )
                 fix = (
-                    f"; contract({array!r}) finds the smallest window that keeps "
+                    f"; contract({handle!r}) finds the smallest window that keeps "
                     f"every read, {other}"
                     if safe is None
                     else ""
@@ -5440,7 +6457,7 @@ class Schedule:
                 fix = ""
             k, triple, message = clobbered
             clobbered = (k, triple, message + fix)
-        facts = [fact]
+        facts = [] if unseen is not None else [fact]
         no_clobber = self._no_clobber_fact(window, clobbered, shown, recipe, fact)
         facts.append(no_clobber)
         if no_clobber.status.value != "decided":
@@ -5448,6 +6465,7 @@ class Schedule:
                 no_clobber.provenance["reason"],
                 witness=no_clobber.provenance.get("witness"),
                 fact=no_clobber,
+                instances=self._witnessed(no_clobber.provenance.get("witness")),
             )
 
         zeros = f"{array}.zeros"
@@ -5520,7 +6538,7 @@ class Schedule:
                     [ids[producer.id] for producer in producers],
                     chosen,
                     removed,
-                    {insn: stmt_id for stmt_id, insn in ids.items()},
+                    {insn: self._stmt_shown(stmt_id) for stmt_id, insn in ids.items()},
                 )
                 if not isinstance(plan, str) and plan[0] in self._strides:
                     plan = (
@@ -5679,9 +6697,11 @@ class Schedule:
         """The ``no-clobber`` fact of a window, decided or refuted with its triple."""
         from loopty import window as win
 
+        shown = self._shown_array(window.array)
+        kept = win.statement_text(window.array, window.placement, window.extents)
         statement = (
-            f"no read of {window.array} sees its slot overwritten after {text}: "
-            f"{win.statement_text(window.array, window.placement, window.extents)}"
+            f"no read of {shown} sees its slot overwritten after {text}: "
+            f"{shown}{kept[len(window.array):]}"
         )
         if clobbered is None:
             return self._fact(
@@ -5807,7 +6827,10 @@ class Schedule:
             gone=gone,
             window=window,
         )
+        loops = self._moved_loops(draft, text)
+        draft.shown = functools.partial(self._shown, loops=loops)
         other = self._clone()
+        other._loops = loops
         other._kernel = _transformed(
             draft.kernel,
             _with_priority,
@@ -5825,6 +6848,172 @@ class Schedule:
         other._facts = (*earlier, *facts)
         return other
 
+    def _drop_unseen_zeros(self) -> None:
+        """Take out the zeros of each array the program makes that no read sees.
+
+        A program zeroes every array it makes (``C = Arr.zeros(...)``, ``f =
+        Arr.zeros_like(u)``) in a statement of its own, ``C.zeros``, which
+        its code runs too. Where every cell a statement reads, a statement
+        that stores the array stored before the read, in the program's
+        order, no read sees those zeros, and they are work and nothing
+        else: a pass over every cell before the calls run, which a run on C
+        makes twice, since the executor allocates the array as zeros, and
+        which a device makes on every work item unless a tag can place it
+        (:func:`_zeros_tags`, #289). That is the ``definedness`` fact
+        :meth:`substitute` and :meth:`contract` ask before they drop the
+        zeros (:meth:`_definedness_fact`), asked here of the program as it
+        is, before any step; where isl decides it, the zeros are dropped as
+        those steps drop them, and the fact is the schedule's first, placed
+        at the line that makes the array, the same on every target and
+        after any step, which a later window or substitution rests on
+        (#290). Where a read may see the zeros (padding the program means,
+        an update that starts from them) or isl cannot tell, they are kept,
+        and why is kept for a refusal that meets them.
+        """
+        from lanky.ledger import Fact, Status
+
+        term = self._term
+        checks = dict(term.checks)
+        name = self._handles.name
+        gone: set[str] = set()
+        for array, _typ in term.temporaries:
+            zeros = f"{array}.zeros"
+            if array in checks or zeros not in self._layout.coords:
+                continue
+            producers = [
+                stmt
+                for stmt in term.stmts
+                if stmt.assignee.array == array and stmt.id != zeros
+            ]
+            readers = [
+                stmt
+                for stmt in term.stmts
+                if stmt.id != zeros
+                and any(
+                    kind == "read" and touched == array
+                    for kind, touched, _indices, _part in _accesses(stmt, term)
+                )
+            ]
+            if not producers or not readers:
+                continue
+            found = self._defined(producers, readers, array, "they are kept")
+            if found.status != "decided":
+                self._kept[array] = (found.status, found.why)
+                continue
+            shown = self._shown_array(array)
+            stored_by = self._stmts_shown(producer.id for producer in producers)
+            self._unseen[array] = Fact(
+                id=fact_id(
+                    "definedness", **self._definition, detail=f"zeros:{array}"
+                ),
+                kind="definedness",
+                statement=(
+                    f"every cell of {shown} that {name} reads, {stored_by} has "
+                    f"stored by the time it is read, so {name} runs without "
+                    f"the zeros {shown} is made with"
+                ),
+                term=found.term,
+                status=Status.DECIDED,
+                decided_by="isl",
+                provenance={
+                    "oracle": "isl",
+                    "detail": found.detail,
+                    "dependences": self._flow_note,
+                    "array": array,
+                },
+                where=term.stmt(zeros).where or self._kernel_where(),
+                owner=term.name,
+            )
+            gone.add(zeros)
+        if not gone:
+            return
+        layout = self._layout
+        origin = self._origin
+        for stmt_id in sorted(gone):
+            instances = _embed(self._domains[stmt_id], layout.index(stmt_id), layout)
+            instances = instances.align_params(origin.get_space())
+            origin = origin.align_params(instances.get_space()).subtract(instances)
+        self._gone = frozenset(gone)
+        self._origin = origin.coalesce()
+        self._instances = self._origin
+        self._reindex = self._reindex.intersect_domain(self._origin)
+        self._deps = tuple(
+            dep for dep in self._deps if dep.source not in gone and dep.sink not in gone
+        )
+        self._updates = tuple(
+            dep
+            for dep in self._updates
+            if dep.source not in gone and dep.sink not in gone
+        )
+        self._within = tuple(dep for dep in self._within if dep.source not in gone)
+        if self._deps_total is not None:
+            self._deps_total = self._deps_total.intersect_domain(
+                self._origin
+            ).intersect_range(self._origin)
+        arrays = _joined(sorted(self._shown_array(array) for array in self._unseen))
+        self._flow_note = (
+            f"{self._flow_note}; without the zeros of {arrays}, which no read sees"
+        )
+        live = {
+            loop
+            for stmt_id, coords in layout.coords.items()
+            if stmt_id not in gone
+            for loop in coords
+        }
+        self._order = [loop for loop in self._order if loop in live]
+        ids = self._lowering.insn_ids
+        removed = {ids[stmt_id] for stmt_id in gone}
+        entry = self._kernel.default_entrypoint
+        loops = {
+            loop
+            for insn in entry.instructions
+            if insn.id in removed
+            for loop in insn.within_inames
+        }
+        kernel = lp.remove_instructions(self._kernel, removed)
+        kernel = lp.remove_unused_inames(kernel, loops)
+        # and the zeros' nest from the lowering's priorities, which loopy
+        # refuses with a loop it does not know
+        entry = kernel.default_entrypoint
+        left = entry.all_inames()
+        self._kernel = _with_priority(
+            kernel,
+            [
+                [loop for loop in nest if loop in left]
+                for nest in entry.loop_priority
+            ],
+        )
+        self._code = self._kernel
+        self._facts = tuple(self._unseen.values())
+
+    def _kept_zeros_hint(self, array: str, axis: str) -> str:
+        """Why the zeros of ``array`` run on every work item of ``axis``, and the fix.
+
+        The zeros go on the work item that stores each cell where the
+        statements that store the array store it along a loop of their own
+        on the axis (:func:`_zeros_tags`), and they are there at all only
+        where a read may see them (:meth:`_drop_unseen_zeros`), which the
+        hint says, with the read.
+        """
+        shown = self._shown_array(array)
+        placed = (
+            f". The zeros {shown} is made with run on the work item that stores "
+            f"each cell only where every statement that stores {shown} stores "
+            f"it along a loop of its own on {axis}, and none does here"
+        )
+        status, why = self._kept.get(array, ("", ""))
+        if status == "refuted":
+            return (
+                f"{placed}; and {why}: store every cell a call reads in a call "
+                "before it, and they are dropped"
+            )
+        if status == "assumed":
+            return (
+                f"{placed}; and they are kept, since isl cannot tell that no "
+                f"read sees them: {why}"
+            )
+        return placed
+
     def _definedness_fact(
         self,
         producers: Sequence[Stmt],
@@ -5836,17 +7025,22 @@ class Schedule:
     ) -> Any:
         """The ``definedness`` fact of :meth:`substitute`, decided or refuted.
 
-        Two questions about the reads of ``array``: are their cells cells
+        Three questions about the reads of ``array``: are their cells cells
         ``producers`` write (:func:`loopty.flow.definedness`, asked without
-        the zeros, which the substitution takes away), and does any read
-        come before the write of its cell, a dependence from the read to a
-        producer, which would read the zeros. The first refutation is the
-        fact's. A read isl cannot list (an index that is not affine, a guard
-        it cannot state) leaves the first question open: the step is refused
-        all the same, and the fact is ``assumed``, not refuted. ``losing``
-        says what the step does without the zeros, for the message:
-        ``computing it again would not`` (see them) for a substitution, ``a
-        window would not`` for a contraction.
+        the zeros, which the substitution takes away); does any read come
+        before the write of its cell, a dependence from the read to a
+        producer, which would read the zeros; and does a producer read a
+        cell it stores itself, at the same instance, which it reads before
+        it stores it: ``f[i] = 2 * f[i - k]`` at ``k = 0``. The first
+        refutation is the fact's, under what the schedule assumes of the
+        sizes (:meth:`assume`). A read isl cannot list (an index that is not
+        affine, a guard it cannot state) leaves the first question open: the
+        step is refused all the same, and the fact is ``assumed``, not
+        refuted. ``losing`` says what the step does without the zeros, for
+        the message: ``computing it again would not`` (see them) for a
+        substitution, ``a window would not`` for a contraction, and ``they
+        are kept`` where the schedule asks it of the zeros as the program
+        makes them (:meth:`_drop_unseen_zeros`).
 
         Lean states a decided one from loopty's description (:class:`Defined`):
         every read is of a cell a producer stored before it, in the
@@ -5854,27 +7048,51 @@ class Schedule:
         before some store of its cell is refused by the second question, so
         that is the claim isl decided as two questions.
         """
-        from loopty.flow import definedness
-
         # led by the step, so that two steps' facts, a substitution's and a
         # window's after one fusion, read apart in a ledger that lists both
-        stored_by = _joined((producer.id for producer in producers), "or")
+        stored_by = self._stmts_shown(producer.id for producer in producers)
         statement = (
-            f"for {text}, every cell of {array} that {self._term.name} reads, "
-            f"{stored_by} has stored by the time it is read"
+            f"for {text}, every cell of {self._shown_array(array)} that "
+            f"{self._handles.name} reads, {stored_by} has stored by the time it "
+            "is read"
         )
+        found = self._defined(producers, readers, array, losing)
+        return self._fact(
+            "definedness",
+            statement,
+            status=found.status,
+            witness=found.witness,
+            detail=found.detail,
+            step=recipe,
+            reason=f"{text} illegal: {found.why}" if found.why else "",
+            about=array,
+            term=found.term,
+        )
+
+    def _defined(
+        self,
+        producers: Sequence[Stmt],
+        readers: Sequence[Stmt],
+        array: str,
+        losing: str,
+    ) -> _Definedness:
+        """The three questions of :meth:`_definedness_fact`, answered."""
+        from loopty.flow import definedness
+
         verdict = definedness(self._term, array, list(producers), readers)
-        message = ""
+        why = ""
         witness: Any = None
         detail = "every read of the array is of a cell the statement stores, after it"
         if verdict.ok is not True:
             witness = verdict.witness
             detail = verdict.detail
-            message = (
-                f"{text} illegal: {verdict.detail}, so the read would see the "
-                f"zeros the array was made with, and {losing}"
+            # the statements by their text and line, as the detail names them
+            said = verdict.detail
+            why = (
+                f"{said}, so the read would see the zeros the array was made "
+                f"with, and {losing}"
                 if verdict.ok is False
-                else f"{text} illegal: {verdict.detail}"
+                else said
             )
         else:
             ids = {producer.id for producer in producers}
@@ -5886,6 +7104,8 @@ class Schedule:
                     and dep.array == array
                     and dep.sink in ids
                     and dep.window is None
+                    # none where the sizes are as assumed
+                    and not dep.relation.is_empty()
                 ),
                 None,
             )
@@ -5893,40 +7113,90 @@ class Schedule:
                 witness = self._pair_in(early.relation)
                 (reader, coords), (writer, stored), params = witness
                 cell = _cell_text(early.source_indices, coords, params)
-                detail = f"{reader} reads {array} before {writer} stores it"
-                reading, storing = self._named((reader, coords), (writer, stored))
-                message = (
-                    f"{text} illegal: {reading} reads {array}[{cell}] before "
-                    f"{storing} stores it"
-                    f"{self._sizes_shown(params)}, so the read sees the "
-                    f"zeros the array was made with, and {losing}"
+                detail = (
+                    f"{self._stmt_shown(reader)} reads {array} before "
+                    f"{self._stmt_shown(writer)} stores it"
                 )
-        return self._fact(
-            "definedness",
-            statement,
+                reading, storing = self._named((reader, coords), (writer, stored))
+                why = (
+                    f"{reading} reads {array}[{cell}] before {storing} stores it"
+                    f"{self._sizes_shown(params)}, so the read sees the zeros "
+                    f"the array was made with, and {losing}"
+                )
+            else:
+                own = self._read_before_own_store(producers, readers, array)
+                if own is not None:
+                    witness, indices = own
+                    (reader, coords), _same, params = witness
+                    cell = _cell_text(indices, coords, params)
+                    detail = (
+                        f"{self._stmt_shown(reader)} reads {array} at the cell "
+                        "it stores"
+                    )
+                    (reading,) = self._named((reader, coords))
+                    why = (
+                        f"{reading} reads {array}[{cell}], the cell it stores, "
+                        f"before it stores it{self._sizes_shown(params)}, so "
+                        f"the read sees the zeros the array was made with, and "
+                        f"{losing}"
+                    )
+        return _Definedness(
             status=(
-                "decided"
-                if not message
-                else "assumed"
-                if verdict.ok is None
-                else "refuted"
+                "decided" if not why else "assumed" if verdict.ok is None else "refuted"
             ),
             witness=witness,
             detail=detail,
-            step=recipe,
-            reason=message,
-            about=array,
+            why=why,
             term=(
                 None
                 if verdict.ok is None
                 else Defined(self._term, array, tuple(producers), tuple(readers))
-                if not message
+                if not why
                 else IslOnly(
                     "isl refuted it with a read, which a counterexample of a "
                     "∀∃ claim cannot name for Lean"
                 )
             ),
         )
+
+    def _read_before_own_store(
+        self, producers: Sequence[Stmt], readers: Sequence[Stmt], array: str
+    ) -> tuple[tuple, tuple[Any, ...]] | None:
+        """A producer's read of a cell its own instance stores, and the read's indices.
+
+        One instance reads before it stores, so the read sees what an earlier
+        instance stored there or the zeros, and no dependence pairs it with
+        its own store, since a dependence joins two instances. ``None`` where
+        no producer among ``readers`` reads so; otherwise the instance, as
+        :meth:`_pair_in` names a pair (the instance twice), and the indices
+        of its read.
+        """
+        term = self._term
+        layout = self._origin_layout
+        ids = {producer.id for producer in producers}
+        for stmt in readers:
+            if stmt.id not in ids:
+                continue
+            accesses = [
+                (kind, indices)
+                for kind, name, indices, _part in _accesses(stmt, term)
+                if name == array
+            ]
+            for kind, read in accesses:
+                if kind != "read":
+                    continue
+                for other, stored in accesses:
+                    if other != "write" or len(stored) != len(read):
+                        continue
+                    pairs = _same_cell(stmt, stmt, read, stored, layout, self._params)
+                    pairs = pairs.intersect(isl.Map.identity(pairs.get_space()))
+                    origin = self._origin.align_params(pairs.get_space())
+                    pairs = pairs.align_params(origin.get_space()).intersect_domain(
+                        origin
+                    )
+                    if not pairs.is_empty():
+                        return self._pair_in(pairs), read
+        return None
 
     def _computed_from_inputs(self, array: str) -> bool:
         """Whether ``array``, computed where it is read, reads only what nothing writes.
@@ -6065,14 +7335,16 @@ class Schedule:
                                 )
         return (*kept, *carried), tuple(within)
 
-    def assume(self, condition: str) -> Schedule:
+    def assume(self, condition: Any) -> Schedule:
         """Take ``condition`` of the sizes as given: loopy's ``assume``, checked.
 
-        ``condition`` is Python over the kernel's sizes, a comparison or
+        ``condition`` is a condition of the kernel's sizes, written with
+        their handles (:class:`loopty.handles.Condition`): a comparison or
         several joined with ``&``, each side an affine expression with ``//``
-        and ``%`` by a number: ``"n % 4 == 0"``, ``"n >= 8"``, or
-        ``"(e - s) % 4 == 0"`` for PyOP2's ``exists zz: end = 4 zz + start``.
-        It is not a cast, since no instance moves. Three things follow:
+        and ``%`` by a number, ``assume(mass_action.nc % 4 == 0)``,
+        ``assume(k.n >= 8)``, or ``assume((k.e - k.s) % 4 == 0)`` for PyOP2's
+        ``exists zz: end = 4 zz + start``. It is not a cast, since no
+        instance moves. Three things follow:
 
         - loopy is told (``lp.assume``), so a loop split by a factor that
           divides its extent needs no remainder, and code generation may use
@@ -6086,18 +7358,33 @@ class Schedule:
           sizes of the call are read off its arrays and checked against it
           first, and a call that breaks it is refused, naming the sizes.
 
-        A condition that names what is not a size of the kernel, or that is
-        not affine, is refused with a ``ValueError``.
+        A condition that is not affine is refused with a ``ValueError``, and
+        a string, which named the sizes before they had handles, with a
+        ``TypeError`` that writes it with them.
         """
         from lanky.ledger import Fact, Status
         from pymbolic import parse
 
-        try:
-            expr = parse(condition)
-        except Exception as exc:  # noqa: BLE001 - said in the user's words
-            raise ValueError(f"assume({condition!r}) is not Python: {exc}") from exc
+        if isinstance(condition, str):
+            raise TypeError(self._condition_wanted(condition))
+        if not isinstance(condition, Condition):
+            raise TypeError(
+                f"assume() takes a condition of the sizes, written with their "
+                f"handles, such as {self._a_condition()}, not "
+                f"{type(condition).__name__} {condition!r}"
+            )
+        root = condition.root
+        if root is not self._source and _term_of(root) is not self._term:
+            raise ValueError(
+                f"assume({condition!r}) is a condition of the sizes of "
+                f"{getattr(root, '__name__', None) or _term_of(root).name}, and "
+                f"this schedule is of {self._handles.name}"
+            )
+        shown = repr(condition)
+        written = condition.text
+        expr = parse(written)
         sizes = set(self._term.sizes) | set(self._params)
-        text = _assumption_text(expr, sizes, condition)
+        text = _assumption_text(expr, sizes, shown)
         names = sorted(sizes & set(re.findall(r"[A-Za-z_][A-Za-z_0-9]*", text)))
         assumed = isl.Set(f"[{', '.join(names)}] -> {{ : {text} }}")
         other = self._clone()
@@ -6127,17 +7414,17 @@ class Schedule:
         fact = Fact(
             id=self._fact_id("assumption", (*self._steps, recipe), target=False),
             kind="assumption",
-            statement=f"{condition}, which {self._term.name} is scheduled assuming",
+            statement=f"{shown}, which {self._handles.name} is scheduled assuming",
             term=None,
             status=Status.ASSUMED,
             provenance={
-                "condition": condition,
+                "condition": written,
                 "reason": (
                     "the caller's word, checked against the sizes of every call "
                     "the schedule runs"
                 ),
                 # how a cast that rests on it names it in the ledger's status
-                "label": f"assume({condition!r})",
+                "label": f"assume({shown})",
             },
             where=_called_at() or self._kernel_where(),
             owner=self._term.name,
@@ -6147,39 +7434,78 @@ class Schedule:
         other._facts = (*self._facts, fact)
         other._steps = (*self._steps, recipe)
         other._steps_at = (*self._steps_at, _called_at())
-        other._history = (*self._history, f"assume({condition!r})")
+        other._history = (*self._history, f"assume({shown})")
         return other
+
+    def _condition_wanted(self, condition: str) -> str:
+        """Why a string is refused by :meth:`assume`, with it written in handles."""
+        from pymbolic import parse
+        from pymbolic.mapper.substitutor import substitute
+
+        example = self._a_condition()
+        try:
+            expr = parse(condition)
+            names = {
+                var.name
+                for var in _variables(expr)
+                if var.name in self._term.sizes
+            }
+            rewritten = substitute(
+                expr,
+                {name: prim.Variable(self._handles.size_path(name)) for name in names},
+            )
+            if names:
+                example = str(rewritten).replace(" and ", " & ")
+        except Exception:  # noqa: BLE001 - the example stands
+            pass
+        return (
+            f"assume() takes a condition of the sizes, written with their handles, "
+            f"such as {example}, not the string {condition!r}"
+        )
+
+    def _a_condition(self) -> str:
+        """A condition of this schedule's sizes, to name in a refusal."""
+        sizes = list(self._term.sizes)
+        if not sizes:
+            return f"{self._handles.name}.n >= 1"
+        return f"{self._handles.size_path(sizes[0])} >= 1"
 
     @property
     def assumptions(self) -> tuple[Any, ...]:
         """What :meth:`assume` was told of the sizes, as terms."""
         return self._assumptions
 
-    def realize(self, var: str, tree: bool = True) -> Schedule:
-        """Realize an accumulation, optionally as a reduction tree.
+    def realize(self, handle: Any, tree: bool = True) -> Schedule:
+        """Realize an accumulation, optionally as a reduction tree: ``realize(spmv.y)``.
 
         A tree reassociates, so the result's exactness class drops to
         ``reassoc`` and the fact records it; over an ``exact`` accumulation the
         cast is rejected instead, because ``exact`` is a request for the bits and
-        a tree does not give them.
+        a tree does not give them. The step moves no instance and changes no
+        order, so, as :meth:`atomic`, it records no ``bijective`` or
+        ``monotone`` fact of its own (#203).
         """
+        text = f"realize({handle!r}, tree={tree})"
+        recipe = ("realize", (handle,), {"tree": tree})
+        var = self._array(handle, text)
         exactness = self._exactness_of(var)
         if exactness is None:
-            raise ValueError(f"{var!r} is not accumulated by {self._term.name}")
-        text = f"realize({var!r}, tree={tree})"
+            raise ValueError(
+                f"{text}: {handle!r} is not accumulated by {self._handles.name}"
+            )
         if tree and exactness == "exact":
             message = (
-                f"{text} illegal: the accumulation into {var} is exact, and a "
+                f"{text} illegal: the accumulation into {handle!r} is exact, and a "
                 "reduction tree reassociates it; ask for the accumulation at "
                 "'reassoc' if the bits may change"
             )
             fact = self._fact(
                 "exactness",
-                f"the accumulation into {var} may be reassociated",
+                f"the accumulation into {handle!r} may be reassociated",
                 status="refuted",
                 witness=None,
                 detail=f"the accumulation into {var} is exact",
-                step=("realize", (var,), {"tree": tree}),
+                step=recipe,
                 reason=message,
                 about=var,
             )
@@ -6187,9 +7513,9 @@ class Schedule:
         draft = self._draft()
         if tree:
             draft.reassoc.add(var)
-        return self._commit(draft, text, ("realize", (var,), {"tree": tree}))
+        return self._commit(draft, text, recipe, cast=False)
 
-    def atomic(self, array: str) -> Schedule:
+    def atomic(self, handle: Any) -> Schedule:
         """Make every update of ``array`` atomic, so two may run at the same time.
 
         An update, ``y[cell[c, j]] += v`` (:attr:`loopty.term.Stmt.exactness`),
@@ -6198,7 +7524,8 @@ class Schedule:
         two values: each reads the cell, adds, and stores. So a step that
         leaves two updates of one cell in no order, or puts them on two work
         items, is refused with the pair, read off an example input where the
-        cell is read from an array. After ``atomic("y")`` it is accepted, and
+        cell is read from an array. After ``atomic(mass_action.y)`` it is
+        accepted, and
         the sum is reassociated: the result is compared at ``reassoc`` or
         weaker, as after a reduction tree (:meth:`realize`).
 
@@ -6218,6 +7545,9 @@ class Schedule:
         tree. The step moves no instance, so it records no cast of its own;
         a second ``atomic`` of the same array changes nothing.
         """
+        text = f"atomic({handle!r})"
+        recipe = ("atomic", (handle,), {})
+        array = self._array(handle, text)
         if array in self._atomic:
             return self
         updates = [
@@ -6225,16 +7555,18 @@ class Schedule:
             for stmt in self._term.stmts
             if stmt.assignee.array == array and stmt.exactness is not None
         ]
-        text = f"atomic({array!r})"
+        name = self._handles.name
         if not updates:
             writers = [
                 stmt for stmt in self._term.stmts if stmt.assignee.array == array
             ]
             if not writers:
-                raise ValueError(f"{text}: {self._term.name} does not write {array}")
+                raise ValueError(f"{text}: {name} does not write {handle!r}")
             raise ValueError(
-                f"{text}: {self._term.name} does not update {array}: "
-                + "; ".join(_no_update_text(stmt) for stmt in writers)
+                f"{text}: {name} does not update {handle!r}: "
+                + "; ".join(
+                    _no_update_text(stmt, self._statement_names()) for stmt in writers
+                )
                 + f". An update adds to the cell it writes a value that reads "
                 f"nothing else of {array}, {array}[...] += v, and atomic makes "
                 "two such updates safe to run at the same time"
@@ -6242,17 +7574,17 @@ class Schedule:
         exact = [stmt.id for stmt in updates if not commutes(stmt)]
         if exact:
             message = (
-                f"{text} illegal: the accumulation into {array} is exact, and "
+                f"{text} illegal: the accumulation into {handle!r} is exact, and "
                 "updates that run at the same time are applied in an order the "
                 "source did not write, which reassociates it"
             )
             fact = self._fact(
                 "exactness",
-                f"the accumulation into {array} may be reassociated",
+                f"the accumulation into {handle!r} may be reassociated",
                 status="refuted",
                 witness=None,
                 detail=f"the accumulation into {array} is exact",
-                step=("atomic", (array,), {}),
+                step=recipe,
                 reason=message,
                 about=array,
             )
@@ -6268,7 +7600,7 @@ class Schedule:
             # barrier between two work items that update one cell.
             if len(updates) > 1 and draft.kernel is not None:
                 draft.kernel = self._ordered_by_dependences(draft)
-        return self._commit(draft, text, ("atomic", (array,), {}), cast=False)
+        return self._commit(draft, text, recipe, cast=False)
 
     @property
     def atomics(self) -> frozenset[str]:
@@ -6323,9 +7655,14 @@ class Schedule:
         ``leading`` are facts the step decided before it came here, which go
         before the ones decided here (see :meth:`substitute`). ``cast`` is
         false for a step that moves no instance and changes no order
-        (:meth:`atomic`): it is checked all the same, and its ``bijective``
-        and ``monotone`` facts, which would say nothing, are not recorded.
+        (:meth:`atomic`, :meth:`realize`): it is checked all the same, and its
+        ``bijective`` and ``monotone`` facts, which would say nothing, are not
+        recorded.
         """
+        # the loops each loop of the source is after the step, which the
+        # step's messages and the schedule's after it name loops by
+        loops = self._moved_loops(draft, text)
+        draft.shown = functools.partial(self._shown, loops=loops)
         layout = _Layout(
             stmt_ids=self._layout.stmt_ids, coords=dict(draft.coords)
         )
@@ -6391,7 +7728,12 @@ class Schedule:
             )
         )
         if not verdict.ok:
-            raise IllegalCast(message, witness=verdict.witness, fact=facts[-1])
+            raise IllegalCast(
+                message,
+                witness=verdict.witness,
+                fact=facts[-1],
+                instances=self._witnessed(verdict.witness),
+            )
 
         reindex = self._reindex.apply_range(step)
         instances = step.range()
@@ -6451,15 +7793,20 @@ class Schedule:
             )
         )
         if refused:
-            raise IllegalCast(message, witness=witness, fact=facts[-1])
+            raise IllegalCast(
+                message,
+                witness=witness,
+                fact=facts[-1],
+                instances=self._witnessed(witness),
+            )
         concurrent = self._concurrent_updates(text, schedule, reindex, work, draft)
         if concurrent is not None:
             message, witness, detail, oracle, array = concurrent
             facts.append(
                 self._fact(
                     "disjoint-writes",
-                    f"two updates of {array} that run at the same time after "
-                    f"{text} update distinct cells",
+                    f"two updates of {self._shown_array(array)} that run at the "
+                    f"same time after {text} update distinct cells",
                     status="refuted",
                     witness=witness,
                     detail=detail,
@@ -6470,9 +7817,15 @@ class Schedule:
                     term=IslOnly(UPDATES_ISL_ONLY),
                 )
             )
-            raise IllegalCast(message, witness=witness, fact=facts[-1])
+            raise IllegalCast(
+                message,
+                witness=witness,
+                fact=facts[-1],
+                instances=self._witnessed(witness),
+            )
 
         other = self._clone()
+        other._loops = loops
         other._layout = layout
         other._instances = instances
         other._reindex = reindex
@@ -6498,11 +7851,12 @@ class Schedule:
         other._data_dependent = frozenset(draft.data_dependent)
         earlier = self._buildable_into(other, draft, text, recipe, facts)
         for accumulated in sorted(set(draft.reassoc) - set(self._reassoc)):
+            shown = self._shown_array(accumulated)
             statement = (
-                f"atomic updates of {accumulated} run at the same time after "
+                f"atomic updates of {shown} run at the same time after "
                 f"{text}, so their sum is reassociated and compared at 'reassoc'"
                 if accumulated in draft.concurrent
-                else f"the accumulation into {accumulated} is reassociated by "
+                else f"the accumulation into {shown} is reassociated by "
                 f"{text}, so its result is compared at 'reassoc'"
             )
             facts.append(
@@ -6840,7 +8194,7 @@ class Schedule:
             for stmt_id in dict.fromkeys((source_id, sink_id)):
                 for name in draft.coords.get(stmt_id, ()):
                     tag = draft.tags.get(name, "")
-                    shown = f"{name} ({tag})"
+                    shown = f"{draft.show(name)} ({tag})"
                     if parallel_tag(tag) and shown not in loops:
                         loops.append(shown)
             how = (
@@ -6851,7 +8205,7 @@ class Schedule:
         else:
             assert work is not None
             names = [
-                name
+                draft.show(name)
                 for name in dict.fromkeys(
                     (work.loops[source_id][axis], work.loops[sink_id][axis])
                 )
@@ -6872,9 +8226,10 @@ class Schedule:
         message = (
             f"{text} illegal: {first} and {second} both update {cell}{at}, and "
             f"{how}, so one can overwrite what the other added; make the "
-            f"updates atomic, with atomic({dep.array!r}) before this step{note}"
+            f"updates atomic, with atomic({draft.show_array(dep.array)}) before "
+            f"this step{note}"
         )
-        detail = f"two updates of {dep.array} run at the same time"
+        detail = f"two updates of {draft.show_array(dep.array)} run at the same time"
         return message, witness, detail, oracle, dep.array
 
     def _real_pair(
@@ -7048,8 +8403,36 @@ class Schedule:
         return {stmt.id: stmt for stmt in self._term.stmts}
 
     def _named(self, *instances: tuple[str, dict[str, int]]) -> list[str]:
-        """Instances as a refusal names them (:func:`loopty.source.instances_text`)."""
-        return instances_text(self._statements(), *instances)
+        """Instances as a refusal names them (:func:`loopty.source.instances_text`).
+
+        A statement of a call by the call's path, where two calls of one
+        kernel need telling apart, and an array by its path.
+        """
+        return instances_text(self._statement_names(), *instances)
+
+    def _witnessed(self, witness: Any) -> tuple[str, ...]:
+        """A refusal's witness, its instances as its message names them.
+
+        ``(('S0', {'t': 0, 'i': 8}), ('S0', {'t': 1, 'i': 7}), {'nt': 16})``
+        is ``('u[t + 1, i] = ... (f.py:3) at t=0, i=8', 'the same statement at
+        t=1, i=7')`` (:meth:`_named`); a witness of another shape, a point of
+        isl's, has none.
+        """
+        if not isinstance(witness, tuple) or len(witness) < 2:
+            return ()
+        *instances, sizes = witness
+        if not isinstance(sizes, Mapping) or not all(
+            isinstance(instance, tuple)
+            and len(instance) == 2
+            and isinstance(instance[0], str)
+            and isinstance(instance[1], Mapping)
+            for instance in instances
+        ):
+            return ()
+        try:
+            return tuple(self._named(*instances))
+        except Exception:  # noqa: BLE001 - the witness by its ids still stands
+            return ()
 
     def _name_instance(self, point: Sequence[int]) -> tuple[str, dict[str, int]]:
         """A uniform-space point read back as ``(statement id, coordinates)``."""
@@ -7091,10 +8474,12 @@ class Schedule:
             fix = (
                 "a window keeps the order it was taken in, so take it after this "
                 "step"
-                if step != "tag"
-                else f"{dep.array} is kept in a window over the order this tag drops"
+                if step not in ("tag", "on_groups", "on_items")
+                else f"{self._shown_array(dep.array)} is kept in a window over the "
+                "order this tag drops"
                 if window is None or window.private
-                else f"{dep.array} is kept in a window over the order this tag "
+                else f"{self._shown_array(dep.array)} is kept in a window over the "
+                "order this tag "
                 "drops, one for every work item since its size is not a number "
                 "(in global memory on OpenCL); a window of a number of cells is "
                 "each work item's own"
@@ -7116,23 +8501,34 @@ class Schedule:
         From the example input it was found on, with what the subscript read
         there, when there is one (:meth:`_real_pair`); from isl's pair at the
         sizes otherwise, and then, when the subscript is one isl cannot read,
-        a note for the end of the message that says the pair is isl's.
+        a note for the end of the message that says the pair is isl's. The
+        flag a checked point sets is the check's flag, a name no line of the
+        source wrote.
         """
+        if dep.array in dict(self._term.checks):
+            # the flag a checked point sets, which no line of the source names
+            cell = "the check's flag"
+            if found is not None:
+                return cell, f" on {found.at}{found.where}", ""
+            return cell, self._sizes_shown(params), ""
         if found is not None:
             return found.cell_text, f" on {found.at}{found.where}", ""
         cell = f"{dep.array}[{_cell_text(dep.source_indices, coords, params)}]"
+        if any(flag == dep.array for flag, _message in self._term.checks):
+            # a checked point's flag, one cell no line of the file names
+            cell = self._shown_array(dep.array)
         at = self._sizes_shown(params)
         note = ""
         if _widened(dep):
             why = (
-                f"substitute({dep.through!r}) reads {dep.array} where "
-                f"{dep.through} was read, which no run of an input shows"
+                f"substitute({self._shown_array(dep.through)}) reads {dep.array} "
+                f"where {dep.through} was read, which no run of an input shows"
                 if dep.through
                 else "no example input has two such instances on one cell"
             )
             note = (
-                f". The pair is isl's: the cell {_subscript_text(dep)} is read "
-                f"from an array, which isl cannot follow, and {why}"
+                f". The pair is isl's: the cell {_subscript_text(dep, self._term)} "
+                f"is read from an array, which isl cannot follow, and {why}"
             )
         return cell, at, note
 
@@ -7396,23 +8792,19 @@ class Schedule:
                     f"loop on {axis}, so on every work item of it"
                 )
                 # zeros the tag could not place (see _zeros_tags): why, and
-                # the steps that drop them
+                # why they are there at all (see _drop_unseen_zeros)
                 zeros = _zeros_ids(self._term)
                 for stmt_id in dict.fromkeys(everywhere_ids):
                     if stmt_id in zeros:
-                        array = zeros[stmt_id]
-                        hints.append(
-                            f". The zeros {array} is made with run on the work "
-                            "item that stores each cell only where every "
-                            f"statement that stores {array} stores it along a "
-                            f"loop of its own on {axis}, and none does here; "
-                            f"keep {array} in a window (contract) or compute it "
-                            "where it is read (substitute), which drops them"
-                        )
+                        hints.append(self._kept_zeros_hint(zeros[stmt_id], axis))
             how = "; ".join(parts)
         else:
             one = source_loop == sink_loop
-            loops = source_loop if one else f"{source_loop} and {sink_loop}"
+            loops = (
+                self._shown(source_loop)
+                if one
+                else f"{self._shown(source_loop)} and {self._shown(sink_loop)}"
+            )
             which = (
                 f"work items {first} and {second} of it"
                 if {source_loop, sink_loop} <= work.known and first is not None
@@ -7431,8 +8823,8 @@ class Schedule:
             )
             pair = f"{first} {source_verb} {cell}, {sink_verb} by {second}"
             why = (
-                f"each work item keeps a window of {dep.array} of its own, which "
-                "no other work item sees"
+                f"each work item keeps a window of {self._shown_array(dep.array)} "
+                "of its own, which no other work item sees"
                 if window is not None and window.private
                 else "nothing in a kernel orders two work items through global "
                 "memory"
@@ -7440,8 +8832,9 @@ class Schedule:
         else:
             pair = _slot_pair_text(dep, witness, self._statements())
             why = (
-                f"a window of {dep.array} whose size is not a number is one for "
-                "every work item (in global memory on OpenCL), so its slots are "
+                f"a window of {self._shown_array(dep.array)} whose size is not a "
+                "number is one for every work item (in global memory on OpenCL), "
+                "so its slots are "
                 "shared by them, which nothing orders; a window of a number of "
                 "cells is each work item's own"
             )
@@ -7568,7 +8961,7 @@ def _assumption_text(expr: Any, sizes: set[str], condition: str) -> str:
         )
     if not isinstance(expr, prim.Comparison) or expr.operator == "!=":
         raise ValueError(
-            f"assume({condition!r}): an assumption is a comparison of sizes, "
+            f"assume({condition}): an assumption is a comparison of sizes, "
             "==, <, <=, > or >=, or several joined with &"
         )
     names = {
@@ -7577,7 +8970,7 @@ def _assumption_text(expr: Any, sizes: set[str], condition: str) -> str:
     unknown = sorted(names - sizes)
     if unknown:
         raise ValueError(
-            f"assume({condition!r}): {', '.join(unknown)} is not a size of the "
+            f"assume({condition}): {', '.join(unknown)} is not a size of the "
             "kernel, and an assumption is about its sizes"
         )
     try:
@@ -7585,7 +8978,7 @@ def _assumption_text(expr: Any, sizes: set[str], condition: str) -> str:
         right = expr_text(expr.right, None, None)
     except NonAffine as exc:
         raise ValueError(
-            f"assume({condition!r}): isl states affine expressions of the sizes, "
+            f"assume({condition}): isl states affine expressions of the sizes, "
             "with // and % by a number, and nothing else"
         ) from exc
     operator = "=" if expr.operator == "==" else expr.operator
@@ -7606,15 +8999,15 @@ def _variables(expr: Any) -> list[Any]:
 
 
 def _key(name: str, target: str, steps: Sequence[tuple[str, tuple, dict]]) -> str:
-    """``spmv[c].split('j', 2, inner='j_in', outer='j_out')``: :attr:`Schedule.key`."""
+    """``spmv[c].split(spmv.j, 2)``: :attr:`Schedule.key`."""
     return name + _steps_text(target, steps)
 
 
 def _steps_text(target: str | None, steps: Sequence[tuple[str, tuple, dict]]) -> str:
-    """``[c].split('j', 2, inner='j_in', outer='j_out')``: a key after the name.
+    """``[c].split(spmv.j, 2)``: a key after the name.
 
-    With no target, the steps alone: ``split('j', 2, inner='j_in',
-    outer='j_out')``, which is what a cast's fact is keyed by.
+    With no target, the steps alone, ``split(spmv.j, 2)``, which is what a
+    cast's fact is keyed by. A handle is written as its path.
     """
     calls = [_call_text(step) for step in steps]
     if target is None:
@@ -7659,21 +9052,28 @@ def _sizes_text(
     return f" (at {inner}, {how})"
 
 
-def _no_update_text(stmt: Stmt) -> str:
+def _no_update_text(stmt: Stmt, named: Named) -> str:
     """What a statement that writes an array does instead of updating it.
 
-    ``S0 writes y[cell[c, k]] = y[cell[c, k]] * yl[c, k], which is not
+    ``y[cell[c, k]] = y[cell[c, k]] * yl[c, k] (f.py:12), which is not
     y[cell[c, k]] plus a value that reads nothing else of y``, for
-    :meth:`Schedule.atomic`; the sum of a value that is not an integer into
-    an integer array is named as such (see :func:`loopty.trace.update_exactness`).
+    :meth:`Schedule.atomic`, the statement named as ``named`` names it, with
+    what it writes where its text is shortened (``y[cell[c, k]] = ... (f.py:12)
+    writes y[cell[c, k]] = ...``) or where it has none; the sum of a value
+    that is not an integer into an integer array is named as such (see
+    :func:`loopty.trace.update_exactness`).
     """
     from lanky.terms import render
 
     from loopty.trace import update_operands
 
     array = stmt.assignee.array
-    cell = f"{array}[{', '.join(render(i) for i in stmt.assignee.indices)}]"
-    written = f"{stmt.id} writes {cell} = {render(stmt.expr)}"
+    indices = named.spelled(stmt, *stmt.assignee.indices)
+    (value,) = named.spelled(stmt, stmt.expr)
+    cell = f"{array}[{', '.join(render(i) for i in indices)}]"
+    written = named(stmt.id)
+    if not stmt.text or "..." in stmt.text:
+        written = f"{written} writes {cell} = {render(value)}"
     if stmt.kind != "accumulate":
         return f"{written}, which replaces the cell's value"
     if update_operands(stmt.expr, stmt.assignee, stmt.guard) is not None:
@@ -7707,19 +9107,25 @@ def _at_sizes(relation: isl.Map, sizes: Mapping[str, int]) -> isl.Map:
     return relation
 
 
-def _subscript_text(dep: _Dep) -> str:
+def _subscript_text(dep: _Dep, term: Term | None = None) -> str:
     """``y[cell[c, j]]``: the cell an end of ``dep`` reads from an array, as written.
 
     The source's, unless only the sink's subscript is one isl cannot read
     (:func:`_widened`): ``y[i]`` written and ``y[p[j]]`` read names the read.
+    Its loops as the source spells them, ``i`` where a program named the
+    loop ``i_0`` (:attr:`loopty.term.Stmt.spelled`), when ``term`` is given.
     """
     from lanky.terms import render
 
-    indices = (
-        dep.sink_indices
-        if _unread(dep.sink_indices) and not _unread(dep.source_indices)
-        else dep.source_indices
-    )
+    sink = _unread(dep.sink_indices) and not _unread(dep.source_indices)
+    indices = dep.sink_indices if sink else dep.source_indices
+    if term is not None:
+        try:
+            stmt = term.stmt(dep.sink if sink else dep.source)
+        except KeyError:
+            stmt = None
+        if stmt is not None:
+            indices = as_spelled(stmt, *indices, binders=term.binders)
     return f"{dep.array}[{', '.join(render(i) for i in indices)}]"
 
 
@@ -7841,19 +9247,28 @@ def _slot_index(values: Sequence[Any]) -> str:
     return shown if len(values) == 1 else f"({shown})"
 
 
-def _cell_names(producers: Sequence[Stmt], rank: int) -> tuple[str, ...]:
+def _cell_names(
+    producers: Sequence[Stmt], rank: int, taken: Collection[str] = ()
+) -> tuple[str, ...]:
     """Names for the indices of a cell, as a placement names them.
 
     The loop variables the first producer stores at, ``j`` for ``f[j]``, when
     it stores at its loop variables, each once; ``i0``, ``i1``, ...
     otherwise.
     """
-    indices = producers[0].assignee.indices
+    producer = producers[0]
+    indices = producer.assignee.indices
     names = [
         index.name if isinstance(index, prim.Variable) else None for index in indices
     ]
     if None in names or len(set(names)) != len(names) or len(names) != rank:
         return tuple(f"i{k}" for k in range(rank))
+    # as the source spells them, j where a program named the loop j_0
+    spelled = dict(zip(producer.inames, producer.spelled or producer.inames,
+                       strict=False))
+    shown = [spelled.get(name, name) for name in names if name is not None]
+    if len(set(shown)) == len(shown) and not set(shown) & set(taken):
+        return tuple(shown)
     return tuple(name for name in names if name is not None)
 
 
@@ -7865,7 +9280,9 @@ def _joined(names: Iterable[str], word: str = "and") -> str:
     return f"{', '.join(shown[:-1])} {word} {shown[-1]}"
 
 
-def _not_pointwise(stmt: Stmt, array: str, term: Term) -> str | None:
+def _not_pointwise(
+    stmt: Stmt, array: str, term: Term, named: Named | None = None
+) -> str | None:
     """Why :meth:`Schedule.substitute` cannot compute ``stmt`` where it is read.
 
     ``None`` when it can: an assignment of one cell per instance, at its own
@@ -7875,38 +9292,41 @@ def _not_pointwise(stmt: Stmt, array: str, term: Term) -> str | None:
     expression with the loop variables replaced by ``e``, which is what
     loopy's ``assignment_to_subst`` writes.
     """
+    named = named or statement_names(term)
+    said = named(stmt.id)
     indices = stmt.assignee.indices
     names = [
         index.name if isinstance(index, prim.Variable) else None for index in indices
     ]
     if stmt.kind != "assign":
         return (
-            f"{stmt.id} accumulates into {array}, and a substitution computes a "
+            f"{said} accumulates into {array}, and a substitution computes a "
             "value stored once"
         )
     if None in names or len(set(names)) != len(names) or set(names) != set(stmt.inames):
-        shown = ", ".join(str(index) for index in indices)
+        shown = ", ".join(str(index) for index in named.spelled(stmt, *indices))
+        loops = named.spelled(stmt, *(prim.Variable(name) for name in stmt.inames))
         return (
-            f"{stmt.id} stores {array}[{shown}], and a substitution computes a "
+            f"{said} stores {array}[{shown}], and a substitution computes a "
             "statement that stores one cell per instance, at its own loop "
-            f"variables ({', '.join(stmt.inames)}), each once"
+            f"variables ({', '.join(str(loop) for loop in loops)}), each once"
         )
     if reductions_of(stmt.expr):
         return (
-            f"{stmt.id} stores a sum, which a substitution would compute again "
+            f"{said} stores a sum, which a substitution would compute again "
             "at every read of it; only a pointwise statement is substituted"
         )
     if stmt.unnarrowed:
         conjuncts = ", ".join(conjunct for conjunct, _why in stmt.unnarrowed)
         return (
-            f"{stmt.id} runs under a guard isl cannot state ({conjuncts}), so "
+            f"{said} runs under a guard isl cannot state ({conjuncts}), so "
             "which cells it stores is not known"
         )
     if any(
         kind == "read" and name == array
         for kind, name, _indices, _part in _accesses(stmt, term)
     ):
-        return f"{stmt.id} reads {array} as well as storing it"
+        return f"{said} reads {array} as well as storing it"
     return None
 
 
@@ -8103,41 +9523,6 @@ def _substituted_kernel(
     return kernel, None
 
 
-def _fused_depth(
-    loops: int | None,
-    producer: tuple[str, Sequence[str]],
-    consumer: tuple[str, Sequence[str]],
-    text: str,
-) -> int:
-    """How many outer loops :meth:`Schedule.fuse` fuses.
-
-    Every loop both sides have when ``loops`` is ``None``, and otherwise
-    ``loops``, which has to be a whole number from 1 to that many.
-    ``producer`` and ``consumer`` are each a side's name and the loops all
-    its statements run in, outermost first.
-    """
-    (first, mine), (second, theirs) = producer, consumer
-    most = min(len(mine), len(theirs))
-    if loops is None:
-        return most
-    if isinstance(loops, bool) or not isinstance(loops, int):
-        example = (
-            f" (loops=1 fuses {mine[0]} with {theirs[0]})" if most else ""
-        )
-        raise TypeError(
-            f"{text}: loops is how many of the outer loops to fuse, a whole "
-            f"number counted from the outermost{example}, not {loops!r}"
-        )
-    if not 1 <= loops <= most:
-        plural = "s" if most > 1 else ""
-        raise ValueError(
-            f"{text}: {first} runs in {', '.join(mine)} and {second} in "
-            f"{', '.join(theirs)}, so a fusion takes from 1 to {most} of their "
-            f"outer loop{plural}, not {loops}"
-        )
-    return loops
-
-
 def _shifts(shift: int | tuple[int, ...], depth: int, text: str) -> tuple[int, ...]:
     """The shift of each loop :meth:`Schedule.fuse` fuses, as it was given.
 
@@ -8164,47 +9549,6 @@ def _shifts(shift: int | tuple[int, ...], depth: int, text: str) -> tuple[int, .
             f"shift, outermost first, not {shift!r}"
         )
     return values
-
-
-def _not_loops(term: Term, unknown: Sequence[str], loops: Iterable[str]) -> str:
-    """Say that ``unknown`` names no loop of ``term``, and what its loops are.
-
-    A loop of a kernel the body calls is a loop of the caller once the call
-    is inlined (:mod:`loopty.calls`), renamed where the caller already has
-    the name: ``for n in a.dom`` of ``fill``, called where ``n`` is a size,
-    is ``n_0``, which the message names.
-    """
-    from loopty.trace import reductions_in
-
-    listed = ", ".join(repr(name) for name in unknown)
-    verb = "is not an iname" if len(unknown) == 1 else "are not inames"
-    known = list(dict.fromkeys(loops))
-    message = f"{listed} {verb} of {term.name}"
-    if known:
-        message += f"; its loops are {', '.join(known)}"
-    notes = []
-    statements = {stmt.id: stmt for stmt in term.stmts}
-    for call in term.calls:
-        made: list[str] = []
-        for stmt_id in call.statements:
-            stmt = statements.get(stmt_id)
-            if stmt is None:
-                continue
-            made.extend(stmt.inames)
-            for reduction in reductions_in(stmt.expr):
-                made.extend(reduction.inames)
-        for name in unknown:
-            for loop in dict.fromkeys(made):
-                if loop not in call.inames and re.fullmatch(
-                    rf"{re.escape(name)}_\d+", loop
-                ):
-                    notes.append(
-                        f"{call.callee}'s loop {name}, inlined at {call.where}, is "
-                        f"{loop} here, named apart from a name {term.name} has"
-                    )
-    if notes:
-        message += "; " + "; ".join(dict.fromkeys(notes))
-    return message
 
 
 def _check_factor(factor: int) -> None:
@@ -8582,7 +9926,7 @@ def _first(own: Any, others: frozenset[Any]) -> frozenset[Any]:
     """The predicates ``own`` and ``others``, with ``own`` evaluated first.
 
     loopy joins an instruction's predicates with ``&&`` in no particular
-    order, and a ``when`` guard among them may read an array. At a point of
+    order, and a condition of an ``if`` among them may read an array. At a point of
     the shared loops that is another statement's, this instruction's inverse
     names a loop value it does not have, so each other predicate that could
     fault there, by reading an array, calling a function or dividing by
@@ -8646,7 +9990,7 @@ def _shared_image(
     otherwise, which only over-approximates. Each instruction whose image is
     less than that domain gets it back as a predicate, the gist of its image
     in the domain as loopy writes a condition, as the lowering cuts back a
-    statement a ``when`` narrows; a gist loopy cannot write is refused rather
+    statement an ``if`` narrows; a gist loopy cannot write is refused rather
     than dropped, since the instruction would then run at points it does not
     have.
 

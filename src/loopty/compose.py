@@ -184,6 +184,9 @@ from loopty.table import Table, passed_message
 from loopty.term import (
     Access,
     ArrType,
+    Binder,
+    Callsite,
+    Fiber,
     Hypothesis,
     Reduction,
     Requirement,
@@ -198,6 +201,7 @@ __all__ = [
     "current_recorder",
     "rename_expr",
     "rename_set",
+    "stopped_at",
     "trace_program",
 ]
 
@@ -374,6 +378,14 @@ def _shape_text(typ: Any) -> str:
     if isinstance(typ, ArrType) and typ.domain is not None:
         return f"an array over {typ.domain}"
     return "a dense or ragged array"
+
+
+def _ragged_axes(typ: ArrType) -> str:
+    """Which axes of a dense or ragged type are ragged, in words."""
+    axes = [str(k) for k, ragged in enumerate(typ.ragged) if ragged]
+    if not axes:
+        return "no axis"
+    return f"axis {axes[0]}" if len(axes) == 1 else f"axes {', '.join(axes)}"
 
 
 def _same_domain(first: Any, second: Any) -> bool:
@@ -664,13 +676,15 @@ class ProgramValue:
 
 
 #: How a size of a program's array is named while the term is built: the
-#: array and the axis. No identifier starts with it, so it is no size's name.
+#: array and the indices of the fiber, ``@size:x:`` for ``x.dom.size`` and
+#: ``@size:x:0,2`` for ``x.dom[0][2].size``. No identifier starts with it, so
+#: it is no size's name.
 _SIZE_OF = "@size"
 
 
-def size_of(name: str, axis: int) -> Var:
+def size_of(name: str, index: tuple[int, ...] = ()) -> Var:
     """The name ``x.dom[...].size`` stands for, in a program's body traced."""
-    return Var(f"{_SIZE_OF}:{name}:{axis}")
+    return Var(f"{_SIZE_OF}:{name}:{','.join(str(k) for k in index)}")
 
 
 class _ProgramDom:
@@ -678,8 +692,11 @@ class _ProgramDom:
 
     ``x.dom.size`` is the length of ``x``'s first axis and ``x.dom[0].size``
     of its second, as natively, which the program's term reads off ``x``'s
-    type once a kernel has given it one. Iterating it is a loop of the body's
-    whose trip count is an argument, a host loop, and is refused.
+    type once a kernel has given it one. The fiber's indices are kept with
+    the size: natively ``x.dom[0]`` raises ``IndexError`` where ``x`` has no
+    row 0, and so the compiled program is refused at such sizes (#250, see
+    :class:`loopty.term.Fiber`). Iterating it is a loop of the body's whose
+    trip count is an argument, a host loop, and is refused.
     """
 
     __slots__ = ("prefix", "value")
@@ -691,11 +708,21 @@ class _ProgramDom:
     @property
     def size(self) -> Any:
         """The length of the axis, a size of the program."""
-        return size_of(self.value.name, len(self.prefix))
+        return size_of(self.value.name, self.prefix)
 
     def __getitem__(self, index: Any) -> _ProgramDom:
         if not isinstance(index, int | np.integer) or isinstance(index, bool):
             self.value._refuse("takes a fiber at a value that is no number of")
+        if index < 0:
+            spelled = f"{self.value.name}.dom" + "".join(
+                f"[{k}]" for k in (*self.prefix, int(index))
+            )
+            raise TraceError(
+                f"the body of the program {self.value._recorder.name} takes "
+                f"{spelled}, a fiber at a negative index, which no axis has: "
+                f"natively {spelled} raises IndexError at every size. Index "
+                "a fiber from 0"
+            )
         return _ProgramDom(self.value, (*self.prefix, int(index)))
 
     def __iter__(self) -> Any:
@@ -782,6 +809,8 @@ class _Done:
     program's names, ``types`` its parameters' types and ``arrays`` the
     program array passed for each, ``written`` the program arrays it writes,
     and ``wants`` its requirements on arrays written before it.
+    ``binders`` and ``callsites`` are the callee's loops and calls, in the
+    program's names and inside this call (:class:`loopty.term.Binder`).
     """
 
     label: str
@@ -794,6 +823,8 @@ class _Done:
     arrays: dict[str, str]
     written: set[str]
     wants: list[_Want]
+    binders: tuple[Binder, ...] = ()
+    callsites: tuple[Callsite, ...] = ()
 
 
 class _Recorder:
@@ -999,7 +1030,7 @@ def _made_in(value: Any) -> ProgramValue | None:
 _CALLEE = "@"
 
 #: Why a guard conjunct that reads an array leaves a domain as it is, in the
-#: words :mod:`loopty.trace` uses for a ``when`` of the body.
+#: words :mod:`loopty.trace` uses for an ``if`` of the body.
 _NOT_AFFINE = "reads an array or is not affine"
 
 
@@ -1065,6 +1096,18 @@ def _own_names(term: Term) -> list[str]:
                 if name not in known:
                     add(name)
     return out
+
+
+def _binders(term: Term) -> tuple[Binder, ...]:
+    """A callee's loops: its term's records, or its statements' loops.
+
+    A term written by hand records none (:attr:`loopty.term.Term.binders`),
+    and its loops are then the loops of its statements and of their sums,
+    each named as the term names it.
+    """
+    from loopty.handles import binders_of
+
+    return binders_of(term)
 
 
 def _fin_bound(sort: Any) -> Any:
@@ -1223,6 +1266,8 @@ class _Composer:
         self.inherits: list[tuple[str, str]] = []
         #: How many top-level blocks the statements so far occupy.
         self.blocks = 0
+        #: The fibers the body read sizes off for the arrays it made.
+        self.fibers: list[Fiber] = []
         self.labels: set[str] = set()
         self.calls: dict[str, int] = {}
         #: The constant tables the callees read, by the program's name for
@@ -1404,12 +1449,22 @@ class _Composer:
                     f"that names {found}, which is no size of its arrays; write "
                     "x.dom.size for the length of an array x"
                 )
-            _tag, array, axis = found.split(":")
-            exprs[found] = self.axis_size(array, int(axis), made)
+            _tag, array, fixed = found.split(":")
+            index = tuple(int(k) for k in fixed.split(",") if k)
+            exprs[found] = self.axis_size(array, index, made)
         return self.resolve(_tidy(rename_expr(value, {}, exprs)))
 
-    def axis_size(self, array: str, axis: int, made: _Made) -> Any:
-        """The length of axis ``axis`` of the program's array ``array``."""
+    def axis_size(self, array: str, index: tuple[int, ...], made: _Made) -> Any:
+        """The length of the axis after the fiber at ``index`` of ``array``.
+
+        ``x.dom.size`` is the length of ``x``'s first axis, and
+        ``x.dom[0].size`` of its second, where ``x`` has a row 0. A fiber
+        at an index past an axis of a numeric length is refused here, as it
+        is natively at every size; one past an axis whose length is a size
+        is a :class:`~loopty.term.Fiber` of the term, which the compiled
+        run checks (:func:`loopty.contract.made_fibers`).
+        """
+        axis = len(index)
         typ = self.types.get(array)
         if not isinstance(typ, ArrType):
             raise TraceError(
@@ -1436,6 +1491,26 @@ class _Composer:
                     else "is ragged: its length is a row's"
                 )
             )
+        if index:
+            fiber = Fiber(
+                made=made.value.name,
+                where=made.where,
+                array=array,
+                index=index,
+                extents=typ.axes[:axis],
+            )
+            for position, (k, extent) in enumerate(
+                zip(index, fiber.extents, strict=True)
+            ):
+                if isinstance(extent, int | np.integer) and k >= extent:
+                    raise TraceError(
+                        f"{self.program} makes {made.value.name} at "
+                        f"{made.where} with {fiber.spelled}.size, and axis "
+                        f"{position} of {array} has {int(extent)} cells as "
+                        f"{self.origin[array]}, so {fiber.spelled} is no fiber "
+                        "of it: natively it raises IndexError at every size"
+                    )
+            self.fibers.append(fiber)
         return typ.axes[axis]
 
     # {{{ one call
@@ -1474,6 +1549,9 @@ class _Composer:
         exprs: dict[str, Any] = {}
         arrays: dict[str, str] = {}
         literals: list[tuple[str, Any]] = []
+        # What the callee's contract lets share storage: two array parameters
+        # it only reads, dot(x, x) (#221).
+        written = {stmt.assignee.array for stmt in term.stmts}
         for param, typ in term.params:
             value = call.bound[param]
             mine = isinstance(value, ProgramValue) and value._recorder is self.recorder
@@ -1491,12 +1569,16 @@ class _Composer:
                     )
                 if value.name in arrays.values():
                     other = next(p for p, v in arrays.items() if v == value.name)
-                    self.refuse(
-                        call,
-                        f"it is given {value.name} as both {other} and {param}, "
-                        "and two array parameters of a kernel may not share "
-                        "storage",
-                    )
+                    writes = [p for p in (other, param) if p in written]
+                    if writes:
+                        self.refuse(
+                            call,
+                            f"it is given {value.name} as both {other} and "
+                            f"{param}, and it writes {' and '.join(writes)}: two "
+                            "array parameters of a kernel may not share storage "
+                            "where it writes either, which its contract checks "
+                            "at every call",
+                        )
                 self.claim(value.name, "array", call, param)
                 arrays[param] = value.name
                 names[param] = value.name
@@ -1599,6 +1681,13 @@ class _Composer:
                     text=stmt.text,
                     spelled=stmt.spelled or stmt.inames,
                     unrolled=stmt.unrolled,
+                    path=tuple(
+                        (
+                            rename_expr(condition, names, exprs),
+                            rename_set(points, names, exprs),
+                        )
+                        for condition, points in stmt.path
+                    ),
                 )
             )
         self.blocks += top
@@ -1607,6 +1696,29 @@ class _Composer:
                 stmt.assignee.array, f"{kernel.__name__} at {call.where}"
             )
             self.last_writer[stmt.assignee.array] = f"{kernel.__name__} at {call.where}"
+        # The callee's loops and calls, in the program's names and inside
+        # this call, for the handles a schedule names them by
+        # (loopty.handles); a loop no statement runs in has no name here.
+        binders = tuple(
+            dataclasses.replace(
+                binder, name=names[binder.name], scope=(label, *binder.scope)
+            )
+            for binder in _binders(term)
+            if binder.name in names
+        )
+        callsites = (
+            Callsite((label,), kernel.__name__, call.where, tuple(arrays.items())),
+            *(
+                dataclasses.replace(
+                    site,
+                    labels=(label, *site.labels),
+                    arrays=tuple(
+                        (param, names.get(array, array)) for param, array in site.arrays
+                    ),
+                )
+                for site in term.callsites
+            ),
+        )
         return _Done(
             label=label,
             kernel=kernel,
@@ -1618,6 +1730,8 @@ class _Composer:
             arrays=dict(arrays),
             written={stmt.assignee.array for stmt in stmts},
             wants=wants,
+            binders=binders,
+            callsites=callsites,
         )
 
     def claim(self, name: str, kind: str, call: _Call, param: str) -> None:
@@ -1807,9 +1921,14 @@ class _Composer:
                     )
                 )
                 self.read_through.add(name)
+        # One array given for two parameters the call only reads (#221) owes
+        # its check once: both declare it alike (same_shape, settle_type).
+        once: dict[tuple[str, str, str, str], _Want] = {}
+        for want in wants:
+            once.setdefault((want.kind, want.array, want.owner, want.counts), want)
         # A layout is checked before an element read through it, which the
         # check of the element reads its cells through.
-        return sorted(wants, key=lambda want: want.kind != "layout")
+        return sorted(once.values(), key=lambda want: want.kind != "layout")
 
     def settle_type(self, name: str, typ: Any, call: _Call, param: str) -> None:
         """Give ``name`` its type, or check the type it already has."""
@@ -1877,6 +1996,7 @@ class _Composer:
             for param, typ in term.params
             if isinstance(typ, ArrType)
         }
+        fresh = {name for name in arrays.values() if name not in self.types}
         sizes = [name for name in term.sizes if name not in params]
         for _, typ in term.params:
             # The bound of a Fin sort names a size too, an element sort's
@@ -1971,15 +2091,93 @@ class _Composer:
             if marks[name] not in bound:
                 bound[marks[name]] = Var(self.new_size(name))
         out = {name: bound[marks[name]] for name in sizes}
+        first: dict[str, str] = {}
         for param, typ in term.params:
             if isinstance(typ, ArrType):
-                self.settle_type(
-                    arrays[param],
-                    _rename_type(typ, names, {**exprs, **out}),
-                    call,
-                    param,
-                )
+                renamed = _rename_type(typ, names, {**exprs, **out})
+                given = first.setdefault(arrays[param], param)
+                if given != param and arrays[param] in fresh:
+                    # The array was typed by an earlier parameter of this
+                    # call, against which no equation was written.
+                    self.same_shape(call, given, param, arrays[param], renamed)
+                self.settle_type(arrays[param], renamed, call, param)
         return out
+
+    def same_shape(
+        self, call: _Call, first: str, param: str, name: str, typ: ArrType
+    ) -> None:
+        """Make two parameters of one call that are given one array agree on it.
+
+        A kernel that only reads two array parameters may be given one array
+        for both, ``dot(u, u)`` (#221), and natively both are its shape:
+        ``a: Arr[Fin[n], Real]`` and ``b: Arr[Fin[m], Real]`` given ``u`` make
+        ``n`` and ``m`` its length. So the second parameter's axes, binder
+        bounds and ``Fin`` element bound are equated with the first's, which
+        typed the array, eliminating a size where one stands alone, and two
+        that cannot be shown to agree are refused.
+        """
+        from loopty.domain import Union
+
+        known = _rename_type(self.types[name], {}, self.resolved)
+        mine = _rename_type(typ, {}, self.resolved)
+        refused = f"it is given {name} for both {first} and {param}"
+        pairs: list[tuple[Any, Any]] = []
+        if mine.domain is not None or known.domain is not None:
+            if (
+                mine.domain is None
+                or known.domain is None
+                or type(mine.domain) is not type(known.domain)
+                or mine.domain.ndim != known.domain.ndim
+                or (
+                    isinstance(mine.domain, Union)
+                    and len(mine.domain.pieces) != len(known.domain.pieces)
+                )
+            ):
+                self.refuse(
+                    call,
+                    f"{refused}, which it declares {_shape_text(known)} and "
+                    f"{_shape_text(mine)}; the two are not one domain",
+                )
+            pieces = (
+                list(zip(mine.domain.pieces, known.domain.pieces, strict=True))
+                if isinstance(mine.domain, Union)
+                else [(mine.domain, known.domain)]
+            )
+            for one, other in pieces:
+                renamed = dict(zip(one.names, other.names, strict=True))
+                pairs.extend(
+                    (rename_expr(bound, renamed, {}), theirs)
+                    for (_a, bound), (_b, theirs) in zip(
+                        one.binders, other.binders, strict=True
+                    )
+                )
+        else:
+            if len(mine.axes) != len(known.axes):
+                self.refuse(
+                    call,
+                    f"{refused}, which it declares of {len(known.axes)} and "
+                    f"{len(mine.axes)} axes: one array has one shape",
+                )
+            if mine.ragged != known.ragged:
+                self.refuse(
+                    call,
+                    f"{refused}, which it declares ragged at {_ragged_axes(known)} "
+                    f"and at {_ragged_axes(mine)}: one array has one shape",
+                )
+            pairs.extend(zip(mine.axes, known.axes, strict=True))
+        bounds = _fin_bound(mine.dtype), _fin_bound(known.dtype)
+        if bounds[0] is not None and bounds[1] is not None:
+            pairs.append(bounds)
+        for left, right in pairs:
+            left, right = self.resolve(left), self.resolve(right)
+            if _same(left, right) or self.equate(left, right):
+                continue
+            self.refuse(
+                call,
+                f"{refused}, which it declares {_shown(right)} and "
+                f"{_shown(left)} long where one array has one length, and "
+                "nothing says the two agree",
+            )
 
     def domain_equations(
         self,
@@ -2331,7 +2529,26 @@ class _Composer:
             requirements=tuple(requirements),
             scopes=tuple(scopes),
             deferred_offsets=tuple(self.deferred),
+            fibers=tuple(
+                dataclasses.replace(
+                    fiber,
+                    extents=tuple(self.resolve(extent) for extent in fiber.extents),
+                )
+                for fiber in self.fibers
+            ),
             tables=tuple(self.tables.items()),
+            binders=tuple(
+                binder
+                for slot in self.slots
+                if isinstance(slot, _Done)
+                for binder in slot.binders
+            ),
+            callsites=tuple(
+                site
+                for slot in self.slots
+                if isinstance(slot, _Done)
+                for site in slot.callsites
+            ),
         )
 
     def postcondition(self) -> Any:
@@ -3054,12 +3271,18 @@ class _Composer:
         oks = [Comparison(Subscript(Var(flag), 0), "==", 0) for flag in flags]
         parts = [*oks, *([stmt.guard] if stmt.guard is not None else [])]
         guard = parts[0] if len(parts) == 1 else LogicalAnd(tuple(parts))
+        loops = stmt.loop_domain if stmt.loop_domain is not None else stmt.domain
         return dataclasses.replace(
             stmt,
             guard=guard,
             unnarrowed=(
                 *((render(ok), _NOT_AFFINE) for ok in oks),
                 *stmt.unnarrowed,
+            ),
+            # A flag is read at every point of the loops, before the
+            # statement's own conditions are asked (Stmt.path).
+            path=(
+                ((*((ok, loops) for ok in oks), *stmt.path)) if stmt.path else ()
             ),
         )
 
@@ -3140,7 +3363,57 @@ class _Composer:
                 if stmt.loop_domain is None
                 else rename_set(stmt.loop_domain, {}, exprs)
             ),
+            path=tuple(
+                (rename_expr(condition, {}, exprs), rename_set(points, {}, exprs))
+                for condition, points in stmt.path
+            ),
         )
+
+
+# }}}
+
+
+# {{{ a program stopped at a call
+
+
+def stopped_at(term: Term, statement: str) -> tuple[Term, str]:
+    """``term``, stopped where it reaches the call ``statement`` is in.
+
+    A program's call whose loop arithmetic the native run refuses, after a
+    checked point, is refused only once the run shows that the point passed
+    (:func:`loopty.refusal.refuse_where_native_does`), and natively the
+    program stops in that call, with what the calls before it wrote (#176).
+    This is the program with one parameter more, a one-cell flag, which
+    guards the call's statements and every one after it, as a checked
+    point's flag guards those after the point (:meth:`_Composer.guarded`):
+    run with the flag set, it runs the calls before and stops there, its
+    checked points before the call included. Returns the term and the
+    flag's name.
+    """
+    scope = next((s for s in term.scopes if statement in s.statements), None)
+    ids = set(scope.statements) if scope is not None else {statement}
+    start = min(stmt.order[0] for stmt in term.stmts if stmt.id in ids)
+    taken = {
+        *term.param_names,
+        *term.sizes,
+        *(name for name, _ in term.temporaries),
+        *(name for name, _ in term.tables),
+        *(name for name, _ in term.reflected),
+        *(iname for stmt in term.stmts for iname in stmt.inames),
+    }
+    label = scope.call if scope is not None else term.name
+    flag = re.sub(r"\W", "_", label) + "_refused"
+    while flag in taken:
+        flag = f"{flag}_"
+    stmts = tuple(
+        _Composer.guarded(stmt, [flag]) if stmt.order[0] >= start else stmt
+        for stmt in term.stmts
+    )
+    typ = ArrType(axes=(1,), dtype=Nat, ragged=(False,))
+    return (
+        dataclasses.replace(term, params=(*term.params, (flag, typ)), stmts=stmts),
+        flag,
+    )
 
 
 # }}}

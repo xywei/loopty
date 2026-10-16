@@ -28,12 +28,11 @@ Run this file three ways.
 ``loopty run examples/stencil_skew.py``
     Compiles the skewed and tiled schedule and compares it with the native run.
 
-The guard is a ``when`` block and not an ``if``. A Python ``if`` on a value the
-kernel computes cannot be traced, because tracing would have to choose a branch;
-``when`` records the condition, narrows the statement's isl domain by it, and
-under plain ``python`` masks the writes of the block instead of skipping them.
-Sizes come from the data on both paths: ``steps.size`` is an ``int`` on a real
-array and a term while tracing, so the interior condition is written once.
+The interior is a plain ``if``. The trace runs the body down both of its
+branches and records the statement under its condition, which narrows the
+statement's isl domain: that is what puts ``u[t + 1, i]`` in bounds. Sizes
+come from the data on both paths: ``steps.size`` is an ``int`` on a real array
+and a term while tracing, so the interior condition is written once.
 """
 
 from __future__ import annotations
@@ -41,7 +40,7 @@ from __future__ import annotations
 import numpy as np
 from lanky.prelude import Real
 
-from loopty import Arr, Fin, Schedule, kernel, when
+from loopty import Arr, Fin, IllegalCast, Schedule, kernel
 
 #: Sixteen time levels over sixteen points. Large enough that a tile of eight by
 #: eight is a real tiling with four tiles and a boundary between them, small
@@ -58,7 +57,7 @@ def jacobi(u: Arr[Fin[nt], Fin[nx], Real]):
     for t in steps:
         row = u.dom[t]
         for i in row:
-            with when((t + 1 < steps.size) & (i > 0) & (i + 1 < row.size)):
+            if t + 1 < steps.size and i > 0 and i + 1 < row.size:
                 u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2
 
 
@@ -92,20 +91,20 @@ def reference(u: np.ndarray) -> np.ndarray:
     return out
 
 
-def rejected_tiling() -> tuple[str, tuple]:
-    """Ask for the illegal tiling and return the message and the witness.
+def rejected_tiling() -> IllegalCast:
+    """Ask for the illegal tiling and return its refusal, which names the pair.
 
     The schedule the cast was asked of is untouched by the rejection, which is
     why this can be called from a demo, a test, and a docstring without leaving
-    anything half-transformed behind.
+    anything half-transformed behind. ``str()`` of the refusal is its message,
+    ``witness`` isl's pair by the statements' ids, and ``instances`` the pair
+    as the message names it.
     """
-    from loopty.schedule import IllegalCast
-
     schedule = Schedule(jacobi, target="c", sizes={"nt": NT, "nx": NX})
     try:
-        schedule.tile("t", "i", 8, 8)
+        schedule.tile(jacobi.t, jacobi.i, 8, 8)
     except IllegalCast as refused:
-        return str(refused), refused.witness
+        return refused
     raise AssertionError("the rectangular tiling of a Jacobi stencil is illegal")
 
 
@@ -113,8 +112,8 @@ def skewed() -> Schedule:
     """The legal schedule: skew the space axis by time, then tile."""
     return (
         Schedule(jacobi, target="c", sizes={"nt": NT, "nx": NX})
-        .skew("i", by="t")
-        .tile("t", "i", 8, 8)
+        .skew(jacobi.i, by=jacobi.t)
+        .tile(jacobi.t, jacobi.i, 8, 8)
     )
 
 
@@ -140,17 +139,19 @@ def main() -> int:
     print(f"native, the {NT} by {NX} array (first six levels around the spike):")
     print(np.array2string(u.numpy()[:6, middle], precision=3, suppress_small=True))
 
-    message, witness = rejected_tiling()
-    (source_id, source), (sink_id, sink), params = witness
+    refused = rejected_tiling()
+    first, second = refused.instances
+    *_, sizes = refused.witness
+    at = ", ".join(f"{name}={value}" for name, value in sizes.items())
     print()
-    print("Schedule(jacobi).tile('t', 'i', 8, 8) ->")
-    print(f"  IllegalCast: {message}")
-    print(f"  witness: {source_id}{source} runs before {sink_id}{sink} at {params}")
+    print("Schedule(jacobi).tile(jacobi.t, jacobi.i, 8, 8) ->")
+    print(f"  IllegalCast: {refused}")
+    print(f"  witness: {first} runs before {second}, where {at}")
 
     schedule = skewed()
     print()
     print(f"accepted: {schedule!r}")
-    print(f"  loop nest: {' '.join(schedule.order)}")
+    print(f"  loop nest: {' '.join(schedule.nest)}")
     for fact in schedule.facts():
         print(f"  {fact.status.value:8} {fact.decided_by or '-':4} {fact.statement}")
 

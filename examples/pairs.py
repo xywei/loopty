@@ -27,7 +27,7 @@ it would be refused.
 
 *One type, two layouts.* ``Schedule(pairs)`` keeps ``f`` in the box of its
 binders, ``n x n`` cells of which the triangle uses fewer than half, at the
-affine address loopy computes itself. ``Schedule(pairs).pack("f")`` keeps the
+affine address loopy computes itself. ``Schedule(pairs).pack(pairs.f)`` keeps the
 triangle's cells and no others, row after row, and reads ``f[i, j]`` as
 ``f[off_f[i] + j]`` through a table of row starts the executor computes from
 the domain. Neither needs an index array, and the facts are the same for both,
@@ -71,11 +71,10 @@ def pairs(
     e: Arr[Fin[n], Real],
 ):
     """The interaction of every pair, then every particle's share of them."""
-    for i in f.dom:
-        for j in f.dom[i]:
-            dx = x[i] - x[j]
-            dy = y[i] - y[j]
-            f[i, j] = q[i] * q[j] / (1.0 + dx * dx + dy * dy)
+    for i, j in f.dom:
+        dx = x[i] - x[j]
+        dy = y[i] - y[j]
+        f[i, j] = q[i] * q[j] / (1.0 + dx * dx + dy * dy)
     for p in e.dom:
         e[p] = reduce_sum(f[p, j] for j in f.dom[p]) + reduce_sum(
             f[k, p] for k in e.dom if k > p
@@ -109,7 +108,7 @@ def dense(data: dict) -> np.ndarray:
 
 #: The triangle in the box of its binders, and the triangle packed.
 boxed = Schedule(pairs, target="c").example(**scene())
-packed = Schedule(pairs, target="c").pack("f").example(**scene(storage="packed"))
+packed = Schedule(pairs, target="c").pack(pairs.f).example(**scene(storage="packed"))
 
 
 def example_inputs() -> dict:

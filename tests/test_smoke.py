@@ -10,7 +10,7 @@ from loopty import cli
 
 
 def test_version() -> None:
-    assert loopty.__version__ == "0.2.0"
+    assert loopty.__version__ == "0.3.0"
 
 
 def test_top_level_names_are_re_exported() -> None:
@@ -84,7 +84,7 @@ def test_importing_loopty_imports_neither_loopy_nor_islpy() -> None:
 def test_a_kernel_module_does_not_import_loopy() -> None:
     # What a file of kernels imports; loopy is for lowering, and a native run
     # never lowers. islpy comes with the tracer.
-    code = "from loopty import Arr, Fin, kernel, reduce_sum, when"
+    code = "from loopty import Arr, Fin, kernel, reduce_sum"
     assert "loopy" not in heavy_modules_after(code)
 
 

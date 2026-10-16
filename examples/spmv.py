@@ -41,10 +41,12 @@ installed.
 
 *The schedule is a cast.* Each step is checked by isl before it is applied:
 the reindexing must be a bijection on statement instances and the new order
-must run every dependence forward in time. Splitting the row's entries and
-summing the pieces separately is a reassociation, so ``realize("y", tree=True)``
-lowers the accumulation to ``reassoc`` and the differential comparison widens
-its tolerance accordingly.
+must run every dependence forward in time. A step names the loops and arrays
+it acts on by their handles, ``spmv.j`` for the sum over a row's entries and
+``spmv.y`` for the product. Splitting the row's entries and summing the pieces
+separately is a reassociation, so ``realize(spmv.y, tree=True)`` lowers the
+accumulation to ``reassoc`` and the differential comparison widens its
+tolerance accordingly.
 
 *Legal is not buildable.* The device schedule the design note names,
 :func:`device_schedule`, passes every cast and is still refused by loopy's code
@@ -190,8 +192,8 @@ def dense(data: dict) -> np.ndarray:
 #: tolerance of the differential comparison.
 rows_split = (
     Schedule(spmv, target="c")
-    .split("j", 2, inner="j_in", outer="j_out")
-    .realize("y", tree=True)
+    .split(spmv.j, 2)
+    .realize(spmv.y, tree=True)
     .example(**example_inputs()["spmv"])
 )
 
@@ -218,10 +220,10 @@ def device_schedule() -> Schedule:
     """
     return (
         Schedule(spmv, target="c")
-        .tag(r="g.0")
-        .split("j", 32, inner="j_in", outer="j_out")
-        .tag(j_in="l.0")
-        .realize("y", tree=True)
+        .on_groups(spmv.r)
+        .split(spmv.j, 32)
+        .on_items(spmv.j.inner)
+        .realize(spmv.y, tree=True)
     )
 
 
@@ -234,7 +236,7 @@ def rows_parallel(target: str = "opencl") -> Schedule:
     function because building it for ``"opencl"`` at import time would make
     ``python examples/spmv.py`` need a device.
     """
-    return Schedule(spmv, target=target).tag(r="g.0")
+    return Schedule(spmv, target=target).on_groups(spmv.r)
 
 
 # }}}

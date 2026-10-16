@@ -77,13 +77,13 @@ with what was passed for each parameter (:class:`~loopty.term.Argument`).
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any, NoReturn
 
 import numpy as np
 import pymbolic.primitives as prim
 from lanky.prelude import FinType, FnType, Refined
-from lanky.terms import SymbolicMixin, Var, current_trace, init_args, render
+from lanky.terms import Var, current_trace, init_args, render
 
 from loopty.compose import _names_in, _plus, _same, _shifted, rename_expr
 from loopty.flow import domain_set
@@ -101,10 +101,11 @@ from loopty.trace import (
     _location,
     _RowView,
     _shown,
+    _unstated,
     constraints_of,
 )
 
-__all__ = ["Guarded", "inline", "takes_a_function"]
+__all__ = ["inline", "takes_a_function"]
 
 #: How deep calls inside calls are inlined before the nest is refused as one
 #: that would not end (see :meth:`_Inlining.refuse_recursion`).
@@ -127,6 +128,11 @@ def _function_sort(sort: Any) -> bool:
     """Whether ``sort`` is a function sort, ``Fn[A, B]``, refined or not."""
     base = sort.base if isinstance(sort, Refined) else sort
     return isinstance(base, FnType)
+
+
+#: A call's points under a guard: the domain, the loop nest before the guard
+#: narrowed it (or ``None``), and the conjuncts isl does not state.
+_Points = tuple[Any, Any, tuple[tuple[str, str], ...]]
 
 
 class _Refused(Exception):
@@ -173,7 +179,8 @@ class _Inlining:
             self.refuse(f"the body of {self.callee} cannot be traced: {exc}")
         declared = kernel.arg_types
         label = tracer.call_label(self.callee)
-        inames, domain, loop_domain, unnarrowed = self.points()
+        inames, points = self.points()
+        domain, loop_domain, unnarrowed = points(tracer.guard())
         unknown = self.unseen_binders()
         values: dict[str, Any] = {}
         proxies: dict[str, Any] = {}
@@ -238,13 +245,7 @@ class _Inlining:
                 "it; a kernel that returns its value declares the sort after ->"
             )
         post = self.postcondition(term, proxies, values)
-        if term.result is not None and tracer.guards:
-            # Natively a call under a false guard is not made, and its value
-            # there is 0: the value outside the when block is that.
-            spelled = ", ".join(argument.spelled for argument in arguments.values())
-            value = Guarded(tracer.guard(), value, 0)
-            tracer.guarded[id(value)] = (value, f"{self.callee}({spelled})")
-        tracer.calls.append(
+        tracer.note_call(
             Call(
                 callee=self.callee,
                 definition=kernel.definition,
@@ -260,7 +261,9 @@ class _Inlining:
                 loop_domain=loop_domain,
                 unnarrowed=unnarrowed,
                 unknown=unknown,
-            )
+                within=tuple(label for label, _key in tracer.inlining),
+            ),
+            points,
         )
         return value
 
@@ -355,15 +358,17 @@ class _Inlining:
 
     # {{{ where the call is made
 
-    def points(self) -> tuple[tuple[str, ...], Any, Any, tuple[tuple[str, str], ...]]:
+    def points(self) -> tuple[tuple[str, ...], Callable[[Any], _Points]]:
         """The caller's loops and binders around the call, and the points of them.
 
         The loops of the caller's trace and the binders of the sums the call is
-        made inside (:attr:`loopty.trace.Tracer.open_binders`), with the guards
-        of the ``when`` blocks around it and the ``if`` clauses of the sums'
-        generators, where isl can state them; the conjuncts it cannot are
-        returned with the reason, as a statement lists them. Also the points
-        before the guards narrowed them, ``None`` when nothing did.
+        made inside (:attr:`loopty.trace.Tracer.open_binders`), and a function
+        of a guard, the call's path condition, which is known once the runs
+        of the caller's body are joined (:meth:`loopty.trace.Tracer.joined`).
+        It gives the points with the guard and the ``if`` clauses of the sums'
+        generators where isl can state them, the conjuncts it cannot with the
+        reason, as a statement lists them, and the points before the guard and
+        the clauses narrowed them, ``None`` when nothing did.
         """
         tracer = self.tracer
         names = list(tracer.inames)
@@ -397,23 +402,32 @@ class _Inlining:
                         unstated.append((_shown(part), why))
                     else:
                         clauses.append(text)
-        guards = constraints_of(tracer.guard(), tracer, binders)
-        unstated.extend(tracer.unnarrowed())
-        domain = domain_set(
-            names,
-            bounds,
-            constraints=(*loops, *fibers, *clauses, *guards),
-            reflections=tracer.reflections,
-        )
-        loop_domain = None
-        if guards or clauses:
-            loop_domain = domain_set(
-                names,
+        names_now = tuple(names)
+        bound_names = tuple(binders)
+
+        def under(guard: Any) -> _Points:
+            guards = constraints_of(guard, tracer, bound_names)
+            left = [
+                *unstated,
+                *((_shown(part), why) for part, why in _unstated(guard, tracer)),
+            ]
+            domain = domain_set(
+                names_now,
                 bounds,
-                constraints=(*loops, *fibers),
+                constraints=(*loops, *fibers, *clauses, *guards),
                 reflections=tracer.reflections,
             )
-        return tuple(names), domain, loop_domain, tuple(unstated)
+            loop_domain = None
+            if guards or clauses:
+                loop_domain = domain_set(
+                    names_now,
+                    bounds,
+                    constraints=(*loops, *fibers),
+                    reflections=tracer.reflections,
+                )
+            return domain, loop_domain, tuple(left)
+
+        return names_now, under
 
     def unseen_binders(self) -> str:
         """Why the points of the call cannot be stated, or ``""`` when they can.
@@ -444,7 +458,6 @@ class _Inlining:
         """What the callee's body is given for a scalar or a function parameter."""
         from loopty.contract import integral_sort
 
-        value = unguarded(value, self.tracer, self.where)
         if _function_sort(sort):
             if isinstance(value, prim.ExpressionNode | SymArr | SymDom) or not callable(
                 value
@@ -1125,89 +1138,6 @@ class _Inlining:
     # }}}
 
 
-# {{{ a rule's value under a guard
-
-
-class Guarded(SymbolicMixin, prim.If):
-    """The value of a rule called inside ``with when(...)``.
-
-    Natively a kernel called under a false guard is not made, and a rule's
-    value there is ``0`` (:meth:`loopty.kernel.Kernel.__call__`), which
-    nothing inside the block keeps, since a write there is masked. Traced,
-    the call is inlined wherever the guard holds or not, so its value is
-    this: ``condition`` the guards open at the call, ``then`` the call's
-    value and ``else_`` that ``0``. Inside the block the value is the call's
-    (:func:`unguarded`); a ``with`` block is no scope in Python, though, and
-    a use after it would be the call's value compiled and ``0`` natively
-    where the guard is false, so it is refused.
-    """
-
-
-def unguarded(expr: Any, tracer: Any, where: str) -> Any:
-    """``expr`` with each rule value made in an open ``when`` block as the call's.
-
-    A rule's value made in a block that has closed is refused, naming the
-    call and the fix (:class:`Guarded`).
-    """
-    if tracer is None or not tracer.guarded or not _has_guarded(expr):
-        return expr
-    return _unguarded(expr, tracer, where)
-
-
-def _has_guarded(expr: Any) -> bool:
-    """Whether ``expr`` holds a :class:`Guarded` value anywhere."""
-    if isinstance(expr, Guarded):
-        return True
-    if isinstance(expr, tuple | list):
-        return any(_has_guarded(item) for item in expr)
-    if hasattr(expr, "binders") and isinstance(expr, prim.ExpressionNode):
-        return _has_guarded(expr.body) or _has_guarded(getattr(expr, "guard", None))
-    if isinstance(expr, prim.ExpressionNode):
-        return any(_has_guarded(arg) for arg in init_args(expr))
-    return False
-
-
-def _unguarded(node: Any, tracer: Any, where: str) -> Any:
-    """See :func:`unguarded`."""
-    if isinstance(node, Guarded):
-        if not _open(node.condition, tracer.guards):
-            entry = tracer.guarded.get(id(node))
-            call = entry[1] if entry is not None and entry[0] is node else "a rule"
-            raise TraceError(
-                f"the value of {call}, called inside 'with when("
-                f"{_shown(node.condition)}):', is used at {where}, after that "
-                "block: natively a call under a false guard is not made, and "
-                "its value is 0 there, while the compiled kernel computes the "
-                "call wherever its value is used, so the two runs would part. "
-                "Use the value inside the block, or make the call outside it"
-            )
-        return _unguarded(node.then, tracer, where)
-    if not _has_guarded(node):
-        return node
-    if isinstance(node, tuple | list):
-        return type(node)(_unguarded(item, tracer, where) for item in node)
-    if hasattr(node, "binders") and isinstance(node, prim.ExpressionNode):
-        guard = getattr(node, "guard", None)
-        return type(node)(
-            node.binders,
-            _unguarded(node.body, tracer, where),
-            None if guard is None else _unguarded(guard, tracer, where),
-        )
-    return type(node)(*(_unguarded(arg, tracer, where) for arg in init_args(node)))
-
-
-def _open(condition: Any, guards: list[Any]) -> bool:
-    """Whether the guards ``condition`` conjoins are all open, by identity."""
-    if any(condition is guard for guard in guards):
-        return True
-    return isinstance(condition, prim.LogicalAnd) and all(
-        any(part is guard for guard in guards) for part in condition.children
-    )
-
-
-# }}}
-
-
 # {{{ the conversions an index or a comparison does not need
 
 
@@ -1308,6 +1238,12 @@ def _exact(node: Any, promotion: Any, truth: bool) -> Any:
         return type(node)(tuple(_exact(c, promotion, truth) for c in node.children))
     if isinstance(node, prim.LogicalNot):
         return type(node)(_exact(node.child, promotion, truth))
+    if isinstance(node, prim.If):
+        return type(node)(
+            _exact(node.condition, promotion, True),
+            _exact(node.then, promotion, truth),
+            _exact(node.else_, promotion, truth),
+        )
     if hasattr(node, "binders") and isinstance(node, prim.ExpressionNode):
         guard = getattr(node, "guard", None)
         return type(node)(

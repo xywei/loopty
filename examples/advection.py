@@ -90,8 +90,10 @@ lift fuse on every loop.
 <https://github.com/paranumal/libparanumal/blob/5f96a9a5e7f316ea3c030a6c5c32f1c4aff6a7ab/solvers/advection/okl/advectionVolumeHex3D.okl>`__,
 `advectionSurfaceHex3D.okl
 <https://github.com/paranumal/libparanumal/blob/5f96a9a5e7f316ea3c030a6c5c32f1c4aff6a7ab/solvers/advection/okl/advectionSurfaceHex3D.okl#L27-L80>`__),
-whose flux, the average and half the jump, ``upwind_flux`` writes too;
-grudge one kernel for the whole right-hand side. Each split below is
+whose flux is the average and half the jump, a form with no branch;
+``upwind_flux`` writes grudge's ``where``, a conditional expression, which
+the trace records as one value chosen by ``vn > 0`` and C computes with
+``?:``. grudge runs one kernel for the whole right-hand side. Each split below is
 launches whose facts are decided before they run: libParanumal's, the
 fluxes first, three launches, one, and one from the metric.
 ``benchmarks/advection.py`` times them. libParanumal's surface kernel lifts
@@ -101,6 +103,8 @@ two faces write from two work items.
 """
 
 from __future__ import annotations
+
+from typing import Any
 
 import numpy as np
 from lanky import theorem
@@ -252,16 +256,12 @@ def reference_velocity(
     ``G[3 x + d]`` is grudge's metric term ``J dr_d/dx_x``, as
     ``inverse_surface_metric_derivative_mat(times_area_element=True)`` gives it.
     """
-    for d in V.dom:
-        for e in V.dom[d]:
-            for k in V.dom[d, e]:
-                for j in V.dom[d, e, k]:
-                    for i in V.dom[d, e, k, j]:
-                        V[d, e, k, j, i] = (
-                            G[d, e, k, j, i] * v[0]
-                            + G[3 + d, e, k, j, i] * v[1]
-                            + G[6 + d, e, k, j, i] * v[2]
-                        )
+    for d, e, k, j, i in V.dom:
+        V[d, e, k, j, i] = (
+            G[d, e, k, j, i] * v[0]
+            + G[3 + d, e, k, j, i] * v[1]
+            + G[6 + d, e, k, j, i] * v[2]
+        )
 
 
 @kernel
@@ -272,24 +272,21 @@ def normal_velocity(
     vn: Arr[Fin[ne], Fin[6], Fin[n], Fin[n], Real],
 ):
     """``sJ v.n`` at every face node: the face's area element times ``v.n``."""
-    for e in vn.dom:
-        for f in vn.dom[e]:
-            for a in vn.dom[e, f]:
-                for b in vn.dom[e, f, a]:
-                    vn[e, f, a, b] = sJ[e, f, a, b] * (
-                        normal[0, e, f, a, b] * v[0]
-                        + normal[1, e, f, a, b] * v[1]
-                        + normal[2, e, f, a, b] * v[2]
-                    )
+    for e, f, a, b in vn.dom:
+        vn[e, f, a, b] = sJ[e, f, a, b] * (
+            normal[0, e, f, a, b] * v[0]
+            + normal[1, e, f, a, b] * v[1]
+            + normal[2, e, f, a, b] * v[2]
+        )
 
 
 def upwind_flux(vn, inside, outside):
     """The upwind flux, ``inside * vn`` where ``vn > 0`` and ``outside * vn`` elsewhere.
 
-    Written as libParanumal's surface kernel writes it, the average and half
-    the jump, with no branch.
+    grudge's ``where(v.n > 0, u_inside, u_outside) * v.n``, as Python writes
+    it: one statement, whose value the condition on ``vn`` chooses.
     """
-    return 0.5 * (vn * (inside + outside) + abs(vn) * (inside - outside))
+    return vn * (inside if vn > 0 else outside)
 
 
 @kernel
@@ -302,25 +299,22 @@ def upwind(
     flux: Arr[Fin[ne], Fin[6], Fin[n], Fin[n], Real],
 ):
     """The upwind flux at every face node, from the element and its neighbor."""
-    for e in flux.dom:
-        for f in flux.dom[e]:
-            for a in flux.dom[e, f]:
-                for b in flux.dom[e, f, a]:
-                    flux[e, f, a, b] = upwind_flux(
-                        vn[e, f, a, b],
-                        u[
-                            e,
-                            inside[f, a, b, 0],
-                            inside[f, a, b, 1],
-                            inside[f, a, b, 2],
-                        ],
-                        u[
-                            nbr[e, f],
-                            outside[f, a, b, 0],
-                            outside[f, a, b, 1],
-                            outside[f, a, b, 2],
-                        ],
-                    )
+    for e, f, a, b in flux.dom:
+        flux[e, f, a, b] = upwind_flux(
+            vn[e, f, a, b],
+            u[
+                e,
+                inside[f, a, b, 0],
+                inside[f, a, b, 1],
+                inside[f, a, b, 2],
+            ],
+            u[
+                nbr[e, f],
+                outside[f, a, b, 0],
+                outside[f, a, b, 1],
+                outside[f, a, b, 2],
+            ],
+        )
 
 
 @kernel
@@ -332,24 +326,21 @@ def volume(
     rhs: Arr[Fin[ne], Fin[n], Fin[n], Fin[n], Real],
 ):
     """The weak divergence of ``v u`` over ``J``, ``D = M^-1 S^T`` along each axis."""
-    for e in rhs.dom:
-        for k in rhs.dom[e]:
-            for j in rhs.dom[e, k]:
-                for i in rhs.dom[e, k, j]:
-                    rhs[e, k, j, i] = invJ[e, k, j, i] * (
-                        reduce_sum(
-                            D[i, a] * V[0, e, k, j, a] * u[e, k, j, a]
-                            for a in D.dom[i]
-                        )
-                        + reduce_sum(
-                            D[j, b] * V[1, e, k, b, i] * u[e, k, b, i]
-                            for b in D.dom[j]
-                        )
-                        + reduce_sum(
-                            D[k, c] * V[2, e, c, j, i] * u[e, c, j, i]
-                            for c in D.dom[k]
-                        )
-                    )
+    for e, k, j, i in rhs.dom:
+        rhs[e, k, j, i] = invJ[e, k, j, i] * (
+            reduce_sum(
+                D[i, a] * V[0, e, k, j, a] * u[e, k, j, a]
+                for a in D.dom[i]
+            )
+            + reduce_sum(
+                D[j, b] * V[1, e, k, b, i] * u[e, k, b, i]
+                for b in D.dom[j]
+            )
+            + reduce_sum(
+                D[k, c] * V[2, e, c, j, i] * u[e, c, j, i]
+                for c in D.dom[k]
+            )
+        )
 
 
 @kernel
@@ -360,19 +351,16 @@ def lift(
     rhs: Arr[Fin[ne], Fin[n], Fin[n], Fin[n], Real],
 ):
     """Each face's column times its flux, over ``J``, taken from the volume term."""
-    for e in rhs.dom:
-        for k in rhs.dom[e]:
-            for j in rhs.dom[e, k]:
-                for i in rhs.dom[e, k, j]:
-                    rhs[e, k, j, i] = rhs[e, k, j, i] - invJ[e, k, j, i] * (
-                        # the faces t = -1 and +1, across k; r across i; s across j
-                        L[0, k] * flux[e, 0, j, i]
-                        + L[1, k] * flux[e, 1, j, i]
-                        + L[0, i] * flux[e, 2, k, j]
-                        + L[1, i] * flux[e, 3, k, j]
-                        + L[0, j] * flux[e, 4, k, i]
-                        + L[1, j] * flux[e, 5, k, i]
-                    )
+    for e, k, j, i in rhs.dom:
+        rhs[e, k, j, i] = rhs[e, k, j, i] - invJ[e, k, j, i] * (
+            # the faces t = -1 and +1, across k; r across i; s across j
+            L[0, k] * flux[e, 0, j, i]
+            + L[1, k] * flux[e, 1, j, i]
+            + L[0, i] * flux[e, 2, k, j]
+            + L[1, i] * flux[e, 3, k, j]
+            + L[0, j] * flux[e, 4, k, i]
+            + L[1, j] * flux[e, 5, k, i]
+        )
 
 
 @kernel
@@ -389,17 +377,16 @@ def lift_on_faces(
     """
     for e in flux.dom:
         last = rhs.dom[e].size - 1
-        for a in flux.dom[e, 0]:
-            for b in flux.dom[e, 0, a]:
-                # the faces t = -1 and t = +1, at k = 0 and k = n - 1
-                rhs[e, 0, a, b] -= invJ[e, 0, a, b] * ends[0] * flux[e, 0, a, b]
-                rhs[e, last, a, b] -= invJ[e, last, a, b] * ends[1] * flux[e, 1, a, b]
-                # r = -1 and r = +1, at i = 0 and i = n - 1
-                rhs[e, a, b, 0] -= invJ[e, a, b, 0] * ends[0] * flux[e, 2, a, b]
-                rhs[e, a, b, last] -= invJ[e, a, b, last] * ends[1] * flux[e, 3, a, b]
-                # s = -1 and s = +1, at j = 0 and j = n - 1
-                rhs[e, a, 0, b] -= invJ[e, a, 0, b] * ends[0] * flux[e, 4, a, b]
-                rhs[e, a, last, b] -= invJ[e, a, last, b] * ends[1] * flux[e, 5, a, b]
+        for a, b in flux.dom[e, 0]:
+            # the faces t = -1 and t = +1, at k = 0 and k = n - 1
+            rhs[e, 0, a, b] -= invJ[e, 0, a, b] * ends[0] * flux[e, 0, a, b]
+            rhs[e, last, a, b] -= invJ[e, last, a, b] * ends[1] * flux[e, 1, a, b]
+            # r = -1 and r = +1, at i = 0 and i = n - 1
+            rhs[e, a, b, 0] -= invJ[e, a, b, 0] * ends[0] * flux[e, 2, a, b]
+            rhs[e, a, b, last] -= invJ[e, a, b, last] * ends[1] * flux[e, 3, a, b]
+            # s = -1 and s = +1, at j = 0 and j = n - 1
+            rhs[e, a, 0, b] -= invJ[e, a, 0, b] * ends[0] * flux[e, 4, a, b]
+            rhs[e, a, last, b] -= invJ[e, a, last, b] * ends[1] * flux[e, 5, a, b]
 
 
 @program
@@ -434,14 +421,14 @@ def folded_rhs(u, V, invJ, nbr, inside, outside, vn, D, L, rhs):
 #: each node, on every loop; the fluxes with them on the element.
 fused = (
     Schedule(advection_rhs)
-    .substitute("V")
-    .substitute("vn")
-    .fuse("volume", "lift", loops=4)
-    .fuse("upwind", "volume", loops=1)
+    .substitute(advection_rhs.V)
+    .substitute(advection_rhs.vn)
+    .fuse(advection_rhs.volume.i, advection_rhs.lift.i)
+    .fuse(advection_rhs.upwind.e, advection_rhs.volume.e)
 )
 
 #: The same, with the fluxes kept one element at a time.
-contracted = fused.contract("flux")
+contracted = fused.contract(advection_rhs.flux)
 
 
 @program
@@ -459,25 +446,26 @@ def volume_and_lift(D, V, invJ, u, L, flux, rhs):
     lift(L, invJ, flux, rhs)
 
 
-#: The element a work group, its nodes the work items: ``e, k, j, i``.
-NODES = ("g.0", "l.2", "l.1", "l.0")
+def on_nodes(schedule: Schedule, loops: Any) -> Schedule:
+    """``schedule`` with the element a work group, its nodes the work items.
 
-#: The fluxes' launch: the element a work group, a face's nodes the work
-#: items, its six faces in sequence on each: ``e, f, a, b``.
-FACE_NODES = ("g.0", None, "l.1", "l.0")
-
-
-def on(schedule: Schedule, call: str, axes: tuple) -> Schedule:
-    """``schedule`` with the loops of ``call`` on ``axes``, outermost first.
-
-    A program names each call's loops apart from the others' (the lift's
-    ``e`` is ``e_1`` after the volume's ``e_0``); this reads the names off
-    the statement ``call`` made.
+    ``loops`` is the kernel, or the call of it, whose loops ``e, k, j, i``
+    go on ``g.0, l.2, l.1, l.0``: ``on_nodes(whole, folded_rhs.volume)``
+    puts the volume term's loops there, whatever the program calls them.
     """
-    stmt = next(s for s in schedule.term.stmts if s.id in ("S0", f"{call}.S0"))
     return schedule.tag(
-        **{loop: axis for loop, axis in zip(stmt.inames, axes) if axis is not None}
+        {loops.e: "g.0", loops.k: "l.2", loops.j: "l.1", loops.i: "l.0"}
     )
+
+
+def on_face_nodes(schedule: Schedule, loops: Any) -> Schedule:
+    """The fluxes' launch: the element a work group, a face's nodes the work items.
+
+    ``loops`` is the kernel, or the call, whose loops ``e, f, a, b`` are
+    the element, the face and a face's nodes; the six faces run in sequence
+    on each work item.
+    """
+    return schedule.tag({loops.e: "g.0", loops.a: "l.1", loops.b: "l.0"})
 
 
 def launches(split: str = "one", target: str = "c") -> list[Schedule]:
@@ -496,32 +484,37 @@ def launches(split: str = "one", target: str = "c") -> list[Schedule]:
     """
     if split == "three":
         return [
-            on(Schedule(upwind, target=target), "upwind", FACE_NODES),
-            on(Schedule(volume, target=target), "volume", NODES),
-            on(Schedule(lift, target=target), "lift", NODES),
+            on_face_nodes(Schedule(upwind, target=target), upwind),
+            on_nodes(Schedule(volume, target=target), volume),
+            on_nodes(Schedule(lift, target=target), lift),
         ]
     if split == "volume, surface":
+        second = Schedule(surface, target=target).substitute(surface.flux)
         return [
-            on(Schedule(volume, target=target), "volume", NODES),
-            on(Schedule(surface, target=target).substitute("flux"), "lift", NODES),
+            on_nodes(Schedule(volume, target=target), volume),
+            on_nodes(second, surface.lift),
         ]
     if split == "fluxes, volume":
-        both = Schedule(volume_and_lift, target=target).fuse("volume", "lift", loops=4)
+        both = Schedule(volume_and_lift, target=target).fuse(
+            volume_and_lift.volume.i, volume_and_lift.lift.i
+        )
         return [
-            on(Schedule(upwind, target=target), "upwind", FACE_NODES),
-            on(both, "volume", NODES),
+            on_face_nodes(Schedule(upwind, target=target), upwind),
+            on_nodes(both, volume_and_lift.volume),
         ]
     if split == "one":
-        whole = Schedule(folded_rhs, target=target).substitute("flux")
-        return [on(whole.fuse("volume", "lift", loops=4), "volume", NODES)]
+        whole = Schedule(folded_rhs, target=target).substitute(folded_rhs.flux)
+        fused_nodes = whole.fuse(folded_rhs.volume.i, folded_rhs.lift.i)
+        return [on_nodes(fused_nodes, folded_rhs.volume)]
     if split == "one, from the metric":
         whole = (
             Schedule(advection_rhs, target=target)
-            .substitute("V")
-            .substitute("vn")
-            .substitute("flux")
+            .substitute(advection_rhs.V)
+            .substitute(advection_rhs.vn)
+            .substitute(advection_rhs.flux)
         )
-        return [on(whole.fuse("volume", "lift", loops=4), "volume", NODES)]
+        fused_nodes = whole.fuse(advection_rhs.volume.i, advection_rhs.lift.i)
+        return [on_nodes(fused_nodes, advection_rhs.volume)]
     raise ValueError(f"no split {split!r}")
 
 
@@ -867,14 +860,14 @@ def main() -> int:
 
     # one loop deeper than fused: the fluxes on the loops of the nodes
     sizes = {"n": N, "ne": ELEMENTS**3}
-    on_nodes = (
+    nodes_fused = (
         Schedule(advection_rhs, sizes=sizes)
-        .substitute("V")
-        .substitute("vn")
-        .fuse("volume", "lift", loops=4)
+        .substitute(advection_rhs.V)
+        .substitute(advection_rhs.vn)
+        .fuse(advection_rhs.volume.i, advection_rhs.lift.i)
     )
     try:
-        on_nodes.fuse("upwind", "volume")
+        nodes_fused.fuse(advection_rhs.upwind.b, advection_rhs.volume.i)
     except IllegalCast as exc:
         print(f"refused: {exc}")
     print()
@@ -891,12 +884,13 @@ def main() -> int:
     print()
 
     print("libParanumal's lift onto the face nodes, a face's nodes on the work items:")
-    on_faces = {"e": "g.0", "a": "l.1", "b": "l.0"}
     try:
-        Schedule(lift_on_faces, sizes=sizes).tag(**on_faces)
+        on_face_nodes(Schedule(lift_on_faces, sizes=sizes), lift_on_faces)
     except IllegalCast as exc:
         print(f"  refused: {exc}")
-    atomic = Schedule(lift_on_faces).atomic("rhs").tag(**on_faces)
+    atomic = on_face_nodes(
+        Schedule(lift_on_faces).atomic(lift_on_faces.rhs), lift_on_faces
+    )
     # where Lean is installed it proves each cast, that no dependence joins
     # two work items included
     settled = ("decided", "proved")
@@ -915,8 +909,10 @@ def main() -> int:
                 prove(fact) for fact in schedule.facts() if fact.kind != "buildable"
             ]
             legal = legal and all(fact.status.value in settled for fact in cast)
+            steps = len(schedule.history)
             print(
-                f"  {split}: {schedule.term.name}, {len(schedule.history)} steps: "
+                f"  {split}: {schedule.term.name}, "
+                f"{steps} step{'s' if steps != 1 else ''}: "
                 f"{len(cast)} facts, {_settled(cast)}"
             )
     good = native and inverse and transposed and legal
