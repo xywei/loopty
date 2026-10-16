@@ -568,7 +568,7 @@ transcripts, are in [device-runs.md](device-runs.md) and under
 debugging time, and the local workarounds for them, are in
 [loopy-notes.md](loopy-notes.md).
 
-All eighteen demos, with every console block regenerated mechanically by
+All nineteen demos, with every console block regenerated mechanically by
 `scripts/refresh_example_outputs.py`, are in
 [../examples/README.md](../examples/README.md). The blocks in *this* file come
 from the same script, some of them elided where marked with `...`; run the

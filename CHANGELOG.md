@@ -378,6 +378,11 @@ for box, a, b in R.dom:
   (`its integer k would be s, which is no integer of fill's`); a conclusion
   that rounds; a refuted postcondition; or the exception. A theorem that
   decides a conjunct of the postcondition, or gives a row, has none.
+- `docs/device-runs/device_demos.py` runs spmv's split and realize on the
+  device again. After the agreement row it ran the schedule once more on
+  inputs from `examples/spmv.py`'s `_reset`, which the example has never
+  had, so the case failed with an `AttributeError` after its device run had
+  agreed. It now runs on the same seeded matrix afresh.
 
 ## [0.3.0] - 2026-10-15
 

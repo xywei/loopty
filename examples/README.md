@@ -1,6 +1,6 @@
 # The loopty demos
 
-Eighteen files, each of which runs three ways. Every console block below is a
+Nineteen files, each of which runs three ways. Every console block below is a
 snapshot of real output, not prose about it, and it is produced mechanically:
 
 ```console
