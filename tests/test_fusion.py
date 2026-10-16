@@ -1157,25 +1157,57 @@ def test_a_fusion_past_a_checked_point_is_refused_for_its_flag() -> None:
         assert caught.value.fact.kind == "monotone"
         (source, _), (sink, _), _sizes = caught.value.witness
         assert (source, sink) == (check, "gather.S0")
-        # the check is loopty's, with no source text, and named by its id
-        assert f"{check}[" in str(caught.value)
+        # the check is loopty's, with no source text: it is named by what it
+        # checks and the call it is before, and its flag as the check's
+        message = str(caught.value)
         assert (
-            f"writes {flag}[0], read by y[i] = f[idx[i]] ({where(gather, 'y[i] =')}) "
-            "at i="
-        ) in str(caught.value)
+            "the check of reversed_gather.idx before reversed_gather.gather "
+            f"({where(reversed_gather, ' gather(idx, x, y)')}) at idx["
+        ) in message
+        assert (
+            "writes the check's flag, read by y[i] = f[idx[i]] "
+            f"({where(gather, 'y[i] =')}) at i="
+        ) in message
+        assert check not in message and flag not in message
+        # and the fusion that does run the check in the producer's loop
+        assert message.endswith(
+            "; fuse(reversed_gather.reverse_quiet.i, "
+            "reversed_gather.gather.checks.idx) runs the check in "
+            "reversed_gather.reverse_quiet.i, each cell as it is written"
+        )
 
 
-def test_a_checked_point_has_no_handle_and_the_call_after_it_runs_after() -> None:
-    # A checked point is loopty's, in loops no source wrote, so no handle
-    # names them and no fusion moves them: the producer's loop is fused with
-    # the call that reads what it checked only past the check, which is
-    # refused above. The program, unfused, stops where the native call is
-    # refused.
-    assert "check" not in dir(wrong_gather.number_up)
+def test_a_checked_point_fused_with_the_producer_stays_before_the_reads() -> None:
+    # The check fused into the producer's loop checks each cell as it is
+    # written, and gather still runs after the loop, where the flag is set
+    # or not: the compiled program agrees, and stops where the native call
+    # is refused. The check's loop is gather's, by the parameter it checks.
+    check = reversed_gather.gather.checks.idx
+    assert repr(check) == "reversed_gather.gather.checks.idx"
+    assert check.where == where(reversed_gather, " gather(idx, x, y)")
+    assert list(reversed_gather.gather.checks) == ["idx"]
+    assert Schedule(reversed_gather).nest == (
+        "reversed_gather.reverse_quiet.i",
+        "reversed_gather.gather.checks.idx",
+        "reversed_gather.gather.i",
+    )
+    fused = Schedule(reversed_gather).fuse(reversed_gather.reverse_quiet.i, check)
+    assert fused.history == (
+        "fuse(reversed_gather.reverse_quiet.i, reversed_gather.gather.checks.idx)",
+    )
+    assert statements(fused) == [("bijective", "decided"), ("monotone", "decided")]
+    for size in (1, 2, 5):
+        agrees(reversed_gather, fused, gather_inputs(size))
+    fused = Schedule(wrong_gather).fuse(
+        wrong_gather.number_up.i, wrong_gather.gather.checks.idx
+    )
     with pytest.raises(ValueError, match="is 4"):
         wrong_gather(**gather_inputs(4))
     with pytest.raises(ValueError, match="stops before gather"):
-        LoopyExecutor().run(Schedule(wrong_gather), **gather_inputs(4))
+        LoopyExecutor().run(fused, **gather_inputs(4))
+    # a call with no check has none to name
+    with pytest.raises(AttributeError, match="has no check named idx"):
+        wrong_gather.number_up.checks.idx  # noqa: B018
 
 
 @pytest.mark.parametrize(

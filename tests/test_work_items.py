@@ -199,7 +199,7 @@ def test_rows_whose_dependences_stay_in_their_row_are_unchanged(plain_opencl):
     assert schedule.buildable == (True, "")
     (_, monotone) = schedule.facts()
     assert monotone.statement == (
-        "the order after tag(spmv.r, 'g.0') runs every dependence of spmv "
+        "the order after on_groups(spmv.r) runs every dependence of spmv "
         "forward, within one work item"
     )
 
@@ -802,7 +802,7 @@ def test_sumpys_gpu_schedule_of_l2p_names_only_the_files_loops() -> None:
     assert schedule.target == "opencl"
     assert repr(schedule).endswith(
         ".fuse(l2p.unpack.box, l2p.reconstruct.box, l2p.evaluate.box)"
-        ".tag(l2p.unpack.box, 'g.0')"
+        ".on_groups(l2p.unpack.box)"
     )
     assert set(casts(schedule)) == {"decided"}
     assert schedule.buildable == (True, "")
@@ -814,8 +814,8 @@ def test_sumpys_gpu_schedule_of_l2p_names_only_the_files_loops() -> None:
     fused = {fact.id for fact in l2p.fused.facts()}
     mine = [fact for fact in schedule.facts() if fact.id not in fused]
     assert [fact.statement for fact in mine] == [
-        "tag(l2p.unpack.box, 'g.0') renames the instances of l2p one for one",
-        "the order after tag(l2p.unpack.box, 'g.0') runs every dependence of l2p "
+        "on_groups(l2p.unpack.box) renames the instances of l2p one for one",
+        "the order after on_groups(l2p.unpack.box) runs every dependence of l2p "
         "forward, within one work item",
     ]
 

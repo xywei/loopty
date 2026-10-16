@@ -2019,7 +2019,8 @@ def _refuse_reserved_names(term: Term) -> None:
 
     None of them is renamed the way the kernel is (see :func:`_kernel_name`).
     A caller passes a parameter by name, and may pass a size the same way; a
-    schedule names inames (``split("j", 2)``) and so do the ledger's messages.
+    schedule's loops are the binders' (``split(spmv.j, 2)``), and so are the
+    ledger's messages.
     A rename would break each of those silently, where a refusal says what to
     change. The names loopty generates itself (``off_cnt``, ``nl_cnt_r``, a
     suffixed reduction binder) carry a prefix or a suffix and cannot be a
@@ -2551,9 +2552,10 @@ class _Builder:
         Within one statement a reduction keeps the name the kernel wrote
         whenever the domain under that name is the one it already has, and gets
         a fresh iname when it is not. Keeping the name in the common case
-        matters: ``Schedule.split("j", ...)``, the demos and the messages all
-        name reduction inames as the source does, and renaming unconditionally
-        would rename them all.
+        matters: the generated code and the messages name reduction inames as
+        the source does, and renaming unconditionally would rename them all
+        (a schedule's handle, ``split(spmv.j, ...)``, finds a renamed one
+        through :attr:`Lowering.reduction_inames`).
 
         A nested reduction's domain names its enclosing binders as parameters,
         so when an outer binder is renamed, the parameter follows it: the domain

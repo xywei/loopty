@@ -23,7 +23,11 @@ the ledger, the refusals and the fixes they suggest, and `loopty run`.
 - **Every step takes handles, and a string is a `TypeError`** that writes
   the handle for it, computed from the schedule: `contract('R')` is refused
   with "contract() takes an array handle such as l2p.R, not the string
-  'R'". The step's text is part of a fact's id, so the ids of every
+  'R'". 0.3's other spellings are refused the same way, with the step to
+  write: `tag(i="g.0")` and loopy's `tag("i:g.0")` with `tag(k.i, 'g.0')`,
+  `fuse("unpack", "reconstruct", loops=1)` with `fuse(l2p.unpack.box,
+  l2p.reconstruct.box)`, and `split(k.j, 32, inner="j_in")` with the
+  halves' handles. The step's text is part of a fact's id, so the ids of every
   schedule's facts change; the kernels' and programs' own facts keep
   theirs. The migration, step by step, with `k` a kernel and `p` a program:
 
@@ -44,6 +48,7 @@ the ledger, the refusals and the fixes they suggest, and `loopty run`.
   | `fuse("flux", "divergence", shift=1)` | `fuse(p.flux.j, p.divergence.i, shift=1)`: a loop of each call, not the call |
   | `fuse("unpack", "reconstruct", loops=1).fuse("reconstruct", "evaluate", loops=1)` | `fuse(p.unpack.box, p.reconstruct.box, p.evaluate.box)`: one step for any number of calls |
   | `fuse("along_r", "along_s", loops=2)` | `fuse(k.along_r.a, k.along_s.a)`: the loops are fused from the outermost down to the one named, at the same depth in each call; `loops=` is gone |
+  | `fuse("reverse_quiet", "gather.check.idx")`, a program's checked point by its statement's id | `fuse(p.reverse_quiet.i, p.gather.checks.idx)`: the check's loop is the call's, by the parameter it checks |
   | `substitute("f")` | `substitute(p.f)` |
   | `contract("R")`, `contract("v", lambda e, a, b: b)` | `contract(p.R)`, `contract(k.v, lambda e, a, b: b)` |
   | `realize("y", tree=True)` | `realize(k.y, tree=True)` |
@@ -52,10 +57,6 @@ the ledger, the refusals and the fixes they suggest, and `loopty run`.
   | `assume("nc % 4 == 0")`, `assume("nc >= 1")` | `assume(k.nc % 4 == 0)`, `assume(k.nc >= 1)`: a condition of the sizes' handles, several joined with `&` |
   | `retarget("opencl")`, `example(...)` | unchanged |
 
-- **A fusion with a program's checked point** is not expressible any more:
-  a checked point is no call and has no loop to name. The fusions of
-  calls are, and a program with a checked point between two calls keeps
-  them apart.
 - **A kernel parameter or loop with the name of an attribute of `Kernel` or
   `Program`** (`term`, `facts`, `sizes`, ...) is reached by its long form,
   `k.arrays.term` or `k.loops.sizes`, and its definition warns with
@@ -73,11 +74,15 @@ the ledger, the refusals and the fixes they suggest, and `loopty run`.
   refused with both long forms. A kernel called twice is `p.scale[0]` and
   `p.scale[1]`, and a second `for i` in one body `k.i[1]`; the bare name is
   refused, listing both with their lines. A split's halves are `.outer` and
-  `.inner`. `loopty.scope(term)` gives the same for a term written by hand,
-  and `dir` lists a scope's names.
+  `.inner`. The loop of a program's checked point, which no line binds, is
+  its call's, by the parameter it checks: `p.gather.checks.idx`, which a
+  fusion runs in the loop that writes the array, so that each cell is
+  checked as it is written (#306). `loopty.scope(term)` gives the same for a
+  term written by hand, and `dir` lists a scope's names.
 - **`Schedule.on_groups(loop, axis=0)` and `Schedule.on_items(loop,
-  axis=0)`**, `tag` with `"g.<axis>"` and `"l.<axis>"` in words; `tag`
-  takes a dictionary of handles for several tags in one step.
+  axis=0)`**, `tag` with `"g.<axis>"` and `"l.<axis>"` in words, and printed
+  as they are written, `on_groups(l2p.unpack.box)`; `tag` takes a dictionary
+  of handles for several tags in one step.
 - **`Schedule.loops` and `Schedule.nest`**: the schedule's loops as handles,
   and the loop nest by their paths, `l2p.unpack.box` or `jacobi.t.outer`.
 - **The term records where its names come from** (`loopty.term.Binder`,
@@ -89,11 +94,14 @@ the ledger, the refusals and the fixes they suggest, and `loopty run`.
 - Every printed loop, array and statement of a schedule is its path. The
   zeros a program makes an array with are `the zeros of l2p.R`, with the
   line that makes it, and not `R.zeros[i_1=0]`, a loop the program made for
-  them is `l2p.R.zeros[0]`, by its axis, and a statement of a call is the call,
-  `l2p.reconstruct`, where its id was printed. A refusal's suggestion is a
-  call the person can paste: `fuse(burgers_rhs.flux.j,
-  burgers_rhs.divergence.i, shift=1) runs every dependence between them
-  forward`.
+  them is `l2p.R.zeros[0]`, by its axis, a statement of a call is the call,
+  `l2p.reconstruct`, where its id was printed, and a program's checked
+  point is `the check of p.idx before p.gather`, which sets `the check's
+  flag`. A refusal's suggestion is a call the person can paste:
+  `fuse(burgers_rhs.flux.j, burgers_rhs.divergence.i, shift=1) runs every
+  dependence between them forward`. A schedule the C target cannot build
+  names its loops on hardware axes the same way: `the loop spmv.r on g.0 is
+  on a hardware axis, and the C target has none`.
 - `examples/l2p.py` names its boxes `box` where it named them `i`, and its
   three calls fuse in one step, so `fused` has two cast facts where it had
   four.

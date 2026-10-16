@@ -18,8 +18,9 @@ ways, tried in this order:
 
 1. ``Schedule.example(x=..., y=...)`` records the arrays with the schedule::
 
-       sched = Schedule(spmv).tag(r="g.0").example(off=off, col=col, val=val,
-                                                   x=x, y=y)
+       sched = Schedule(spmv).on_groups(spmv.r).example(
+           off=off, col=col, val=val, x=x, y=y
+       )
 
 2. a module-level ``example_inputs()`` returning a dictionary. Either a flat
    ``{"x": ..., "y": ...}``, used for every object in the file, or one keyed by
@@ -282,8 +283,8 @@ def _native(schedule: Any) -> Any:
     """The Python body of a scheduled kernel, if there is one to compare with.
 
     Through any schedule of a schedule (:func:`_kernel_of`): the body of
-    ``Schedule(Schedule(k)).split("i", 2)`` is ``k``'s, and a run of it is
-    compared with ``k`` as a run of ``Schedule(k).split("i", 2)`` is (#98).
+    ``Schedule(Schedule(k)).split(k.i, 2)`` is ``k``'s, and a run of it is
+    compared with ``k`` as a run of ``Schedule(k).split(k.i, 2)`` is (#98).
     A term scheduled with no kernel behind it has no body, and its run is
     only executed.
     """

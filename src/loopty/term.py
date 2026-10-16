@@ -547,8 +547,8 @@ class Binder:
     (:mod:`loopty.compose`). ``sum`` says that it binds a sum.
 
     A schedule names a loop by a handle (:mod:`loopty.handles`), which is
-    this record seen from the kernel or the program: ``l2p.reconstruct.i``
-    is the binder ``i`` in the scope ``("reconstruct",)`` of ``l2p``.
+    this record seen from the kernel or the program: ``l2p.reconstruct.box``
+    is the binder ``box`` in the scope ``("reconstruct",)`` of ``l2p``.
     """
 
     name: str
