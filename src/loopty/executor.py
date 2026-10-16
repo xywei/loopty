@@ -481,7 +481,10 @@ class LoopyExecutor:
         (:func:`loopty.refusal.refuse_where_native_does`, #153), or, for a
         program's call after a checked point, once the run has shown the
         point passed: where it failed, the point's error is raised, as
-        natively.
+        natively. Such a run is of the program stopped where it reaches the
+        call (:func:`loopty.compose.stopped_at`, #176), so that the caller's
+        arrays hold what the calls before it wrote, as natively, and not what
+        the refused call and the calls after it computed.
         """
         term, kernel, lowering, target_name = _resolve(obj, self.target)
         names = [name for name, _ in term.params]
@@ -501,10 +504,13 @@ class LoopyExecutor:
         )
         if term.temporaries:
             # A program's own array whose length the sizes make negative,
-            # which numpy refuses natively when the program makes it.
-            from loopty.contract import made_extents, resolve_sizes
+            # which numpy refuses natively when the program makes it, or
+            # whose length is read off a fiber the sizes leave out.
+            from loopty.contract import made_extents, made_fibers, resolve_sizes
 
-            made_extents(term.temporaries, resolve_sizes(dict(term.params), supplied))
+            sizes = resolve_sizes(dict(term.params), supplied)
+            made_fibers(term.fibers, sizes)
+            made_extents(term.temporaries, sizes)
         # The differential runs on copies; this run writes in place.
         writeable_outputs(dict(term.params), supplied, lowering.results)
         inherited_storage(term.array_types, term.temporaries_like, supplied)
@@ -513,6 +519,17 @@ class LoopyExecutor:
         from loopty.refusal import naming_the_fix, refuse_where_native_does
 
         refused = refuse_where_native_does(term, supplied)
+        if refused is not None:
+            # A program's call refused after a checked point (#176): natively
+            # the program stops in it, with what the calls before it wrote,
+            # so what runs is the program stopped at the call by a flag of
+            # its own, unscheduled, and its checked points before it.
+            from loopty.compose import stopped_at
+
+            stopped, flag = stopped_at(term, refused.statement)
+            term, kernel, lowering, _target = _resolve(stopped, target_name)
+            supplied[flag] = np.ones(1, dtype=np.int64)
+            kwargs = {**kwargs, flag: supplied[flag]}
         layouts = _declared_layouts(term, lowering, supplied)
         call = _call_arguments(term, lowering, args, kwargs, layouts)
         call, empty = _pad_empty_arrays(call, lowering)
@@ -549,7 +566,7 @@ class LoopyExecutor:
         ):
             # The checked points before the refused call passed, so natively
             # it ran, and stopped where its arithmetic leaves its type, before
-            # any point after it.
+            # any point after it; the compiled program stopped before it.
             raise refused
         if failed:
             # A checked point of a program: the statements after it did not

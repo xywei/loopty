@@ -322,10 +322,13 @@ class RefusedNatively(OverflowError):
     numpy integer whose type does not hold it, and the compiled kernel would
     compute a value in C's type instead (#153). The message names the point
     and the fix. ``checks`` names the flags of a program's checked points the
-    refused statement runs after, empty for one every run reaches.
+    refused statement runs after, empty for one every run reaches, and
+    ``statement`` the refused statement's id, for the executor to stop the
+    program at the call it is in (#176).
     """
 
     checks: frozenset[str] = frozenset()
+    statement: str | None = None
 
 
 #: The operations numpy converts a Python int beside a numpy integer for, into
@@ -384,12 +387,14 @@ def refuse_where_native_does(
     entries say: those are left to the native refusal (#166).
 
     A program's statement after a checked point runs only where the point
-    passed (:meth:`loopty.compose._Builder.guarded`), and natively the call
+    passed (:meth:`loopty.compose._Composer.guarded`), and natively the call
     after a point that fails is refused before it starts, with the point's
     error. So its refusal is returned, not raised, with the flags of the
-    points before it (:attr:`RefusedNatively.checks`), for the executor to
-    raise once the run has shown that those points passed, before anything
-    a later point says; a statement every run reaches is refused here.
+    points before it (:attr:`RefusedNatively.checks`) and the statement
+    (:attr:`RefusedNatively.statement`), for the executor to run the program
+    up to the statement's call and raise it once the run has shown that
+    those points passed, before anything a later point says; a statement
+    every run reaches is refused here.
     """
     from loopty.contract import resolve_sizes
     from loopty.promotion import Promotion
@@ -414,12 +419,14 @@ def refuse_where_native_does(
                 deferred = RefusedNatively(
                     str(refusal).replace(
                         "stops before it starts",
-                        "is refused once it has run, since the program's checked "
-                        "points before the call passed, which only the run shows",
+                        "stops at the call, since the program's checked points "
+                        "before the call passed, which only the run shows, and "
+                        "keeps what the calls before it wrote, as natively",
                         1,
                     )
                 )
                 deferred.checks = before
+                deferred.statement = stmt.id
     return deferred
 
 

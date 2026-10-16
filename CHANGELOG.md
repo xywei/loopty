@@ -125,6 +125,33 @@ the ledger, the refusals and the fixes they suggest, and `loopty run`.
   The refusal of a group axis over a window kept in global memory is asked
   without pyopencl too, on loopy's plain OpenCL target, so that CI sees it,
   and with the refusal's wording since #276 (#299).
+- **A program may pass one array to two parameters a kernel only reads
+  (#221).** `outer_product(u, u, z)` runs natively, since reads do not race,
+  and the program's term was refused when it was built. The term now names
+  `u` once, and the two parameters' sizes are unified, so `a: Arr[Fin[n],
+  Real]` and `b: Arr[Fin[m], Real]` make `n` and `m` the one length of `u`.
+  A kernel that writes either is still refused, now saying which it writes;
+  and what its contract checks of an array an earlier call wrote is checked
+  once, however many parameters it is given for.
+- **A union with sizes of other names (#249).** A kernel over `Fin[m] +
+  Fin[m]` given an array built over `Fin[n] + Fin[n]` read no size off a
+  union natively, so its contract could not tell what `m` is and refused
+  the call, while the program that passes it on composed. Each piece is now
+  solved for its sizes as a `Where` is.
+- **A program's `x.dom[i].size` checks that the fiber exists (#250).** The
+  composer kept the axis and not the index, so `x.dom[99].size`, and
+  `x.dom[0].size` of an `x` with no rows, were read as the length of `x`'s
+  second axis, where natively `x.dom[99]` raises `IndexError`. The term
+  keeps the fiber (`loopty.term.Fiber`), an index out of range at every size
+  is refused when the term is built, and the compiled run is refused at
+  sizes that leave the fiber out, with `IndexError`, as natively.
+- **A refused call after a checked point keeps what ran before it (#176).**
+  The compiled program ran every call, the refused one and those after it
+  included, and wrote back what they computed before it raised the
+  refusal, where natively the program stops inside the refused call. The
+  run is now of the program stopped at that call by a flag of its own
+  (`loopty.compose.stopped_at`), so the caller's arrays hold what the calls
+  before it wrote, as natively.
 
 ## [0.3.0] - 2026-10-15
 

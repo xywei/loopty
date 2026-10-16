@@ -759,12 +759,77 @@ def test_an_array_from_outside_the_program_is_refused() -> None:
 
 
 def test_one_array_for_two_parameters_of_a_call_is_refused() -> None:
+    # flux writes its f, so natively its contract refuses u for both.
     @program
     def aliased(u):
         flux(u, u)
 
-    with pytest.raises(TraceError, match="may not share storage"):
+    with pytest.raises(ValueError, match="share storage"):
+        aliased(Arr.from_numpy(np.ones(3)))
+    with pytest.raises(TraceError, match="it writes f: two array parameters") as no:
         aliased.trace()
+    assert "may not share storage where it writes either" in str(no.value)
+
+
+@kernel
+def outer_product(
+    a: Arr[Fin[n], Real],  # noqa: F821
+    b: Arr[Fin[m], Real],  # noqa: F821
+    z: Arr[Fin[n], Fin[m], Real],  # noqa: F821
+):
+    """``z[i, j] = a[i] b[j]``, which reads ``a`` and ``b`` and writes neither."""
+    for i in z.dom:
+        for j in z.dom[i]:
+            z[i, j] = a[i] * b[j]
+
+
+@kernel
+def sum_counts(
+    c: Arr[Fin[n], Nat],  # noqa: F821
+    d: Arr[Fin[n], Nat],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """``c + d`` as reals: a requirement on each, which one array owes once."""
+    for i in y.dom:
+        y[i] = 1.0 * (c[i] + d[i])
+
+
+def test_one_array_for_two_parameters_a_call_only_reads() -> None:
+    # #221: natively outer_product(u, u, z) runs, since reads do not race,
+    # and the program's term names u once, its n and m the one length of u.
+    @program
+    def gram(u, z):
+        outer_product(u, u, z)
+
+    def make() -> dict:
+        return {"u": Arr.from_numpy(np.arange(1.0, 5.0)), "z": Arr.zeros((4, 4))}
+
+    native = make()
+    gram(**native)
+    u = np.arange(1.0, 5.0)
+    np.testing.assert_allclose(native["z"].numpy(), np.outer(u, u))
+    params = dict(gram.term.params)
+    assert [str(axis) for axis in params["z"].axes] == [str(params["u"].axes[0])] * 2
+    assert len(gram.term.sizes) == 1
+    compiled = make()
+    LoopyExecutor().run(gram, **compiled)
+    np.testing.assert_allclose(compiled["z"].numpy(), np.outer(u, u))
+    fact = LoopyExecutor().differential(gram, Schedule(gram), make())
+    assert fact.status.value == "tested", fact.provenance
+
+    # An array an earlier call wrote owes what the call's contract checks of
+    # it once, however many parameters it is given for.
+    @program
+    def doubled(u, y):
+        c = Arr.zeros_like(u, dtype=np.int64)
+        truncate(u, c)
+        sum_counts(c, c, y)
+
+    wants = [r for r in doubled.term.requirements if r.call == "sum_counts"]
+    assert [(r.param, r.array, r.kind) for r in wants] == [("c", "c", "nat")]
+    counts = {"u": Arr.from_numpy(np.array([1.0, 2.5, 3.0])), "y": Arr.zeros(3)}
+    fact = LoopyExecutor().differential(doubled, Schedule(doubled), counts)
+    assert fact.status.value == "tested", fact.provenance
 
 
 def test_an_array_passed_as_a_scalar_is_refused() -> None:

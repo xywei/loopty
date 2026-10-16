@@ -553,7 +553,10 @@ interface can change in a minor release; the CHANGELOG says when one does.
   a file with its native run, as it does a kernel. A program may also make
   an array of a declared shape, whose sizes it reads off its arguments as it
   does natively, `Arr.zeros(TRIANGLE, n=x.dom.size)` over a domain or
-  `Arr.zeros((x.dom.size, 3))`, and a callee may take an array over a
+  `Arr.zeros((x.dom.size, 3))`, or `Arr.zeros((x.dom[0].size,))` where `x`
+  has a row 0 (the compiled run is refused where it has none, as natively);
+  a call may be given one array for two parameters it only reads,
+  `outer_product(u, u, z)`; and a callee may take an array over a
   `Where`, `Sigma` or union domain, whose sizes are unified across the calls
   and whose points two calls given it have to agree on, compared as isl sets
   (#74); an array the program makes over a domain is stored boxed, and

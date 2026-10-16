@@ -120,6 +120,7 @@ __all__ = [
     "integral_range",
     "integral_sort",
     "made_extents",
+    "made_fibers",
     "native_copy",
     "native_scalar",
     "native_storage",
@@ -399,14 +400,30 @@ def _sizes_from_binders(declared: Any, value: Any, sizes: dict[str, int]) -> Non
     number, and the argument's bound there names no binder: the extent the
     argument's bound has at its sizes. Whether the two then have the same
     points is :func:`domain_arguments`' question.
-    """
-    from lanky.terms import evaluate
 
-    from loopty.domain import Polyhedron
+    A union is solved piece by piece, the first piece declared from the
+    argument's first and so on, as a program unifies the two (#249): an
+    array built over ``Fin[n] + Fin[n]`` at ``n = 3`` fixes the ``m`` of
+    ``Fin[m] + Fin[m]``.
+    """
+    from loopty.domain import Polyhedron, Union
 
     given = value.domain.domain
-    if not isinstance(declared, Polyhedron) or not isinstance(given, Polyhedron):
-        return
+    if isinstance(declared, Union) and isinstance(given, Union):
+        if len(declared.pieces) != len(given.pieces):
+            return
+        for mine, theirs in zip(declared.pieces, given.pieces, strict=True):
+            _sizes_from_piece(mine, theirs, value.sizes, sizes)
+    elif isinstance(declared, Polyhedron) and isinstance(given, Polyhedron):
+        _sizes_from_piece(declared, given, value.sizes, sizes)
+
+
+def _sizes_from_piece(
+    declared: Any, given: Any, at: Mapping[str, int], sizes: dict[str, int]
+) -> None:
+    """:func:`_sizes_from_binders` of one polyhedron, the argument's at ``at``."""
+    from lanky.terms import evaluate
+
     if declared.ndim != given.ndim:
         return
     for (_name, mine), (_other, theirs) in zip(
@@ -418,7 +435,7 @@ def _sizes_from_binders(declared: Any, value: Any, sizes: dict[str, int]) -> Non
             }
             if mentioned & set(given.names):
                 continue
-            extent = int(evaluate(theirs, dict(value.sizes)))
+            extent = int(evaluate(theirs, dict(at)))
         except Exception:  # noqa: BLE001 - a bound that cannot be read fixes nothing
             continue
         if isinstance(mine, prim.Variable):
@@ -572,6 +589,50 @@ def made_extents(
                     "numpy refuses a negative length when the program makes it, "
                     "and so is the compiled run"
                 )
+
+
+def made_fibers(fibers: Iterable[Any], sizes: Mapping[str, int]) -> None:
+    """Refuse sizes at which a fiber a program reads a size off does not exist.
+
+    A program's ``Arr.zeros((x.dom[0].size,))`` makes an array as long as
+    ``x``'s rows, and natively ``x.dom[0]`` raises ``IndexError`` when the
+    program makes it where ``x`` has no row 0 (#250). The compiled program
+    would make it all the same, as long as the second axis, so the run is
+    refused alike, with an :class:`IndexError` naming the array, the fiber
+    and the sizes. ``fibers`` are the term's (:attr:`loopty.term.Term.fibers`);
+    an extent the sizes do not fix is left alone.
+    """
+    from lanky.terms import evaluate, free_variables, render
+
+    for fiber in fibers:
+        for axis, (index, extent) in enumerate(
+            zip(fiber.index, fiber.extents, strict=True)
+        ):
+            free: set[str] = set()
+            value = extent
+            if not isinstance(extent, int | np.integer):
+                try:
+                    free = set(free_variables(extent))
+                    if not free <= set(sizes):
+                        continue
+                    value = evaluate(extent, dict(sizes))
+                except Exception:  # noqa: BLE001 - an extent the sizes do not fix
+                    continue
+            if not isinstance(value, int | np.integer) or index < value:
+                continue
+            at = ", ".join(f"{size} = {sizes[size]}" for size in sorted(free))
+            length = (
+                f"{render(extent)}, which is {int(value)} at {at}"
+                if free
+                else f"{int(value)}"
+            )
+            raise IndexError(
+                f"the program makes {fiber.made} at {fiber.where} with "
+                f"{fiber.spelled}.size, and axis {axis} of {fiber.array} has "
+                f"no index {index}: its length is {length}. Natively "
+                f"{fiber.spelled} raises IndexError when the program makes "
+                f"{fiber.made}, and so does the compiled run"
+            )
 
 
 #: The dtype the lowering stores ``Nat`` and ``Int`` in, and Python's ``int``:
