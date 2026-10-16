@@ -2095,7 +2095,14 @@ class Tracer:
         A call made on paths that do not join into one, the ``else`` of ``if
         a and b:``, is made where the answers all its paths share hold, which
         is wider than where it is made, as a guard isl cannot state leaves a
-        statement's domain.
+        statement's domain, and says so as such a statement does: its paths
+        are a conjunct of its own in ``unnarrowed``, so that nothing takes its
+        points for exact (:func:`loopty.refusal.refuse_where_native_does`).
+
+        A call is one record, whose facts are about the arguments it was
+        passed, so every path that makes it has to pass the same ones. One
+        that a branch passes two values, ``j = i if flag[i] else i + 1``
+        before ``small(j)``, is refused with the fix, a call on each branch.
         """
         rank = {final: place for place, final in enumerate(ranked)}
         labels: dict[str, list[tuple[int, _CallRecord]]] = {}
@@ -2107,11 +2114,20 @@ class Tracer:
             first = records[0][1]
             entries = self._merged(
                 [
-                    _Entry(record.path, None, None, [(number, 0)])
-                    for number, record in records
+                    _Entry(record.path, None, _passed(record.call), [(number, place)])
+                    for place, (number, record) in enumerate(records)
                 ],
                 select=False,
             )
+            for entry in entries[1:]:
+                if not _same(entry.lowered, entries[0].lowered):
+                    raise TraceError(
+                        self._calls_apart_message(
+                            records[entries[0].records[0][1]],
+                            records[entry.records[0][1]],
+                        )
+                    )
+            widened: tuple[tuple[str, str], ...] = ()
             if len(entries) == 1:
                 path = entries[0].path
             else:
@@ -2124,7 +2140,20 @@ class Tracer:
                 path = tuple(
                     answer for answer in entries[0].path if answer[:2] in shared
                 )
+                if all(entry.path for entry in entries):
+                    paths = " or ".join(
+                        f"({self.path_text(entry.path)})" for entry in entries
+                    )
+                    widened = (
+                        (
+                            paths,
+                            "the call is made on paths that do not join into one, "
+                            "and its points are where the answers they share hold, "
+                            "which is wider",
+                        ),
+                    )
             domain, loop_domain, unnarrowed = first.points(self.guard_of(path))
+            unnarrowed = (*unnarrowed, *widened)
             finals = {
                 final_of[(number, int(stmt_id[1:]))]
                 for number, record in records
@@ -2143,7 +2172,61 @@ class Tracer:
             )
         return out
 
+    def _calls_apart_message(
+        self, one: tuple[int, _CallRecord], other: tuple[int, _CallRecord]
+    ) -> str:
+        """Why a call two paths pass different arguments is refused."""
+        (number, mine), (theirs_number, theirs) = one, other
+        call = mine.call
+        param, this, that = next(
+            (
+                (a.param, a.spelled, b.spelled)
+                for a, b in zip(call.arguments, theirs.call.arguments, strict=False)
+                if not _same(_passed_one(a), _passed_one(b))
+            ),
+            ("", "", ""),
+        )
+        mine_answers = self._done[number].answers
+        their_answers = self._done[theirs_number].answers
+        apart = [
+            index
+            for index in sorted({*mine_answers, *their_answers})
+            if mine_answers.get(index) != their_answers.get(index)
+        ]
+        branch = ""
+        if apart:
+            condition, where = self.conditions[apart[0]]
+            branch = f", by the branch on {_shown(condition)!r} at {where}"
+        return (
+            f"the call of {call.callee} at {call.where} is passed {this} for its "
+            f"{param} on one path and {that} on another{branch}. A call's facts, "
+            "and what is checked before it runs, are about the one value each "
+            "argument has, so each path has to make a call of its own: call "
+            f"{call.callee} on each branch, '{call.callee}({this})' on one and "
+            f"'{call.callee}({that})' on the other"
+        )
+
     # }}}
+
+
+def _passed_one(argument: Any) -> tuple[Any, ...]:
+    """What one argument of a call passes, as two records of the call compare it."""
+    index = argument.index
+    return (
+        argument.param,
+        argument.kind,
+        argument.spelled,
+        argument.array,
+        argument.prefix,
+        None if argument.kind == "function" else argument.value,
+        argument.written,
+        None if index is None else (index.array, index.prefix),
+    )
+
+
+def _passed(call: Any) -> tuple[Any, ...]:
+    """What a call passes, every argument, as two records of the call compare it."""
+    return tuple(_passed_one(argument) for argument in call.arguments)
 
 
 @dataclass
