@@ -751,7 +751,9 @@ def test_a_program_runs_without_the_zeros_no_read_sees(plain_opencl):
     with lp_quiet(plain_opencl):
         code = plain_opencl.generate_code_v2(split.kernel).device_code()
     assert "(0.0)" not in code, code
-    assert "f[4 * gid(0) + lid(0)] = 2.0 * x[4 * gid(0) + lid(0)];" in code, code
+    # loopy main prints an affine expression in namedisl's order of names:
+    # f[lid(0) + 4 * gid(0)], where loopy 2025.2 wrote 4 * gid(0) first
+    assert "f[lid(0) + 4 * gid(0)] = 2.0 * x[lid(0) + 4 * gid(0)];" in code, code
 
 
 def test_zeros_a_read_sees_on_a_split_loop_are_refused_saying_why(plain_opencl):
