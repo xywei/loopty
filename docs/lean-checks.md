@@ -258,13 +258,14 @@ does not prove.
 
 A theorem about a series is applied to the terms a kernel adds
 (`loopty.summands`): `examples/layer_potential.py`'s `single_layer` adds
-`-(ratio(alpha, beta))**k / k` for `k` from 1 to 5, and `line_taylor`
-concludes `c(n) == -(-beta / alpha)**n / n`. Each term is a part with the
-theorem and the identity the kernel cites, `by_the_conjugate`, as
-hypotheses: Lean rewrites the goal by the identity, `rw [h1 (beta := z t - c
-t) (alpha := c t - y s)]`, and applies the theorem, `apply h0 (alpha := c t
-- y s) (beta := z t - c t) (c := c)`, so that a kernel whose terms are not
-the theorem's is a part Lean does not prove.
+`coefficient(-beta / alpha, k)`, `-(-beta / alpha)**k / k`, for `k` from 1
+to 5, and `line_taylor` concludes `a(n) == -(-beta / alpha)**n / n`. Each
+term is a part with the theorem as a hypothesis, restated from the text the
+theorem's own command proved, and Lean applies it, so that a kernel whose
+terms are not the theorem's is a part Lean does not prove. An identity the
+kernel cites is rewritten into the goal first, the kernel's way of computing
+the term; the math steps of a schedule (`Schedule.rewrite`) are parts of
+their own, one per theorem, each restating its theorem the same way.
 
 ## What isl gives Lean, which Lean checks
 

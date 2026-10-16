@@ -884,13 +884,13 @@ interface can change in a minor release; the CHANGELOG says when one does.
   kernel's expressions, a `by-theorem` row says so, resting on the theorem.
   An identity the kernel cites, a theorem that concludes `L == R`, rewrites
   `R` in `E` into `L` first, the kernel's way of computing it.
-  `examples/layer_potential.py`'s `single_layer` cites `line_taylor` and
-  `by_the_conjugate`, `ratio(alpha, beta) == -beta / alpha`, and reads
+  `examples/layer_potential.py`'s `single_layer` says the math as written,
+  `coefficient(-beta / alpha, k)`, cites `line_taylor`, and reads
   `single_layer adds line_taylor's a(n) for n in 1..5, for every a with
   nonzero, first_term and ode, read over the complex numbers`: about the term it
   evaluates, read over the complex numbers, and not about the floats it
-  produces. With Mathlib, Lean checks it a term at a time, the identity
-  rewritten and the theorem applied.
+  produces. With Mathlib, Lean checks it a term at a time, the theorem
+  applied, restated from the text its own command proved.
 - Equations of reals at their class (`loopty.reals`). An equation of a
   postcondition that rounds, a closed form the kernel computes another way,
   is compared after each native run as the compiled run is with the native

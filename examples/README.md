@@ -1262,23 +1262,13 @@ pytential's starfish, QBX order 5, at 4 panels: 36 targets, 132 sources
   single_layer: agrees with sumpy's own kernel, as pytential calls it, within 1e-12 of the largest value -> tested
   double_layer: agrees with sumpy's own kernel, as pytential calls it, within 1e-12 of the largest value -> tested
   single_layer adds line_taylor's a(n) for n in 1..5, for every a with nonzero, first_term and ode, read over the complex numbers -> decided
-  `examples/line_taylor.py`, here in the same file. A table `a` that
-  satisfies what `(alpha + tau * beta) f'(tau) == beta` says about its
-  coefficients is `a(k)`; that the Taylor coefficients of `log(alpha + tau *
-  beta)` satisfy that equation is cited, not proved. With Mathlib, Lean
-  proves it; without, it is `assumed`, since the property tester draws no
-  table over `Nat`. Its body is its proof, as a reader says it: the claim at
-  `n` is `first_term` where `n` is 1, and otherwise the recurrence `a[n] ==
-  (n - 1) / n * ratio * a[n - 1]`, by the ODE, with the claim at `n - 1`.
-  The kernels say the math as written: they add
-  `coefficient(-beta / alpha, k)`, the same function the theorem's
-  conclusion is written with, so `single_layer` cites the theorem directly:
-  its row `single_layer adds line_taylor's a(n) for n in 1..5, for every a
-  with nonzero, first_term and ode, read over the complex numbers` ties the
-  theorem to the terms the kernel evaluates, `decided` by `theorem` and,
-  with Mathlib, proved by Lean, the theorem applied a term at a time. It is
-  about the term read over the complex numbers, not about the floats the
-  kernel produces.
+
+as sumpy computes it: rewrite(single_layer.out, by=(conjugate_form, log_of_the_modulus))
+  tested   interpreter rewrite(out, by=conjugate_form): over the complex numbers, what out stores is unchanged wherever c[t] - y[s] != 0: -(z[t] - c[t]) / (c[t] - y[s]) becomes its conjugate form, in 5 places
+  tested   interpreter rewrite(out, by=log_of_the_modulus): over the complex numbers, what out stores is unchanged wherever c[t] - y[s] != 0: log(abs(c[t] - y[s])) becomes log(real((c[t] - y[s])*conj(c[t] - y[s]))) / 2, in 1 place
+  tested   run         c[t] - y[s] != 0 for every t and every s, which conjugate_form and log_of_the_modulus need, on the example inputs
+  decided  type        after rewrite(out, ...), out is compared at approx (it was approx)
+  tested   run         the compiled as_sumpy_computes agrees with the native single_layer in out at approx, within 1e-06 of each value (measured 8e-16 of the largest), on its example inputs and 3 drawn ones; note: with the inputs scaled by 1e-170 (|c[t] - y[s]| about 1e-170), out[0] is nan where the native run gives 5.29e-168; with the inputs scaled by 1e+170 (|c[t] - y[s]| about 1e+170), out[0] is nan where the native run gives 5.29e+172
 
 sumpy's tile, get_optimized_kernel(is_cpu=True): split(single_layer.t, 16).tag({single_layer.t.outer: 'g.0', single_layer.t.inner: 'l.0'}).split(single_layer.s, 256).prioritize(single_layer.s.outer, single_layer.t.inner)
   decided  isl  split(single_layer.t, 16) renames the instances of single_layer one for one
@@ -1289,23 +1279,8 @@ sumpy's tile, get_optimized_kernel(is_cpu=True): split(single_layer.t, 16).tag({
   decided  isl  the order after split(single_layer.s, 256) runs every dependence of single_layer forward, within one work item
   decided  isl  prioritize(single_layer.s.outer, single_layer.t.inner) renames the instances of single_layer one for one
   decided  isl  the order after prioritize(single_layer.s.outer, single_layer.t.inner) runs every dependence of single_layer forward, within one work item
-  `examples/line_taylor.py`, here in the same file. A table `a` that
-  satisfies what `(alpha + tau * beta) f'(tau) == beta` says about its
-  coefficients is `a(k)`; that the Taylor coefficients of `log(alpha + tau *
-  beta)` satisfy that equation is cited, not proved. With Mathlib, Lean
-  proves it; without, it is `assumed`, since the property tester draws no
-  table over `Nat`. Its body is its proof, as a reader says it: the claim at
-  `n` is `first_term` where `n` is 1, and otherwise the recurrence `a[n] ==
-  (n - 1) / n * ratio * a[n - 1]`, by the ODE, with the claim at `n - 1`.
-  The kernels say the math as written: they add
-  `coefficient(-beta / alpha, k)`, the same function the theorem's
-  conclusion is written with, so `single_layer` cites the theorem directly:
-  its row `single_layer adds line_taylor's a(n) for n in 1..5, for every a
-  with nonzero, first_term and ode, read over the complex numbers` ties the
-  theorem to the terms the kernel evaluates, `decided` by `theorem` and,
-  with Mathlib, proved by Lean, the theorem applied a term at a time. It is
-  about the term read over the complex numbers, not about the floats the
-  kernel produces.
+  decided  isl  distinct instances of out[t] = SCALE * reduce_sum(...) (layer_potential.py:258) write distinct cells of out
+  on C, an ilp loop for the work items: rewrite(single_layer.out, by=(conjugate_form, log_of_the_modulus)).split(single_layer.t, 16).tag(single_layer.t.inner, 'ilp').split(single_layer.s, 256).prioritize(single_layer.s.outer, single_layer.t.inner)
 
 accuracy at 30, 50, 70, 90 panels:
   green_identity  errors 1.4e-04, 3.5e-05, 9.1e-06, 2.8e-06: order 3.51 -> tested
@@ -1317,39 +1292,126 @@ accuracy at 30, 50, 70, 90 panels:
 
 ```console
 $ uv run lanky check examples/layer_potential.py
-  `examples/line_taylor.py`, here in the same file. A table `a` that
-  satisfies what `(alpha + tau * beta) f'(tau) == beta` says about its
-  coefficients is `a(k)`; that the Taylor coefficients of `log(alpha + tau *
-  beta)` satisfy that equation is cited, not proved. With Mathlib, Lean
-  proves it; without, it is `assumed`, since the property tester draws no
-  table over `Nat`. Its body is its proof, as a reader says it: the claim at
-  `n` is `first_term` where `n` is 1, and otherwise the recurrence `a[n] ==
-  (n - 1) / n * ratio * a[n - 1]`, by the ODE, with the claim at `n - 1`.
-  The kernels say the math as written: they add
-  `coefficient(-beta / alpha, k)`, the same function the theorem's
-  conclusion is written with, so `single_layer` cites the theorem directly:
-  its row `single_layer adds line_taylor's a(n) for n in 1..5, for every a
-  with nonzero, first_term and ode, read over the complex numbers` ties the
-  theorem to the terms the kernel evaluates, `decided` by `theorem` and,
-  with Mathlib, proved by Lean, the theorem applied a term at a time. It is
-  about the term read over the complex numbers, not about the floats the
-  kernel produces.
+STATUS                     EFFECTIVE  BY             WHERE                   OWNER               STATEMENT
+-------------------------  ---------  -------------  ----------------------  ------------------  ---------------------------------------------------------------------------------------------------
+assumed                    assumed    -              layer_potential.py:165  line_taylor         alpha : Complex, beta : Complex, a : Fn[Nat, Complex]
+                                                                                                 | nonzero: alpha != 0
+                                                                                                 | first_term: alpha*a[1] == beta
+                                                                                                 | ode: forall n in Nat where n >= 1. (n + 1)*alpha*a[n + 1] + n*beta*a[n] == 0
+                                                                                                 |- forall n in Nat where n >= 1. a[n] == -(-beta / alpha)**n / n
+tested                     tested     python         layer_potential.py:165  line_taylor         the term computes what the annotations compute
+tested                     tested     property-test  layer_potential.py:193  conjugate_form      x : Complex, alpha : Complex
+                                                                                                 | nonzero: alpha != 0
+                                                                                                 |- x / alpha == x*conj(alpha)*(1 / real(alpha*conj(alpha)))
+tested                     tested     python         layer_potential.py:193  conjugate_form      the term computes what the annotations compute
+tested                     tested     property-test  layer_potential.py:205  log_of_the_modulus  alpha : Complex | alpha != 0 |- log(abs(alpha)) == log(real(alpha*conj(alpha))) / 2
+tested                     tested     python         layer_potential.py:205  log_of_the_modulus  the term computes what the annotations compute
+decided                    decided    isl            layer_potential.py:258  single_layer        out[t] is in bounds for every instance of out[t] = SCALE * reduce_sum(...) (layer_potential.py:258)
+decided                    decided    isl            layer_potential.py:258  single_layer        w[s] is in bounds for every instance of out[t] = SCALE * reduce_sum(...) (layer_potential.py:258)
+decided                    decided    isl            layer_potential.py:258  single_layer        c[t] is in bounds for every instance of out[t] = SCALE * reduce_sum(...) (layer_potential.py:258)
+decided                    decided    isl            layer_potential.py:258  single_layer        y[s] is in bounds for every instance of out[t] = SCALE * reduce_sum(...) (layer_potential.py:258)
+decided                    decided    isl            layer_potential.py:258  single_layer        z[t] is in bounds for every instance of out[t] = SCALE * reduce_sum(...) (layer_potential.py:258)
+decided                    decided    isl            layer_potential.py:258  single_layer        distinct instances of out[t] = SCALE * reduce_sum(...) (layer_potential.py:258) write
+                                                                                                   distinct cells of out
+decided                    decided    isl            layer_potential.py:243  single_layer        the source order runs every dependence forward in time
+decided                    decided    type           layer_potential.py:258  single_layer        the accumulation into out[t] over s is approx
+decided under line_taylor  assumed    theorem        layer_potential.py:258  single_layer        single_layer adds line_taylor's a(n) for n in 1..5, for every a with nonzero, first_term
+                                                                                                   and ode, read over the complex numbers
+tested                     tested     interpreter    layer_potential.py:243  single_layer        the traced term computes what the body computes
+tested                     tested     interpreter    layer_potential.py:388  single_layer        rewrite(out, by=conjugate_form): over the complex numbers,
+                                                                                                   what out stores is unchanged wherever c[t] - y[s] != 0:
+                                                                                                   -(z[t] - c[t]) / (c[t] - y[s]) becomes its conjugate form, in 5 places
+tested                     tested     interpreter    layer_potential.py:388  single_layer        rewrite(out, by=log_of_the_modulus):
+                                                                                                   over the complex numbers, what out stores is unchanged wherever c[t] - y[s] != 0:
+                                                                                                   log(abs(c[t] - y[s])) becomes log(real((c[t] - y[s])*conj(c[t] - y[s]))) / 2, in 1 place
+tested                     tested     run            layer_potential.py:388  single_layer        c[t] - y[s] != 0 for every t and every s, which conjugate_form
+                                                                                                   and log_of_the_modulus need, on the example inputs
+decided                    decided    type           layer_potential.py:388  single_layer        after rewrite(out, ...), out is compared at approx (it was approx)
+tested                     tested     run            layer_potential.py:388  single_layer        the compiled as_sumpy_computes agrees with the native single_layer in out at approx,
+                                                                                                   within 1e-06 of each value (measured 8e-16 of the largest), on its example inputs
+                                                                                                   and 3 drawn ones; note: with the inputs scaled by 1e-170 (|c[t] - y[s]| about 1e-170),
+                                                                                                   out[0] is nan where the native run gives 5.29e-168; with the inputs scaled by 1e+170
+                                                                                                   (|c[t] - y[s]| about 1e+170), out[0] is nan where the native run gives 5.29e+172
+decided                    decided    isl            layer_potential.py:419  single_layer        split(single_layer.t, 16) renames the instances of single_layer one for one
+decided                    decided    isl            layer_potential.py:419  single_layer        the order after split(single_layer.t, 16) runs every dependence of single_layer forward
+decided                    decided    isl            layer_potential.py:420  single_layer        tag(single_layer.t.inner, 'ilp') renames the instances of single_layer one for one
+decided                    decided    isl            layer_potential.py:420  single_layer        the order after tag(single_layer.t.inner, 'ilp') runs every dependence of single_layer forward
+decided                    decided    isl            layer_potential.py:421  single_layer        split(single_layer.s, 256) renames the instances of single_layer one for one
+decided                    decided    isl            layer_potential.py:421  single_layer        the order after split(single_layer.s, 256) runs every dependence of single_layer forward
+decided                    decided    isl            layer_potential.py:422  single_layer        prioritize(single_layer.s.outer, single_layer.t.inner) renames the instances of
+                                                                                                   single_layer one for one
+decided                    decided    isl            layer_potential.py:422  single_layer        the order after prioritize(single_layer.s.outer, single_layer.t.inner) runs every dependence of
+                                                                                                   single_layer forward
+decided                    decided    isl            layer_potential.py:274  double_layer        out[t] is in bounds for every instance of out[t] = SCALE * reduce_sum(...) (layer_potential.py:274)
+decided                    decided    isl            layer_potential.py:274  double_layer        w[s] is in bounds for every instance of out[t] = SCALE * reduce_sum(...) (layer_potential.py:274)
+decided                    decided    isl            layer_potential.py:274  double_layer        n[s] is in bounds for every instance of out[t] = SCALE * reduce_sum(...) (layer_potential.py:274)
+decided                    decided    isl            layer_potential.py:274  double_layer        c[t] is in bounds for every instance of out[t] = SCALE * reduce_sum(...) (layer_potential.py:274)
+decided                    decided    isl            layer_potential.py:274  double_layer        y[s] is in bounds for every instance of out[t] = SCALE * reduce_sum(...) (layer_potential.py:274)
+decided                    decided    isl            layer_potential.py:274  double_layer        z[t] is in bounds for every instance of out[t] = SCALE * reduce_sum(...) (layer_potential.py:274)
+decided                    decided    isl            layer_potential.py:274  double_layer        distinct instances of out[t] = SCALE * reduce_sum(...) (layer_potential.py:274) write
+                                                                                                   distinct cells of out
+decided                    decided    isl            layer_potential.py:263  double_layer        the source order runs every dependence forward in time
+decided                    decided    type           layer_potential.py:274  double_layer        the accumulation into out[t] over s is approx
+tested                     tested     interpreter    layer_potential.py:263  double_layer        the traced term computes what the body computes
+tested                     tested     interpreter    layer_potential.py:429  double_layer        rewrite(out, by=conjugate_form): over the complex numbers,
+                                                                                                   what out stores is unchanged wherever c[t] - y[s] != 0: n[s] / (c[t] - y[s])
+                                                                                                   and -(z[t] - c[t]) / (c[t] - y[s]) become their conjugate forms, in 7 places
+tested                     tested     run            layer_potential.py:429  double_layer        c[t] - y[s] != 0 for every t and every s, which conjugate_form needs, on the example inputs
+decided                    decided    type           layer_potential.py:429  double_layer        after rewrite(out, ...), out is compared at approx (it was approx)
+tested                     tested     run            layer_potential.py:429  double_layer        the compiled double_layer after rewrite(out, ...) agrees with the native double_layer in out at
+                                                                                                   approx, within 1e-06 of each value (measured 1e-15 of the largest), on its example inputs
+                                                                                                   and 3 drawn ones; note: with the inputs scaled by 1e-170 (|c[t] - y[s]| about 1e-170),
+                                                                                                   out[0] is nan where the native run gives -3.45e-166; with the inputs scaled by 1e+170
+                                                                                                   (|c[t] - y[s]| about 1e+170), out[0] is nan where the native run gives -3.45e+174
+decided                    decided    isl            layer_potential.py:430  double_layer        split(double_layer.t, 16) renames the instances of double_layer one for one
+decided                    decided    isl            layer_potential.py:430  double_layer        the order after split(double_layer.t, 16) runs every dependence of double_layer forward
+decided                    decided    isl            layer_potential.py:431  double_layer        tag(double_layer.t.inner, 'ilp') renames the instances of double_layer one for one
+decided                    decided    isl            layer_potential.py:431  double_layer        the order after tag(double_layer.t.inner, 'ilp') runs every dependence of double_layer forward
+decided                    decided    isl            layer_potential.py:432  double_layer        split(double_layer.s, 256) renames the instances of double_layer one for one
+decided                    decided    isl            layer_potential.py:432  double_layer        the order after split(double_layer.s, 256) runs every dependence of double_layer forward
+decided                    decided    isl            layer_potential.py:433  double_layer        prioritize(double_layer.s.outer, double_layer.t.inner) renames the instances of
+                                                                                                   double_layer one for one
+decided                    decided    isl            layer_potential.py:433  double_layer        the order after prioritize(double_layer.s.outer, double_layer.t.inner) runs every dependence of
+                                                                                                   double_layer forward
+tested                     tested     upstream       layer_potential.py:453  single_layer        the native run of single_layer agrees with sumpy_single_layer in out within 1e-12 of the largest
+                                                                                                   value, on its example inputs
+tested                     tested     upstream       layer_potential.py:459  double_layer        the native run of double_layer agrees with sumpy_double_layer in out within 1e-12 of the largest
+                                                                                                   value, on its example inputs
+tested                     tested     run            layer_potential.py:542  green_identity      S(du/dn) - D(u) = u/2, Green's identity, at order 5 - 1.6 or faster
+tested                     tested     run            layer_potential.py:548  jump_S              S(+) - S(-) = 0: S is continuous, at order 5 - 1.6 or faster
+tested                     tested     run            layer_potential.py:554  jump_D              D(+) - D(-) = sigma: D jumps by the density, at order 5 - 1.6 or faster
+tested                     tested     property-test  lanky.known             log_of_a_power      x : Real, n : Nat |- log(x**n) == n*log(x)
+tested                     tested     python         lanky.known             log_of_a_power      the term computes what the annotations compute
+decided (heuristic)        tested     cas            lanky.known             modulus_squared     z : Complex |- real(z*conj(z)) == abs(z)**2
+tested                     tested     python         lanky.known             modulus_squared     the term computes what the annotations compute
 
-56 facts: 1 assumed, 36 decided, 19 tested
+60 facts: 1 assumed, 37 decided, 22 tested
 
-WITHOUT LEAN: line_taylor, conjugate_form, log_of_the_modulus and 35 more rows are not proved. To have Lean prove what it can: pip install "lanky[lean]", and Lean v4.29.1 from elan (elan default leanprover/lean4:v4.29.1).
-WITHOUT MATHLIB: line_taylor, conjugate_form, log_of_the_modulus and 4 more rows are not proved, since only Lean with Mathlib can state them. To have Lean prove them: python -m lanky.mathlib ~/mathlib (about 7 GB), then export LANKY_LEAN_MATHLIB=~/mathlib.
+WITHOUT LEAN: line_taylor, conjugate_form, log_of_the_modulus and 37 more rows are not proved. To have Lean prove what it can: pip install "lanky[lean]", and Lean v4.29.1 from elan (elan default leanprover/lean4:v4.29.1).
+WITHOUT MATHLIB: line_taylor, conjugate_form, log_of_the_modulus and 6 more rows are not proved, since only Lean with Mathlib can state them. To have Lean prove them: python -m lanky.mathlib ~/mathlib (about 7 GB), then export LANKY_LEAN_MATHLIB=~/mathlib.
+
+NOT CHECKED line_taylor at layer_potential.py:165: its proof, layer_potential.py:182-190, was not checked: Lean is not available here (disabled by LANKY_LEAN_DISABLE); its steps could not be drawn: no draw could be completed: cannot tabulate a family over Nat
+
+NOT CHECKED log_of_the_modulus at layer_potential.py:205: its proof, layer_potential.py:210-214, was not checked: Lean is not available here (disabled by LANKY_LEAN_DISABLE); the proof of log_of_the_modulus was tested step by step at drawn points (layer_potential.py:212, 213), not checked by Lean
 ```
 
-With Lean, the 31 facts isl decided read `proved` by `lean`, the write fact
-sumpy silences and the tile's casts among them (`45 facts: 1 assumed, 3
-decided, 31 proved, 10 tested`); the row that ties `line_taylor` to
-`single_layer` is about complex numbers, and waits for Mathlib. With Mathlib
-too, `line_taylor` reads `proved` by `lean`, by induction two orders at a time
-with the linear combinations Python found, and is worth `tested`: what the
-theorem rests on includes the reading of its annotations, which lanky checks
-by running them (the second row). `by_the_conjugate` reads `proved`, and so
-does the row, which rests on the two theorems.
+With Lean, the facts isl decided read `proved` by `lean`, the write fact
+sumpy silences and the tile's casts among them; the rows about complex
+numbers wait for Mathlib. With Mathlib too (`60 facts: 4 decided, 40 proved,
+16 tested`), `line_taylor` and `log_of_the_modulus` read `proved` by `lean`,
+each with a line that says its own proof checked too, `by its proof,
+layer_potential.py:210-214: 2 steps, using log_of_a_power and
+modulus_squared from lanky.known`, and each is worth `tested`: what a theorem
+rests on includes the reading of its annotations, which lanky checks by
+running them (the second row of each). `conjugate_form` reads `proved`, by
+lanky alone, and so do the row that ties `line_taylor` to `single_layer` and
+the rows of the two math steps, each of which restates its theorem from the
+text the theorem's own command proved. The two facts `log_of_the_modulus`
+cites are rows of this ledger, from `lanky.known`, proved by the library's
+own Lean proofs. `lanky check --steps log_of_the_modulus` prints its proof's
+outline, a row per link of the chain at its line, with the point at which
+each fact applies: `log_of_a_power` at `(abs(alpha), 2)`, `modulus_squared`
+at `alpha`.
 
 ### loopty run examples/layer_potential.py
 
@@ -2800,7 +2862,11 @@ mirrors.
   the table of derivatives, for any table that satisfies Laplace's equation.
   `on_every_triangle` is its form box by box on the triangle `a + b <= p`,
   which a kernel of order `p` cites. Lean proves both for every order, with
-  Mathlib; without it, the rows are `assumed`.
+  Mathlib; without it, the rows are `assumed`. `compressed_taylor`'s body is
+  its proof, as a textbook writes it: the claim at `(a, b)` is what is
+  stored where `a < 2`, and otherwise a chain, `R[a, b]` equals `-R[a - 2, b
+  + 2]` by the recurrence, `-D[a - 2, b + 2]` by the claim at `(a - 2, b +
+  2)`, and `D[a, b]` by the PDE, a link to a line.
 - `storage_index` is sumpy's `get_storage_index`, a layout of two pieces whose
   three facts say it stores the `2p + 1` derivatives one for one onto their
   addresses. `unpack` reads each box's coefficients through it into the
@@ -2885,10 +2951,16 @@ takes Lean about two minutes from an empty proof cache. `lanky check
 examples/l2p.py --show-lean compressed_taylor` prints the induction Lean
 checked: on `a`, two at a time, each step a `linear_combination` of the
 recurrence, the PDE and the hypothesis at `(a, b + 2)`, whose multipliers
-Python found. Each statement is printed whole, the theorems a part to a
-line, with each hypothesis under its name. Under the table, the `WITHOUT`
-lines say what this machine lacks for Lean to prove the rows it did not,
-and the command that installs it.
+Python found. lanky's search proves `compressed_taylor` alone, and its
+body is checked as well: its row says `by its proof, l2p.py:151-161:
+induction on a, 2 cases, 4 steps`, and `lanky check examples/l2p.py --steps
+compressed_taylor` prints its outline, each link of the chain at its line
+with the point lanky matched its fact at, `by recurrence, at (a - 2, b)`.
+Without Lean the proof is not checked, and a `NOT CHECKED` line says why.
+Each statement is printed whole, the theorems a part to a line, with each
+hypothesis under its name. Under the table, the `WITHOUT` lines say what
+this machine lacks for Lean to prove the rows it did not, and the command
+that installs it.
 
 ```console
 $ uv run lanky check examples/l2p.py
@@ -3000,6 +3072,8 @@ tested                           tested     upstream     l2p.py:481  l2p        
 
 WITHOUT LEAN: compressed_taylor, on_every_triangle and 44 more rows are not proved. To have Lean prove what it can: pip install "lanky[lean]", and Lean v4.29.1 from elan (elan default leanprover/lean4:v4.29.1).
 WITHOUT MATHLIB: compressed_taylor, on_every_triangle and 3 more rows are not proved, since only Lean with Mathlib can state them. To have Lean prove them: python -m lanky.mathlib ~/mathlib (about 7 GB), then export LANKY_LEAN_MATHLIB=~/mathlib.
+
+NOT CHECKED compressed_taylor at l2p.py:135: its proof, l2p.py:151-161, was not checked: Lean is not available here (disabled by LANKY_LEAN_DISABLE); its steps could not be drawn: no draw could be completed: cannot tabulate a family over Nat
 ```
 
 ### loopty run examples/l2p.py
