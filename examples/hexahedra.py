@@ -59,7 +59,8 @@ Run this file three ways.
     leaves, and the layout's.
 
 ``loopty run examples/hexahedra.py``
-    Each kernel, both programs and the fused schedule, compiled and compared.
+    Each kernel, both programs and the schedules, compiled and compared; the
+    dense kernel factored, fused and contracted among them.
 
 What is worth reading here
 --------------------------
@@ -69,9 +70,24 @@ each fact about them and their schedules is decided for every order, the
 Kronecker theorem is proved for every ``n``, and so are the layouts: isl tests
 them at ``n`` from 1 to 6, as ``n * j`` is not linear, and Lean proves them.
 
-*What the programs leave.* ``weak_grad`` claims that ``grad`` is the dense
-operator of each direction applied to the field times its metric term, the
-three summed, and ``weak_div`` the same of the flux. Lean proves each, with
+*The math, and the passes derived from it.* ``weak_grad`` is the dense
+kernel, as grudge's ``weak_local_grad`` says it: the field times the metric
+term ``J dr_d/dx_x``, then for each direction ``d`` the Kronecker product of
+its three tables applied to that, the three directions summed. ``factored``
+rewrites ``grad`` by ``sum_factorization`` and keeps the pass along ``r``
+and the pass along ``s`` in arrays of their own, ``r_pass`` and ``s_pass``;
+``fused`` runs the two passes a slab of ``c`` at a time, and ``contracted``
+keeps the ``r`` pass one slab at a time. The ledger says, proved by Lean
+with Mathlib from what the derived passes store and the theorem at each
+direction's tables, that they leave in ``grad`` what ``weak_grad``'s
+statement says; the kept arrays' accesses in bounds, their writes distinct,
+and each cell stored before it is read; and that the compiled ``factored``
+agrees with the native dense kernel.
+
+*What the programs leave.* ``passes``, the same four passes written by hand
+as one call each, claims that ``grad`` is the dense operator of each
+direction applied to the field times its metric term, the three summed, and
+``weak_div`` the same of the flux. Lean proves each, with
 Mathlib, from what the four calls store and ``sum_factorization``, taken at
 each direction's sections: ``Fr[3*x + 0]`` for the theorem's ``Fr`` and
 ``w[3*x + 0, e]`` for its ``u``. Without Mathlib the claims are tested on the
@@ -80,7 +96,7 @@ another order than the dense operator does.
 
 *How deep each fusion goes.* ``along_s`` reads a whole column of what
 ``along_r`` stored in the same ``k``-slab, so the two fuse on ``(q, e, k)``
-and no deeper, ``fuse(weak_grad.along_r.k, weak_grad.along_s.k)``: a fusion
+and no deeper, ``fuse(passes.along_r.k, passes.along_s.k)``: a fusion
 names the loop of each call it goes down to. The metric product fuses with
 ``along_r`` on every loop but the row's, down to ``j``. The refusal of the
 deeper fusion names the pair it would run backwards.
@@ -261,7 +277,7 @@ def divergence_along_t(
 
 
 @program(uses=[sum_factorization])
-def weak_grad(G, u, Fr, Fs, Ft, grad) -> all(
+def passes(G, u, Fr, Fs, Ft, grad) -> all(
     grad[x, e, k, j, i]
     == sum(
         Ft[3 * x + d, k, c]
@@ -332,18 +348,66 @@ def weak_div(G, f, Fr, Fs, Ft, div) -> all(
 # }}}
 
 
+# {{{ the math: the dense weak gradient, as grudge's weak_local_grad says it
+
+
+@kernel
+def weak_grad(
+    G: Arr[Fin[3], Fin[3], Fin[ne], Fin[n], Fin[n], Fin[n], Real],
+    u: Arr[Fin[ne], Fin[n], Fin[n], Fin[n], Real],
+    Fr: Arr[Fin[3], Fin[n], Fin[n], Real],
+    Fs: Arr[Fin[3], Fin[n], Fin[n], Real],
+    Ft: Arr[Fin[3], Fin[n], Fin[n], Real],
+    w: Arr[Fin[3], Fin[3], Fin[ne], Fin[n], Fin[n], Fin[n], Real],
+    grad: Arr[Fin[3], Fin[ne], Fin[n], Fin[n], Fin[n], Real],
+):
+    """grudge's weak_local_grad, as the math says it.
+
+    ``w[x, d]`` is the field times the metric term ``G[x, d] = J dr_d/dx_x``.
+    Component ``x`` of the gradient is, for each direction ``d``, the
+    Kronecker product of ``Ft[d]``, ``Fs[d]`` and ``Fr[d]`` applied to ``w[x,
+    d]``; the three directions summed.
+    """
+    for x, d, e, k, j, i in w.dom:
+        w[x, d, e, k, j, i] = G[x, d, e, k, j, i] * u[e, k, j, i]
+    for x, e, k, j, i in grad.dom:
+        grad[x, e, k, j, i] = reduce_sum(
+            reduce_sum(
+                Ft[d, k, c] * Fs[d, j, b] * Fr[d, i, a] * w[x, d, e, c, b, a]
+                for c in Ft.dom[d, k]
+                for b in Fs.dom[d, j]
+                for a in Fr.dom[d, i]
+            )
+            for d in Fin[3]
+        )
+
+
+# }}}
+
+
 # {{{ the schedules
 
-#: The metric with the pass along r, on every loop but the row's, down to j;
-#: then the two passes on (q, e, k), a slab at a time.
-fused = (
-    Schedule(weak_grad)
-    .fuse(weak_grad.metric.j, weak_grad.along_r.j)
-    .fuse(weak_grad.along_r.k, weak_grad.along_s.k)
+#: Sum factorization, as grudge applies it: the pass along r, then along s, each kept.
+factored = Schedule(weak_grad).rewrite(
+    weak_grad.grad, by=sum_factorization, keep=("r_pass", "s_pass")
+)
+
+#: The two passes together, a slab of c at a time.
+fused = factored.fuse(factored.r_pass.c, factored.s_pass.c)
+
+#: The r pass kept one slab at a time.
+contracted = fused.contract(factored.r_pass)
+
+#: The passes written by hand: the metric with the pass along r, on every loop
+#: but the row's, down to j; then the two passes on (q, e, k), a slab at a time.
+passes_fused = (
+    Schedule(passes)
+    .fuse(passes.metric.j, passes.along_r.j)
+    .fuse(passes.along_r.k, passes.along_s.k)
 )
 
 #: The same, with w kept one row at a time and v one slab at a time.
-contracted = fused.contract(weak_grad.w).contract(weak_grad.v)
+passes_contracted = passes_fused.contract(passes.w).contract(passes.v)
 
 
 @program
@@ -435,16 +499,32 @@ def tables(directions: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 
 
 def inputs(elements: int = ELEMENTS, seed: int = 0) -> dict:
-    """Random metric terms and fields on ``elements`` hexahedra, and the tables."""
+    """Random metric terms and fields on ``elements`` hexahedra, and the tables.
+
+    The dense kernel's metric is the passes' nine fields, field ``q = 3 x +
+    d`` its ``G[x, d]``, and its tables the three directions' own, where the
+    passes' are each field's.
+    """
     rng = np.random.default_rng(seed)
     nodes = (elements, N, N, N)
     Fr, Fs, Ft = tables(9)
     Dr, Ds, Dt = tables(3)
     G = rng.normal(size=(9, *nodes))
+    u = rng.normal(size=nodes)
+    f = rng.normal(size=(3, *nodes))
     return {
         "weak_grad": {
+            "G": Arr.from_numpy(G.reshape(3, 3, *nodes)),
+            "u": Arr.from_numpy(u),
+            "Fr": Arr.from_numpy(Dr),
+            "Fs": Arr.from_numpy(Ds),
+            "Ft": Arr.from_numpy(Dt),
+            "w": Arr.zeros((3, 3, *nodes)),
+            "grad": Arr.zeros((3, *nodes)),
+        },
+        "passes": {
             "G": Arr.from_numpy(G),
-            "u": Arr.from_numpy(rng.normal(size=nodes)),
+            "u": Arr.from_numpy(u),
             "Fr": Arr.from_numpy(Fr),
             "Fs": Arr.from_numpy(Fs),
             "Ft": Arr.from_numpy(Ft),
@@ -452,7 +532,7 @@ def inputs(elements: int = ELEMENTS, seed: int = 0) -> dict:
         },
         "weak_div": {
             "G": Arr.from_numpy(G),
-            "f": Arr.from_numpy(rng.normal(size=(3, *nodes))),
+            "f": Arr.from_numpy(f),
             "Fr": Arr.from_numpy(Dr),
             "Fs": Arr.from_numpy(Ds),
             "Ft": Arr.from_numpy(Dt),
@@ -474,9 +554,9 @@ def dense(data: dict) -> tuple[np.ndarray, np.ndarray]:
         return stiffness_t if axis == d else mass
 
     ops = [np.kron(along(2, d), np.kron(along(1, d), along(0, d))) for d in range(3)]
-    shape = data["weak_grad"]["u"].numpy().shape
-    G = data["weak_grad"]["G"].numpy().reshape(3, 3, shape[0], -1)
-    u = data["weak_grad"]["u"].numpy().reshape(shape[0], -1)
+    shape = data["passes"]["u"].numpy().shape
+    G = data["passes"]["G"].numpy().reshape(3, 3, shape[0], -1)
+    u = data["passes"]["u"].numpy().reshape(shape[0], -1)
     f = data["weak_div"]["f"].numpy().reshape(3, shape[0], -1)
     grad = np.stack([sum((G[x, d] * u) @ ops[d].T for d in range(3)) for x in range(3)])
     div = sum((G[x, d] * f[x]) @ ops[d].T for x in range(3) for d in range(3))
@@ -486,7 +566,7 @@ def dense(data: dict) -> tuple[np.ndarray, np.ndarray]:
 def example_inputs() -> dict:
     """The inputs ``loopty run`` gives each kernel, and the programs."""
     data = inputs()
-    grad_in, div_in = data["weak_grad"], data["weak_div"]
+    grad_in, div_in = data["passes"], data["weak_div"]
     nodes = grad_in["u"].numpy().shape
     nine = np.random.default_rng(1).normal(size=(9, *nodes))
     three = np.random.default_rng(2).normal(size=(3, *nodes))
@@ -518,6 +598,7 @@ def example_inputs() -> dict:
             "div": Arr.zeros(nodes),
         },
         "weak_grad": inputs()["weak_grad"],
+        "passes": inputs()["passes"],
         "weak_div": inputs()["weak_div"],
         "metric_along_r": {
             "G": grad_in["G"],
@@ -557,37 +638,60 @@ def main() -> int:
     from loopty.obligations import prove
 
     data = inputs()
+    passes(**data["passes"])
     weak_grad(**data["weak_grad"])
     weak_div(**data["weak_div"])
     grad, div = dense(data)
     scale = max(np.abs(grad).max(), np.abs(div).max())
     gap = max(
+        np.abs(data["passes"]["grad"].numpy() - grad).max(),
         np.abs(data["weak_grad"]["grad"].numpy() - grad).max(),
         np.abs(data["weak_div"]["div"].numpy() - div).max(),
     )
     native = bool(gap <= 1e-13 * scale)
     print(
-        f"order {ORDER}, {ELEMENTS} hexahedra: the passes are the dense Kronecker "
-        f"operators: {native} (largest difference {gap / scale:.0e} of the largest)"
+        f"order {ORDER}, {ELEMENTS} hexahedra: the dense kernel and the passes are "
+        f"the dense Kronecker operators: {native} (largest difference "
+        f"{gap / scale:.0e} of the largest)"
     )
     print()
 
-    try:
-        Schedule(weak_grad).fuse(weak_grad.along_r.i, weak_grad.along_s.i)
-    except IllegalCast as exc:
-        print(f"refused: {exc}")
-    print()
-
-    print(f"accepted: {contracted!r}")
+    print(f"derived from the math: {contracted!r}")
     for name, window in contracted.windows.items():
         print(f"  {name} kept in {window.placement}")
+    derived = True
     for fact in contracted.facts():
-        print(f"  {fact.status.value:8} {fact.decided_by:4} {fact.statement}")
+        # Lean, where Mathlib is, proves what the derived passes leave
+        fact = prove(fact) if fact.kind == "rewrite" else fact
+        derived = derived and fact.status.value != "refuted"
+        print(f"  {fact.status.value:8} {fact.decided_by or '-':11} {fact.statement}")
     kept = LoopyExecutor().differential(weak_grad, contracted, inputs()["weak_grad"])
     for name, detail in kept.provenance["outputs"].items():
         print(
             f"  {name}: difference {detail['difference']:.3g} within "
             f"{detail['tolerance']:.3g} ({detail['exactness']}) -> {kept.status.value}"
+        )
+    print()
+
+    try:
+        Schedule(passes).fuse(passes.along_r.i, passes.along_s.i)
+    except IllegalCast as exc:
+        print(f"refused: {exc}")
+    print()
+
+    print(f"accepted, by hand: {passes_contracted!r}")
+    for name, window in passes_contracted.windows.items():
+        print(f"  {name} kept in {window.placement}")
+    for fact in passes_contracted.facts():
+        print(f"  {fact.status.value:8} {fact.decided_by:4} {fact.statement}")
+    by_hand = LoopyExecutor().differential(
+        passes, passes_contracted, inputs()["passes"]
+    )
+    for name, detail in by_hand.provenance["outputs"].items():
+        print(
+            f"  {name}: difference {detail['difference']:.3g} within "
+            f"{detail['tolerance']:.3g} ({detail['exactness']}) -> "
+            f"{by_hand.status.value}"
         )
     print()
 
@@ -607,7 +711,8 @@ def main() -> int:
             f"  {schedule.term.name}: {'.'.join(schedule.history)}: "
             f"{len(cast)} facts, {_settled(cast)}"
         )
-    return 0 if native and kept.status.value == "tested" and legal else 1
+    ok = kept.status.value == by_hand.status.value == "tested"
+    return 0 if native and derived and ok and legal else 1
 
 
 if __name__ == "__main__":

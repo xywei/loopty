@@ -177,6 +177,7 @@ KERNELS = {
         "gradient_along_t",
         "divergence_along_t",
         "weak_grad",
+        "passes",
         "weak_div",
         "metric_along_r",
         "contravariant_along_r",
@@ -1053,9 +1054,11 @@ def test_the_hexahedra_demo_decides_its_layouts_and_its_programs() -> None:
         ("as_row_major", "layout-same", "tested"),
     ]
     # every intermediate a program makes is read where its producer stored it
+    # (and the dense kernel's w, and the arrays its schedule keeps)
     defined = [fact for fact in facts if fact["kind"] == "definedness"]
     assert {fact["owner"] for fact in defined} == {
         "weak_grad",
+        "passes",
         "weak_div",
         "metric_along_r",
         "contravariant_along_r",
@@ -1066,13 +1069,13 @@ def test_the_hexahedra_demo_decides_its_layouts_and_its_programs() -> None:
     posts = {
         fact["owner"]: fact for fact in facts if fact["kind"] == "postcondition"
     }
-    assert set(posts) == {"weak_grad", "weak_div"}
+    assert set(posts) == {"passes", "weak_div"}
     for post in posts.values():
         assert (post["status"], post["decided_by"]) in (
             ("tested", "native"),
             ("proved", "lean"),
         ), post
-    assert posts["weak_grad"]["statement"].startswith(
+    assert posts["passes"]["statement"].startswith(
         "forall x in Fin(3), e in Fin(ne), k in Fin(n), j in Fin(n), i in Fin(n). "
         "grad[x, e, k, j, i] == sum(Ft[3*x + d, k, c]*Fs[3*x + d, j, b]"
     )
@@ -1080,10 +1083,10 @@ def test_the_hexahedra_demo_decides_its_layouts_and_its_programs() -> None:
     stored = [
         (fact["owner"], fact["statement"].split(" stores")[0])
         for fact in facts
-        if fact["kind"] == "single-assignment"
+        if fact["kind"] == "single-assignment" and fact["owner"] != "weak_grad"
     ]
     assert stored == [
-        ("weak_grad", call)
+        ("passes", call)
         for call in ("metric", "along_r", "along_s", "gradient_along_t")
     ] + [
         ("weak_div", call)
@@ -1201,23 +1204,64 @@ def test_the_hexahedra_demo_refuses_the_deeper_fusion_and_keeps_the_windows() ->
     result, _ = _invoke("hexahedra", "python")
     assert result.returncode == 0, result.stdout + result.stderr
     out = result.stdout
-    assert "the passes are the dense Kronecker operators: True" in out
+    assert (
+        "the dense kernel and the passes are the dense Kronecker operators: True"
+    ) in out
     # each pass's statement by its text and line, at the names its loops have
     module = _module("hexahedra")
     along_r = where(module.along_r, "v[q, e, k, j, i] = reduce_sum(")
     along_s = where(module.along_s, "vs[q, e, k, j, i] = reduce_sum(")
     assert (
-        "refused: fuse(weak_grad.along_r.i, weak_grad.along_s.i) illegal: "
+        "refused: fuse(passes.along_r.i, passes.along_s.i) illegal: "
         f"v[q, e, k, j, i] = reduce_sum(...) ({along_r}) at q="
     ) in out
     assert f"read by vs[q, e, k, j, i] = reduce_sum(...) ({along_s}) at q=" in out
     assert (
-        "fuse(weak_grad.along_r.k, weak_grad.along_s.k) runs every dependence" in out
+        "fuse(passes.along_r.k, passes.along_s.k) runs every dependence" in out
     )
     assert "w kept in n cells" in out
     assert "v kept in n*n cells" in out
     assert "grad: difference" in out and "-> tested" in out
     assert out.count("all decided by isl") == 3
+
+
+def test_the_hexahedra_demo_derives_the_passes_from_the_dense_kernel() -> None:
+    """``factored``, ``fused`` and ``contracted``: design 1.4, the passes from the math.
+
+    The rewrite by ``sum_factorization`` keeps the pass along r and the pass
+    along s, folded over the three directions into one nest each; the row
+    says what the passes leave in ``grad``, the kept arrays' facts are
+    decided, and the compiled schedule agrees with the native dense kernel.
+    """
+    module = _module("hexahedra")
+    (rewritten,) = module.factored.rewrites
+    assert [(kept.name, kept.spelled) for kept in rewritten.kept] == [
+        ("r_pass", ("x", "d", "e", "c", "b", "i")),
+        ("s_pass", ("x", "d", "e", "c", "j", "i")),
+    ]
+    facts = module.factored.facts()
+    (row,) = [fact for fact in facts if fact.kind == "rewrite"]
+    assert row.statement == (
+        "rewrite(grad, by=sum_factorization, keep=(r_pass, s_pass)): over the "
+        "reals, the passes leave in grad what weak_grad's statement says, unfolded "
+        "through r_pass and s_pass; sum_factorization at Fr := Fr[d], Fs := Fs[d], "
+        "Ft := Ft[d], u := w[x, d, e], for d = 0, 1 and 2"
+    )
+    assert row.status.value in ("tested", "proved"), row.provenance
+    assert not row.term.lean_obligation().declined
+    kept = [fact for fact in facts if fact.id.split(":")[-3:-2] == ["kept"]]
+    assert kept and {fact.status.value for fact in kept} == {"decided"}
+    (compared,) = [fact for fact in facts if fact.kind == "rewrite-compared"]
+    assert compared.status.value == "tested"
+    assert compared.statement.startswith(
+        "the compiled factored agrees with the native weak_grad in grad at approx"
+    )
+    assert repr(module.contracted) == (
+        "Schedule(weak_grad, target='c').rewrite(weak_grad.grad, "
+        "by=sum_factorization, keep=('r_pass', 's_pass'))"
+        ".fuse(weak_grad.r_pass.c, weak_grad.s_pass.c)"
+        ".contract(weak_grad.r_pass, lambda x, d, e, c, b, i: (b, i))"
+    )
 
 
 def test_the_hexahedra_launches_are_legal_and_build_on_opencl(plain_opencl) -> None:

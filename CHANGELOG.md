@@ -31,6 +31,25 @@ All notable changes to loopty are recorded here. The format follows
   `examples/layer_potential.py` computes the single layer as sumpy does,
   `as_sumpy_computes`, from kernels that say the math as written, and
   `line_taylor` applies to them directly.
+- **Passes derived from the math: `rewrite(..., keep=(...))` and
+  `into=`.** `keep=("r_pass", "s_pass")` stores the sums a theorem's right
+  side nests in arrays of the schedule's own, innermost first, each over the
+  loops it reads; the matches one written-out sum gave, one per term, are
+  folded back into one nest over the sum's binder. The kept arrays and their
+  loops have handles, `factored.r_pass` and `factored.r_pass.c`, which
+  `fuse` and `contract` take. The row says what the passes leave: the
+  kernel's statement, proved by Lean as a program's postcondition is, by
+  unfolding what the passes store and rewriting with the theorem at each
+  direction's tables; the kept arrays' accesses are in bounds, their writes
+  distinct and each cell stored before it is read, decided by isl.
+  `into=passes` compiles a program the file has, which takes the kernel's
+  arguments, and proves it leaves the kernel's statement the same way. A
+  rewrite that nests sums and keeps none says on its compared row that each
+  cell still adds every term, and names `keep=`. `examples/hexahedra.py`'s
+  `weak_grad` is now the dense kernel, as grudge's `weak_local_grad` says
+  it, and `factored`, `fused` and `contracted` derive the passes from it;
+  the four-call program is `passes`, and its schedules `passes_fused` and
+  `passes_contracted`.
 - **lanky's `Complex` is an element type**, stored as `complex128`, as `Real`
   is stored as `float64`: `Arr[Fin[nt], Complex]`.
 

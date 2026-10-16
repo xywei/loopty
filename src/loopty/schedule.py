@@ -301,6 +301,7 @@ from loopty.handles import (
     Call,
     Condition,
     Handle,
+    Kept,
     Loop,
     _Index,
     _Several,
@@ -3996,9 +3997,16 @@ class Schedule:
         return names[0]
 
     def _array(self, handle: Any, text: str) -> str:
-        """The term's array an array handle names: a string is refused naming it."""
+        """The term's array an array handle names: a string is refused naming it.
+
+        An array a math step keeps is one too, ``factored.r_pass``
+        (:meth:`rewrite`).
+        """
         if isinstance(handle, _Several):
             raise ValueError(f"{text}: {handle.message}")
+        if isinstance(handle, Kept):
+            self._own(handle, text)
+            return handle.name
         if not isinstance(handle, Array):
             raise TypeError(self._wanted(handle, text, "array", "array"))
         self._own(handle, text)
@@ -7435,7 +7443,13 @@ class Schedule:
             from loopty.rewriting import structural
 
             rewritten = structural(
-                rewritten, self._source, keep=keep, into=into, text=text, shown=shown
+                rewritten,
+                self._source,
+                keep=keep,
+                into=into,
+                text=text,
+                shown=shown,
+                at=_called_at(),
             )
         out = Schedule(
             self._source,
@@ -7471,6 +7485,22 @@ class Schedule:
     def rewrites(self) -> tuple[Any, ...]:
         """The math steps taken, each a :class:`loopty.rewriting.Rewritten`."""
         return tuple(rows.rewritten for rows in self._rewrites)
+
+    def __getattr__(self, name: str) -> Any:
+        """An array a math step kept, and its nest: ``factored.r_pass``, ``.r_pass.c``.
+
+        :meth:`rewrite` with ``keep=`` stores a nested sum in an array of the
+        schedule's own, which no line of the source makes, so its handle is
+        the schedule's. Every other attribute is the class's.
+        """
+        if name.startswith("_"):
+            raise AttributeError(name)
+        steps = self.__dict__.get("_rewrites", ())
+        kept = [kept.name for rows in steps for kept in rows.rewritten.kept]
+        if name in kept:
+            return Kept(self.__dict__["_handles"], (name,), name)
+        hint = f"; the arrays its math steps keep are {_joined(kept)}" if kept else ""
+        raise AttributeError(f"'Schedule' object has no attribute {name!r}{hint}")
 
     # }}}
 

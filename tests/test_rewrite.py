@@ -12,10 +12,10 @@ from __future__ import annotations
 import numpy as np
 import pytest
 from lanky import theorem
-from lanky.prelude import Complex, Real
+from lanky.prelude import Complex, Fn, Nat, Real
 from lanky.terms import render
 
-from loopty import Arr, Fin, IllegalRewrite, Schedule, kernel, reduce_sum
+from loopty import Arr, Fin, IllegalRewrite, Schedule, kernel, program, reduce_sum
 from loopty.math import conj, log, real
 from loopty.rewriting import cited, identity_of
 
@@ -346,6 +346,175 @@ def test_cited_is_the_seam_for_the_text_a_proof_restates() -> None:
         as_cited = "the text its own command proved"
 
     assert cited(Proved()) == "the text its own command proved"
+
+
+# }}}
+
+
+# {{{ structural rewrites: keep= and into=
+
+
+@theorem
+def two_passes(
+    n: Nat,
+    F: Fn[Fin[n], Fin[n], Real],  # noqa: F821
+    G: Fn[Fin[n], Fin[n], Real],  # noqa: F821
+    u: Fn[Fin[n], Fin[n], Real],  # noqa: F821
+    k: Fin[n],  # noqa: F821
+    j: Fin[n],  # noqa: F821
+) -> sum(  # noqa: F821
+    F[k, b] * G[j, a] * u[b, a] for b in Fin[n] for a in Fin[n]  # noqa: F821
+) == sum(  # noqa: F821
+    F[k, b] * sum(G[j, a] * u[b, a] for a in Fin[n]) for b in Fin[n]  # noqa: F821
+):
+    """The Kronecker product of two tables applied to a matrix is two passes."""
+
+
+@kernel
+def kron(
+    F: Arr[Fin[n], Fin[n], Real],  # noqa: F821
+    G: Arr[Fin[n], Fin[n], Real],  # noqa: F821
+    u: Arr[Fin[n], Fin[n], Real],  # noqa: F821
+    out: Arr[Fin[n], Fin[n], Real],  # noqa: F821
+):
+    """The dense operator, as the math says it."""
+    for k, j in out.dom:
+        out[k, j] = reduce_sum(
+            F[k, b] * G[j, a] * u[b, a] for b in F.dom[k] for a in G.dom[j]
+        )
+
+
+@kernel
+def along_a(
+    G: Arr[Fin[n], Fin[n], Real],  # noqa: F821
+    u: Arr[Fin[n], Fin[n], Real],  # noqa: F821
+    v: Arr[Fin[n], Fin[n], Real],  # noqa: F821
+):
+    """``G`` along the second axis."""
+    for b, j in v.dom:
+        v[b, j] = reduce_sum(G[j, a] * u[b, a] for a in G.dom[j])
+
+
+@kernel
+def along_b(
+    F: Arr[Fin[n], Fin[n], Real],  # noqa: F821
+    v: Arr[Fin[n], Fin[n], Real],  # noqa: F821
+    out: Arr[Fin[n], Fin[n], Real],  # noqa: F821
+):
+    """``F`` along the first axis."""
+    for k, j in out.dom:
+        out[k, j] = reduce_sum(F[k, b] * v[b, j] for b in F.dom[k])
+
+
+@program(uses=[two_passes])
+def kron_passes(F, G, u, out):
+    """The two passes, written by hand."""
+    v = Arr.zeros_like(u)
+    along_a(G, u, v)
+    along_b(F, v, out)
+
+
+@program
+def wrong_arguments(G, u, v):
+    """A program that takes other arguments than the kernel."""
+    along_a(G, u, v)
+
+
+def kron_inputs(n: int = 4, seed: int = 1) -> dict:
+    rng = np.random.default_rng(seed)
+    return {
+        "F": Arr.from_numpy(rng.normal(size=(n, n))),
+        "G": Arr.from_numpy(rng.normal(size=(n, n))),
+        "u": Arr.from_numpy(rng.normal(size=(n, n))),
+        "out": Arr.zeros((n, n)),
+    }
+
+
+def test_keep_stores_the_inner_sum_and_the_statement_reads_it() -> None:
+    from loopty.executor import LoopyExecutor
+
+    factored = Schedule(kron).rewrite(kron.out, by=two_passes, keep=("v",))
+    (rewritten,) = factored.rewrites
+    (kept,) = rewritten.kept
+    assert kept.name == "v"
+    # the pass along a stores G applied to u's row b, at j: u[b, a] with a as j
+    assert kept.spelled == ("b", "j")
+    texts = [stmt.text for stmt in factored.term.stmts]
+    assert texts[0] == "v[b, j] = reduce_sum(...)"
+    assert ("v", ) == tuple(name for name, _ in factored.term.temporaries)
+    fact = LoopyExecutor().differential(kron, factored, kron_inputs())
+    assert fact.status.value == "tested", fact.provenance
+
+
+def test_a_kept_array_and_its_loops_have_handles() -> None:
+    factored = Schedule(kron).rewrite(kron.out, by=two_passes, keep=("v",))
+    assert repr(factored.v) == "kron.v"
+    assert repr(factored.v.b) == "kron.v.b"
+    with pytest.raises(AttributeError, match="the arrays its math steps keep are v"):
+        factored.w  # noqa: B018
+
+
+def test_keep_rows_say_what_the_passes_leave_and_their_facts() -> None:
+    factored = Schedule(kron).rewrite(
+        kron.out, by=two_passes, keep=("v",)
+    ).example(**kron_inputs())
+    found = rows(factored)
+    (row,) = found["rewrite"]
+    assert row.statement == (
+        "rewrite(out, by=two_passes, keep=(v)): over the reals, the passes leave in "
+        "out what kron's statement says, unfolded through v; two_passes at F := F, "
+        "G := G, u := u"
+    )
+    assert row.status.value in ("tested", "proved"), row.provenance
+    obligation = row.term.lean_obligation()
+    assert not obligation.declined, obligation.declined
+    assert two_passes.fact_id in row.rests_on
+    kinds = {fact.kind for fact in found.get("in-bounds", ())}
+    assert kinds == {"in-bounds"}
+    (writes,) = found["disjoint-writes"]
+    assert writes.status.value == "decided"
+    (defined,) = found["definedness"]
+    assert defined.status.value == "decided"
+    assigned = {fact.provenance["array"] for fact in found["single-assignment"]}
+    assert assigned == {"v", "out"}
+
+
+def test_keep_refuses_a_name_the_kernel_has() -> None:
+    with pytest.raises(IllegalRewrite, match="keep= names a new array, and kron has"):
+        Schedule(kron).rewrite(kron.out, by=two_passes, keep=("u",))
+
+
+def test_keep_refuses_more_names_than_sums_to_store() -> None:
+    with pytest.raises(IllegalRewrite, match="nests fewer sums than keep= stores"):
+        Schedule(kron).rewrite(kron.out, by=two_passes, keep=("v", "w"))
+
+
+def test_into_compiles_the_program_and_proves_it_leaves_the_kernels_statement() -> None:
+    from loopty.executor import LoopyExecutor
+
+    into = Schedule(kron).rewrite(kron.out, by=two_passes, into=kron_passes)
+    assert into.term is kron_passes.term
+    assert into.traced is kron.term
+    fact = LoopyExecutor().differential(kron, into, kron_inputs())
+    assert fact.status.value == "tested", fact.provenance
+    (row,) = rows(into.example(**kron_inputs()))["rewrite"]
+    assert row.statement.startswith(
+        "rewrite(out, by=two_passes, into=kron_passes): over the reals, kron_passes "
+        "leaves in out what kron's statement says, unfolded through its calls"
+    )
+    assert not row.term.lean_obligation().declined
+
+
+def test_into_refuses_a_program_of_other_arguments() -> None:
+    with pytest.raises(IllegalRewrite, match="wrong_arguments takes \\(G, u, v\\)"):
+        Schedule(kron).rewrite(kron.out, by=two_passes, into=wrong_arguments)
+
+
+def test_into_and_keep_are_one_or_the_other() -> None:
+    with pytest.raises(IllegalRewrite, match="give one"):
+        Schedule(kron).rewrite(
+            kron.out, by=two_passes, keep=("v",), into=kron_passes
+        )
 
 
 # }}}

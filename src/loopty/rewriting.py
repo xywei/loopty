@@ -325,14 +325,39 @@ class Condition:
     kind: str
     over: tuple[tuple[str, Any], ...]
     stmt: str
+    #: How the source names the statement's loops, ``(("x_0", "x"), ...)``.
+    spelled: tuple[tuple[str, str], ...] = ()
+
+    @property
+    def shown(self) -> str:
+        """The claim with the statement's loops as the source names them."""
+        return render(_respelled(self.claim, self.spelled))
 
     @property
     def text(self) -> str:
         """``c[t] - y[s] != 0 for every t and every s``."""
-        shown = render(self.claim)
         if not self.over:
-            return shown
-        return f"{shown} for " + " and ".join(f"every {name}" for name, _ in self.over)
+            return self.shown
+        names = dict(self.spelled)
+        return f"{self.shown} for " + " and ".join(
+            f"every {names.get(name, name)}" for name, _ in self.over
+        )
+
+
+def _respelled(expr: Any, spelled: Sequence[tuple[str, str]]) -> Any:
+    """``expr`` with loops renamed as the source spells them, where none collide."""
+    from loopty.hypotheses import _names as names_of
+    from loopty.hypotheses import substitute
+
+    names = {old: new for old, new in spelled if old != new}
+    used = names_of(expr)
+    names = {old: new for old, new in names.items() if old in used}
+    if not names:
+        return expr
+    kept = used - set(names)
+    if kept & set(names.values()) or len(set(names.values())) != len(names):
+        return expr
+    return substitute(expr, {old: Var(new) for old, new in names.items()})
 
 
 @dataclass(frozen=True, eq=False)
@@ -779,6 +804,9 @@ def _conditions(
                 kind=_condition_kind(claim, term),
                 over=over,
                 stmt=stmt.id,
+                spelled=tuple(
+                    zip(stmt.inames, stmt.spelled or stmt.inames, strict=False)
+                ),
             )
         )
     return tuple(out)
@@ -810,6 +838,22 @@ def _condition_kind(claim: Any, term: Term) -> str:
 
 
 @dataclass(frozen=True, eq=False)
+class Kept:
+    """An array ``keep=`` stores a nested sum in, and the statement that stores it.
+
+    ``indices`` are the loops the statement runs over, as the term names
+    them, and ``spelled`` as the source names them; ``stmt`` is the
+    statement's id, and ``reads`` the arrays its sum reads.
+    """
+
+    name: str
+    stmt: str
+    indices: tuple[str, ...]
+    spelled: tuple[str, ...]
+    shape: tuple[Any, ...]
+
+
+@dataclass(frozen=True, eq=False)
 class Step:
     """One theorem's step: the statements as it found them and as it left them."""
 
@@ -835,6 +879,15 @@ class Rewritten:
     before: Term
     after: Term
     steps: tuple[Step, ...]
+    #: The arrays ``keep=`` stores the nested sums in, innermost first.
+    kept: tuple[Kept, ...] = ()
+    #: The program ``into=`` names as the target, or ``None``.
+    into: Any = None
+    #: The claim of a structural rewrite, for Lean: the kernel's statement as
+    #: the postcondition of what the schedule compiles, proved by unfolding
+    #: what its statements store (:class:`loopty.unfolding.Unfolded`), and the
+    #: facts that claim rests on; ``None`` for a rewrite inside a statement.
+    proof: Any = None
 
     @property
     def matches(self) -> tuple[Match, ...]:
@@ -847,17 +900,49 @@ class Rewritten:
 
         found: dict[Any, Condition] = {}
         needs: dict[Any, list[str]] = {}
+        index: dict[str, list[Condition]] = {}
         for match in self.matches:
             for condition in match.conditions:
                 key = (condition.kind, structural_key(condition.claim))
+                if key not in found and condition.kind == "index":
+                    # a statement's conditions on indices are one row, as isl
+                    # decides them in one question
+                    index.setdefault(condition.stmt, []).append(condition)
                 found.setdefault(key, condition)
                 names = needs.setdefault(key, [])
                 if condition.theorem not in names:
                     names.append(condition.theorem)
-        return tuple(
-            dataclasses.replace(condition, theorem=_listed(needs[key]))
-            for key, condition in found.items()
-        )
+        out = []
+        merged: set[str] = set()
+        for key, condition in found.items():
+            if condition.kind != "index":
+                out.append(dataclasses.replace(condition, theorem=_listed(needs[key])))
+                continue
+            if condition.stmt in merged:
+                continue
+            merged.add(condition.stmt)
+            parts = index[condition.stmt]
+            theorems = list(
+                dict.fromkeys(
+                    name
+                    for part in parts
+                    for name in needs[("index", structural_key(part.claim))]
+                )
+            )
+            over = tuple(
+                dict.fromkeys(
+                    (name, bound) for part in parts for name, bound in part.over
+                )
+            )
+            out.append(
+                dataclasses.replace(
+                    condition,
+                    claim=_conjunction([part.claim for part in parts]),
+                    over=over,
+                    theorem=_listed(theorems),
+                )
+            )
+        return tuple(out)
 
 
 def _listed(names: Sequence[str]) -> str:
@@ -1108,24 +1193,37 @@ def _drawn_equal(
     rewritten: Rewritten, step: Step, seed: int = 0
 ) -> tuple[bool | None, str]:
     """``T == T'`` at drawn inputs, on the interpreter: agreed, differed or unknown."""
+    return _drawn_terms(
+        step.before, step.after, rewritten.array, f"{step.identity.name}", seed
+    )
+
+
+def _drawn_terms(
+    before: Term, after: Term, array: str, what: str, seed: int = 0
+) -> tuple[bool | None, str]:
+    """``before`` and ``after`` at drawn inputs agree in ``array``, on the interpreter.
+
+    ``True`` when every draw agrees at the array's class, ``False`` with the
+    first cell that differs, and ``None`` with why when nothing could be
+    compared. ``what`` names the step in the words.
+    """
     from loopty.faithful import _NoSample, sample_arguments
     from loopty.interpret import InterpretError, interpret
     from loopty.tolerance import disagreement, output_class
 
-    array = rewritten.array
-    exactness = output_class(step.before, array)
+    exactness = output_class(before, array)
     if exactness == "exact":
         exactness = "approx"
     compared = 0
     for draw in range(3):
         try:
-            arguments, _sizes = sample_arguments(step.before, seed=seed + draw)
+            arguments, _sizes = sample_arguments(before, seed=seed + draw)
         except _NoSample as exc:
             return None, f"no input could be drawn: {exc}"
         try:
-            first = interpret(step.before, _copied(arguments), limit=200_000)
-            second = interpret(step.after, _copied(arguments), limit=200_000)
-        except (InterpretError, ArithmeticError, ValueError) as exc:
+            first = interpret(before, _copied(arguments), limit=2_000_000)
+            second = interpret(after, _copied(arguments), limit=2_000_000)
+        except (InterpretError, ArithmeticError, ValueError, KeyError) as exc:
             return None, f"the terms could not be interpreted: {exc}"
         want, got = first.get(array), second.get(array)
         if want is None or got is None:
@@ -1138,7 +1236,7 @@ def _drawn_equal(
             cell = tuple(int(k) for k in np.argwhere(differs)[0])
             return False, (
                 f"at the inputs drawn with seed {seed + draw}, {array}{list(cell)} is "
-                f"{want[cell]} before {step.identity.name} and {got[cell]} after"
+                f"{want[cell]} before {what} and {got[cell]} after"
             )
         compared += 1
     if not compared:
@@ -1254,7 +1352,7 @@ def _equality_words(rewritten: Rewritten, step: Step) -> str:
             key = structural_key(condition.claim)
             if key not in seen and condition.kind != "index":
                 seen.add(key)
-                conditions.append(render(condition.claim))
+                conditions.append(condition.shown)
     count = len(step.matches)
     places = "in 1 place" if count == 1 else f"in {count} places"
     phrase = identity.name.replace("_", " ")
@@ -1369,8 +1467,11 @@ def failing_point(
                 raise ValueError(f"more than {_MOST_POINTS} points to test")
             held = evaluate(condition.claim, env)
             if not (held is True or (isinstance(held, np.bool_) and bool(held))):
-                at = ", ".join(f"{name}={env[name]}" for name, _ in condition.over)
-                return False, f"{render(condition.claim)} fails at {at}"
+                names = dict(condition.spelled)
+                at = ", ".join(
+                    f"{names.get(name, name)}={env[name]}" for name, _ in condition.over
+                )
+                return False, f"{condition.shown} fails at {at}"
             return None
         (name, bound), tail = rest[0], rest[1:]
         extent = int(evaluate(bound, env))
@@ -1787,9 +1888,9 @@ class Rows:
             if not (isinstance(claim, prim.Comparison) and claim.operator == "!="):
                 continue
             subject = claim.left
-            stmt = self.rewritten.after.stmt(condition.stmt)
+            stmt = self.rewritten.before.stmt(condition.stmt)
             env = _values(arguments)
-            env.update(_sizes_of(self.rewritten.after, arguments))
+            env.update(_sizes_of(self.rewritten.before, arguments))
             for name, value in zip(stmt.inames, cell, strict=False):
                 env[name] = value
             for name, _bound in condition.over:
@@ -1822,7 +1923,7 @@ class Rows:
                 (
                     condition_fact(
                         condition,
-                        rewritten.after,
+                        rewritten.before,
                         arguments,
                         self.identifier(f"{CONDITION}:{position}"),
                         owner,
@@ -1832,17 +1933,21 @@ class Rows:
                     condition,
                 )
             )
-        equal = equality_facts(
-            rewritten,
-            owner,
-            self.identifier,
-            self.where,
-            [
-                (fact.id, condition)
-                for fact, condition in conditions
-                if condition.kind != "index"
-            ],
-        )
+        data = [
+            (fact.id, condition)
+            for fact, condition in conditions
+            if condition.kind != "index"
+        ]
+        if rewritten.kept or rewritten.into is not None:
+            equal = structural_facts(
+                rewritten,
+                owner,
+                self.identifier,
+                self.where,
+                [identifier_ for identifier_, _condition in data],
+            )
+        else:
+            equal = equality_facts(rewritten, owner, self.identifier, self.where, data)
         exactness = Fact(
             id=self.identifier(f"exactness:{rewritten.array}"),
             kind="exactness",
@@ -1961,7 +2066,554 @@ def _nesting(expr: Any, kind: type) -> int:
 # }}}
 
 
-# {{{ structural rewrites: into= and keep=
+# {{{ structural rewrites: keep= and into=
+
+
+def _fold(exprs: Sequence[Any], binder: str) -> Any:
+    """The one term ``exprs`` are at ``binder = 0, 1, ...``, or ``None``.
+
+    The matches a sum the trace wrote out gives, one per term, differ only
+    where the sum's binder was: ``Fr[0, i, a]``, ``Fr[1, i, a]``,
+    ``Fr[2, i, a]`` are ``Fr[d, i, a]``. Every other place is the same in
+    all of them.
+    """
+    from loopty.hypotheses import structural_key
+
+    count = len(exprs)
+    variable = Var(binder)
+
+    def visit(items: list[Any]) -> Any:
+        first = items[0]
+        if all(isinstance(item, bool) for item in items):
+            return first if len(set(items)) == 1 else _NO_FOLD
+        if all(isinstance(item, int) and not isinstance(item, bool) for item in items):
+            if len(set(items)) == 1:
+                return first
+            if items == list(range(count)):
+                return variable
+            return _NO_FOLD
+        if all(isinstance(item, tuple) for item in items):
+            if len({len(item) for item in items}) != 1:
+                return _NO_FOLD
+            out = tuple(visit([item[k] for item in items]) for k in range(len(first)))
+            return _NO_FOLD if any(part is _NO_FOLD for part in out) else out
+        if all(isinstance(item, prim.ExpressionNode) for item in items):
+            if len({type(item) for item in items}) != 1:
+                return _NO_FOLD
+            args = [init_args(item) for item in items]
+            out = visit([tuple(arg) for arg in args])
+            if out is _NO_FOLD:
+                return _NO_FOLD
+            return type(first)(*out)
+        keys = {structural_key(item) for item in items}
+        return first if len(keys) == 1 else _NO_FOLD
+
+    found = visit(list(exprs))
+    return None if found is _NO_FOLD else found
+
+
+#: What :func:`_fold` returns inside where the terms do not fold.
+_NO_FOLD = object()
+
+
+def _chain(expr: Any, depth: int) -> list[Any] | None:
+    """The sums nested in ``expr``, outermost first, each a factor of the one outside.
+
+    ``sum(Ft[k, c] * sum(Fs[j, b] * sum(Fr[i, a] * u[c, b, a] ...) ...) ...)``
+    is three: the sum over ``c``, the one over ``b`` in its body, and the one
+    over ``a`` in that. ``None`` when ``expr`` nests fewer than ``depth``
+    such sums.
+    """
+    out = []
+    node = expr
+    while isinstance(node, LankySum) and len(out) < depth:
+        out.append(node)
+        inner = [
+            factor for factor in _factors(node.body) if isinstance(factor, LankySum)
+        ]
+        if len(inner) != 1:
+            break
+        node = inner[0]
+    return out if len(out) >= depth else None
+
+
+def _factors(expr: Any) -> list[Any]:
+    """The factors of a product, nested products flattened; ``[expr]`` otherwise."""
+    if isinstance(expr, prim.Product):
+        return [f for child in expr.children for f in _factors(child)]
+    return [expr]
+
+
+def _replaced_node(expr: Any, old: Any, new: Any) -> Any:
+    """``expr`` with the node ``old``, that object, replaced by ``new``."""
+    if expr is old:
+        return new
+    if isinstance(expr, LankySum):
+        body = _replaced_node(expr.body, old, new)
+        return expr if body is expr.body else LankySum(expr.binders, body, expr.guard)
+    if isinstance(expr, prim.ExpressionNode):
+        args = init_args(expr)
+        items = tuple(_replaced_node(arg, old, new) for arg in args)
+        if all(a is b for a, b in zip(items, args, strict=True)):
+            return expr
+        return type(expr)(*items)
+    if isinstance(expr, tuple):
+        items = tuple(_replaced_node(item, old, new) for item in expr)
+        return expr if all(a is b for a, b in zip(items, expr, strict=True)) else items
+    return expr
+
+
+def _kept_indices(
+    inner: LankySum, loops: Sequence[str], summed: Sequence[str] = ()
+) -> list[str] | None:
+    """The loops a kept sum is stored over, in the order the passes run.
+
+    The cell of the array the sum reads along its binder, ``w[x, d, e, c, b,
+    a]`` in ``sum(Fr[d, i, a] * w[x, d, e, c, b, a] for a ...)``, with the
+    binder's place taken by the loop of the factor that runs along it,
+    ``i``: the pass along ``r`` stores ``w`` with ``a`` replaced by ``i``.
+    Any other loop the sum names is put after, in the statement's order.
+    ``None`` when the sum's free names are not loops.
+    """
+    from loopty.hypotheses import _names as names_of
+
+    ((binder, _sort),) = inner.binders
+    free = [name for name in loops if name in names_of(inner.body)]
+    cells = [
+        factor
+        for factor in _factors(inner.body)
+        if isinstance(factor, prim.Subscript)
+        and isinstance(factor.aggregate, prim.Variable)
+        and binder.name in names_of(factor.index)
+    ]
+    if not cells:
+        return free or None
+    # the data the pass runs along: the cell that reads the most of the sums'
+    # binders, w[x, d, e, c, b, a] beside Fr[d, i, a]
+    binders = {*summed, binder.name}
+    cell = max(
+        cells,
+        key=lambda found: (
+            len(names_of(found.index) & binders),
+            len(_index_tuple(found)),
+        ),
+    )
+    indices = _index_tuple(cell)
+    placed: list[str] = []
+    for index in indices:
+        if isinstance(index, prim.Variable):
+            placed.append(index.name)
+        elif not (isinstance(index, int) and not isinstance(index, bool)):
+            return None
+    others = [name for name in free if name not in placed]
+    if binder.name in placed and len(others) == 1:
+        placed[placed.index(binder.name)] = others[0]
+        others = []
+    placed = [name for name in placed if name != binder.name]
+    out = [*placed, *others]
+    return out if all(name in loops for name in out) else None
+
+
+def _index_tuple(cell: prim.Subscript) -> tuple[Any, ...]:
+    index = cell.index
+    return index if isinstance(index, tuple) else (index,)
+
+
+def _extent(name: str, stmt: Stmt, term: Term, bounds: Mapping[str, Any]) -> Any:
+    """The extent of a loop of a kept array: a sum's bound, or an axis the loop indexes.
+
+    A loop of the statement is as long as the axis it indexes on its own in
+    the cell the statement stores, ``x`` of ``grad[x, e, k, j, i]`` the
+    first axis of ``grad``.
+    """
+    if name in bounds:
+        return bounds[name]
+    types = term.array_types
+    accesses = [stmt.assignee]
+    for access in accesses:
+        typ = types.get(access.array)
+        if not isinstance(typ, ArrType) or typ.domain is not None:
+            continue
+        for position, index in enumerate(access.indices):
+            if isinstance(index, prim.Variable) and index.name == name:
+                return typ.axes[position]
+    return None
+
+
+def _fresh_name(stem: str, taken: set[str]) -> str:
+    from loopty.hypotheses import _fresh
+
+    name = stem if stem not in taken else _fresh(stem, taken)
+    taken.add(name)
+    return name
+
+
+def keep_term(rewritten: Rewritten, keep: Any, text: str, at: str) -> Rewritten:
+    """The rewrite with the sums its right side nests stored, ``keep=("r_pass", ...)``.
+
+    Each name stores one nested sum, innermost first, over the loops it reads
+    (:func:`_kept_indices`), in a statement of its own that runs before the
+    rewritten one; the next sum out reads the kept array where it summed.
+    The matches one written-out sum gave, one per term, are folded back into
+    one nest over the sum's binder (:func:`_fold`). The kept arrays are the
+    term's own, as a program's are, and each nest is a scope its handle
+    names: ``factored.r_pass`` and ``factored.r_pass.c``.
+
+    Raises:
+        IllegalRewrite: If the names are not new names, the rewrite changed
+            more than one statement, the theorem nests fewer sums than are
+            kept, or the matches do not fold.
+    """
+    from loopty.flow import domain_set
+    from loopty.hypotheses import substitute
+    from loopty.term import Access, Binder, Callsite
+
+    names = (keep,) if isinstance(keep, str) else tuple(keep)
+    term = rewritten.after
+    taken = _taken(term)
+    for name in names:
+        if not isinstance(name, str) or not name.isidentifier():
+            raise IllegalRewrite(
+                f"{text}: keep= names the arrays the nested sums are stored in, "
+                f"and {name!r} is no name"
+            )
+        if name in taken or names.count(name) > 1:
+            raise IllegalRewrite(
+                f"{text}: keep= names a new array, and {term.name} has a {name} already"
+            )
+    taken |= set(names)
+    by_stmt: dict[str, list[Match]] = {}
+    for match in rewritten.matches:
+        by_stmt.setdefault(match.stmt, []).append(match)
+    if len(by_stmt) != 1:
+        raise IllegalRewrite(
+            f"{text}: keep= stores the sums of one statement's rewrite, and the "
+            f"rewrite changed {len(by_stmt)}"
+        )
+    ((stmt_id, matches),) = by_stmt.items()
+    stmt = term.stmt(stmt_id)
+    original = rewritten.before.stmt(stmt_id)
+    theorem = matches[0].identity.name
+    folded, generic = None, matches[0].replaced
+    if len(matches) > 1:
+        generic = None
+        for binder, count in stmt.unrolled:
+            if count != len(matches):
+                continue
+            folded = _fresh_name(binder, taken)
+            generic = _fold([match.replaced for match in matches], folded)
+            if generic is not None:
+                break
+        if generic is None:
+            raise IllegalRewrite(
+                f"{text}: the {len(matches)} matches of {theorem} do not come "
+                "from one written-out sum, so keep= has no one nest to store "
+                "each sum in; rewrite without keep="
+            )
+    if _chain(generic, len(names) + 1) is None:
+        raise IllegalRewrite(
+            f"{text}: {theorem} nests fewer sums than keep= stores plus one; "
+            f"keep= names the inner ones, innermost first, and names "
+            f"{len(names)}"
+        )
+    loops = [*stmt.inames, *([folded] if folded else [])]
+    spelled = dict(zip(stmt.inames, stmt.spelled or stmt.inames, strict=False))
+    bounds: dict[str, Any] = {}
+    if folded:
+        bounds[folded] = len(matches)
+        spelled[folded] = next(
+            binder for binder, count in stmt.unrolled if count == len(matches)
+        )
+    for found in _chain(generic, len(names) + 1) or ():
+        for var, sort in found.binders:
+            bounds[var.name] = _base(sort).bound
+            spelled.setdefault(var.name, var.name)
+    exactness = _stored_class(rewritten.before, original)
+    element = term.array_types[stmt.assignee.array].dtype
+    where = at or stmt.where
+    new_stmts: list[Stmt] = []
+    kept: list[Kept] = []
+    binders: list[Any] = []
+    callsites: list[Any] = []
+    temporaries: list[tuple[str, ArrType]] = []
+    outer = generic
+    for depth, name in enumerate(names):
+        chain = _chain(outer, len(names) + 1 - depth)
+        if chain is None:
+            raise IllegalRewrite(f"{text}: the sums {theorem} nests do not nest here")
+        inner = chain[-1]
+        open_loops = [
+            *loops,
+            *(var.name for found in chain[:-1] for var, _ in found.binders),
+        ]
+        indices = _kept_indices(
+            inner,
+            open_loops,
+            [var.name for found in chain for var, _ in found.binders],
+        )
+        if indices is None:
+            raise IllegalRewrite(
+                f"{text}: the sum keep= stores in {name} reads names that are no "
+                "loops of the statement, so it has no cells to be stored in"
+            )
+        shape = []
+        for index in indices:
+            extent = _extent(index, original, rewritten.before, bounds)
+            if extent is None:
+                raise IllegalRewrite(
+                    f"{text}: the loop {spelled.get(index, index)} of {name} has "
+                    "no extent loopty can read off the statement"
+                )
+            shape.append(extent)
+        fresh = {
+            index: _fresh_name(spelled.get(index, index), taken) for index in indices
+        }
+        ((binder_var, binder_sort),) = inner.binders
+        summed = _fresh_name(binder_var.name, taken)
+        body = substitute(
+            inner.body,
+            {
+                **{old: Var(new) for old, new in fresh.items()},
+                binder_var.name: Var(summed),
+            },
+        )
+        inames = tuple(fresh[index] for index in indices)
+        stmt_new = Stmt(
+            id=_fresh_name(f"{stmt.id}_{name}", taken),
+            inames=inames,
+            domain=domain_set(
+                inames,
+                tuple(shape),
+                reflections=term.reflections,
+            ),
+            assignee=Access(name, tuple(Var(iname) for iname in inames)),
+            expr=0,
+            kind="assign",
+            guard=None,
+            where=where,
+            # a block of its own, before the rewritten statement's
+            order=(-1 - depth, *([0] * len(inames))),
+            text=(
+                f"{name}[{', '.join(spelled.get(i, i) for i in indices)}] = "
+                "reduce_sum(...)"
+            ),
+            spelled=tuple(spelled.get(index, index) for index in indices),
+        )
+        expr = _as_kernel(
+            LankySum(((Var(summed), binder_sort),), body, None),
+            stmt_new,
+            (),
+            exactness,
+            term,
+        )
+        new_stmts.append(dataclasses.replace(stmt_new, expr=expr))
+        temporaries.append(
+            (
+                name,
+                ArrType(axes=tuple(shape), dtype=element, ragged=(False,) * len(shape)),
+            )
+        )
+        kept.append(Kept(name, stmt_new.id, inames, stmt_new.spelled, tuple(shape)))
+        for index, iname in zip(indices, inames, strict=True):
+            binders.append(
+                Binder(iname, spelled.get(index, index), where, scope=(name,))
+            )
+        binders.append(Binder(summed, binder_var.name, where, sum=True, scope=(name,)))
+        callsites.append(Callsite((name,), name, where))
+        cell = prim.Subscript(Var(name), tuple(Var(index) for index in indices))
+        outer = _replaced_node(outer, inner, cell)
+    # the rewritten statement reads the outermost kept array where it summed
+    expr = stmt.expr
+    for position, match in enumerate(matches):
+        here = outer if folded is None else substitute(outer, {folded: position})
+        new = _as_kernel(here, stmt, match.within, exactness, term)
+        expr = _replaced_identity(expr, match.new, new)
+    ordered: list[Stmt] = []
+    for other in term.stmts:
+        if other.id == stmt_id:
+            ordered.extend(new_stmts)
+            ordered.append(dataclasses.replace(stmt, expr=expr))
+        else:
+            ordered.append(other)
+    after = dataclasses.replace(
+        term,
+        stmts=_renumbered(ordered),
+        temporaries=(*term.temporaries, *temporaries),
+        binders=(*_binders(term), *binders),
+        callsites=(*term.callsites, *callsites),
+    )
+    return dataclasses.replace(rewritten, after=after, kept=tuple(kept))
+
+
+def _taken(term: Term) -> set[str]:
+    """Every name ``term`` uses: arrays, sizes, loops and the binders of its sums."""
+    from loopty.trace import reductions_in
+
+    out = {name for name, _ in (*term.params, *term.temporaries, *term.tables)}
+    out |= set(term.sizes) | {name for name, _ in term.reflected}
+    for stmt in term.stmts:
+        out |= set(stmt.inames)
+        out.add(stmt.id)
+        for reduction in reductions_in(stmt.expr):
+            out |= set(reduction.inames)
+    for binder in term.binders:
+        out.add(binder.name)
+    return out
+
+
+def _binders(term: Term) -> tuple[Any, ...]:
+    from loopty.handles import binders_of
+
+    return binders_of(term)
+
+
+def _replaced_identity(expr: Any, old: Any, new: Any) -> Any:
+    """``expr``, a statement's term, with the node ``old`` replaced by ``new``."""
+    if expr is old:
+        return new
+    if isinstance(expr, Reduction):
+        body = _replaced_identity(expr.body, old, new)
+        return expr if body is expr.body else dataclasses.replace(expr, body=body)
+    if isinstance(expr, prim.ExpressionNode):
+        args = init_args(expr)
+        items = tuple(_replaced_identity(arg, old, new) for arg in args)
+        if all(a is b for a, b in zip(items, args, strict=True)):
+            return expr
+        return type(expr)(*items)
+    if isinstance(expr, tuple):
+        items = tuple(_replaced_identity(item, old, new) for item in expr)
+        return expr if all(a is b for a, b in zip(items, expr, strict=True)) else items
+    return expr
+
+
+def _renumbered(stmts: Sequence[Stmt]) -> tuple[Stmt, ...]:
+    """The statements in sequence at the top of the loop tree, in this order.
+
+    Each statement's position among the outermost blocks is the first entry
+    of its :attr:`~loopty.term.Stmt.order`; a statement that shared a block
+    with the one before keeps sharing it.
+    """
+    out: list[Stmt] = []
+    block = -1
+    previous = None
+    for stmt in stmts:
+        first = stmt.order[0] if stmt.order else None
+        if previous is None or first != previous or first is None:
+            block += 1
+        previous = first
+        order = (block, *stmt.order[1:]) if stmt.order else (block,)
+        out.append(dataclasses.replace(stmt, order=order))
+    return tuple(out)
+
+
+def into_term(rewritten: Rewritten, target: Any, source: Any, text: str) -> Rewritten:
+    """The rewrite with a program the file has as what the schedule compiles.
+
+    ``rewrite(weak_grad.grad, by=sum_factorization, into=passes)``: the
+    program takes the kernel's arguments, by name and in order, and its
+    term is what the schedule compiles. The claim is that it leaves what the
+    kernel's statement says, which today's unfolding of what its calls
+    store proves (:func:`structural_proof`).
+
+    Raises:
+        IllegalRewrite: If ``target`` is no program, or does not take the
+            kernel's arguments.
+    """
+    from loopty.kernel import Program
+
+    if not isinstance(target, Program):
+        raise IllegalRewrite(
+            f"{text}: into= names a program the file has, which computes what "
+            f"the kernel computes, and {target!r} is not one"
+        )
+    term = target.term
+    kernel = rewritten.before
+    mine = [(name, _arity_of(typ)) for name, typ in kernel.params]
+    theirs = [(name, _arity_of(typ)) for name, typ in term.params]
+    if mine != theirs:
+        want = ", ".join(name for name, _ in kernel.params)
+        got = ", ".join(name for name, _ in term.params)
+        raise IllegalRewrite(
+            f"{text}: {target.__name__} takes ({got}), and the schedule's program "
+            f"takes what {kernel.name} takes, ({want}), each array of as many "
+            "axes"
+        )
+    return dataclasses.replace(rewritten, after=term, into=target)
+
+
+def _arity_of(typ: Any) -> int | None:
+    return typ.ndim if isinstance(typ, ArrType) else None
+
+
+def statement_claims(term: Term, arrays: Sequence[str]) -> list[Any]:
+    """What ``term``'s statements store in ``arrays``, as claims about what it leaves.
+
+    One per statement: at every instance, the cell it stores is what it
+    computes, read over the reals or the complex numbers, the sums lanky's.
+    The postcondition a structural rewrite's passes are proved to leave.
+    """
+    out = []
+    for stmt in term.stmts:
+        if stmt.assignee.array not in arrays:
+            continue
+        binders = tuple((Var(iname), _int()) for iname in stmt.inames)
+        cell = prim.Subscript(Var(stmt.assignee.array), stmt.assignee.indices)
+        body = Comparison(cell, "==", _stated_statement(stmt, term))
+        guard = _conjunction(_domain_conditions(stmt))
+        out.append(Forall(binders, body, None if guard is True else guard))
+    return out
+
+
+def structural_proof(
+    rewritten: Rewritten,
+    owner: str,
+    identifier: Any,
+) -> tuple[Any, tuple[Fact, ...], str]:
+    """The claim of a structural rewrite for Lean, and the facts it rests on.
+
+    The kernel's statement of the rewritten array is the postcondition of
+    what the schedule compiles, and :func:`loopty.unfolding.unfolded`
+    proves it from what that term's statements store and the theorems, as a
+    program's postcondition is proved (R4): unfold the kept arrays (or the
+    program's calls), rewrite each instance of a theorem's side, write the
+    literal sums out, ``ring``. Returns the term of the row (``None`` with
+    the reason when nothing unfolds), the ``single-assignment`` facts the
+    equations rest on, and words for the provenance.
+    """
+    from loopty.dataflow import _stored, program_stores
+    from loopty.unfolding import unfolded
+
+    after = rewritten.after
+    claims = statement_claims(rewritten.before, (rewritten.array,))
+    post = _conjunction(claims)
+    theorems = [step.identity.theorem for step in rewritten.steps]
+    if rewritten.into is not None:
+        theorems += [
+            theorem
+            for theorem in getattr(rewritten.into, "uses", ())
+            if all(theorem is not seen for seen in theorems)
+        ]
+        stores = program_stores(after, owner)
+    else:
+        stores = _stored(after, owner)
+    found = unfolded(dataclasses.replace(after, post=post), stores.equations, theorems)
+    if isinstance(found, str):
+        return None, (), found
+    proof, used, words = found
+    needed = {identifier_ for hypothesis in used for identifier_ in hypothesis.rests_on}
+    stored = sorted(
+        (fact for fact in stores.facts.values() if fact.id in needed),
+        key=lambda fact: fact.id,
+    )
+    renamed = {
+        fact.id: identifier(f"single-assignment:{fact.provenance.get('array', k)}")
+        for k, fact in enumerate(stored)
+    }
+    facts = tuple(
+        dataclasses.replace(fact, id=renamed[fact.id], owner=owner) for fact in stored
+    )
+    rests = tuple(renamed.get(fact, fact) for fact in proof.rests_on)
+    return dataclasses.replace(proof, rests_on=rests), facts, words
 
 
 def structural(
@@ -1972,13 +2624,189 @@ def structural(
     into: Any,
     text: str,
     shown: str,
+    at: str = "",
 ) -> Rewritten:
-    """The rewrite with its nested sums stored (``keep=``) or a program as the target.
+    """The rewrite with its nested sums stored (``keep=``), or into a program."""
+    if keep is not None and into is not None:
+        raise IllegalRewrite(
+            f"{text}: keep= derives the passes and into= names them; give one"
+        )
+    if into is not None:
+        return into_term(rewritten, into, source, text)
+    return keep_term(rewritten, keep, text, at)
 
-    Raises:
-        IllegalRewrite: Until the structural rewrites land.
+
+def _spelled_in(expr: Any, stmt: Stmt) -> Any:
+    """``expr`` with the statement's loops as the source names them."""
+    from loopty.hypotheses import substitute
+
+    names = dict(zip(stmt.inames, stmt.spelled or stmt.inames, strict=False))
+    return substitute(expr, {old: Var(new) for old, new in names.items() if old != new})
+
+
+def _structural_words(rewritten: Rewritten) -> str:
+    """The structural row's statement: what the passes leave, and how it is shown."""
+    first = rewritten.steps[0]
+    stmt = rewritten.before.stmt(first.matches[0].stmt)
+    owner = rewritten.before.name
+    head = _short_text(rewritten)
+    over = _over_words(rewritten.before, first.identity)
+    if rewritten.into is not None:
+        what = f"{rewritten.into.__name__} leaves"
+        through = "its calls"
+    else:
+        what = "the passes leave"
+        through = _listed([kept.name for kept in rewritten.kept])
+    matches = first.matches
+    sigma = [dict(match.sigma) for match in matches]
+    shown: list[str] = []
+    binder = None
+    if len(matches) > 1:
+        binder = next(
+            (name for name, count in stmt.unrolled if count == len(matches)), None
+        )
+    for name in first.identity.functions:
+        values = [found.get(name) for found in sigma]
+        if any(value is None for value in values):
+            continue
+        value = values[0] if binder is None else _fold(values, binder)
+        if value is None:
+            continue
+        shown.append(f"{name} := {render(_spelled_in(value, stmt))}")
+    at = f"{first.identity.name} at {', '.join(sorted(shown))}" if shown else ""
+    places = ""
+    if binder is not None:
+        places = f", for {binder} = " + _listed([str(k) for k in range(len(matches))])
+    return (
+        f"{head}: over {over}, {what} in {rewritten.array} what {owner}'s statement "
+        f"says, unfolded through {through}" + (f"; {at}{places}" if at else "")
+    )
+
+
+def _short_text(rewritten: Rewritten) -> str:
+    """``rewrite(grad, by=sum_factorization, keep=(r_pass, s_pass))``."""
+    theorems = [step.identity.name for step in rewritten.steps]
+    by = theorems[0] if len(theorems) == 1 else f"({', '.join(theorems)})"
+    extra = ""
+    if rewritten.kept:
+        extra = f", keep=({', '.join(kept.name for kept in rewritten.kept)})"
+    elif rewritten.into is not None:
+        extra = f", into={rewritten.into.__name__}"
+    return f"rewrite({rewritten.array}, by={by}{extra})"
+
+
+def structural_facts(
+    rewritten: Rewritten,
+    owner: str,
+    identifier: Any,
+    where: str,
+    condition_ids: Sequence[str],
+) -> list[Fact]:
+    """The rows of a structural rewrite: what the passes leave, and their own facts.
+
+    The claim that what the schedule compiles leaves the kernel's statement
+    in the array, tested by draws of both terms on the interpreter and
+    proved by Lean through :func:`structural_proof`; the
+    ``single-assignment`` facts its equations rest on; and the kept arrays'
+    facts, in bounds, distinct writes and stored before read, decided by
+    isl (:func:`kept_facts`).
     """
-    raise IllegalRewrite(f"{text}: keep= and into= are not supported yet")
+    proof, assignment, detail_words = structural_proof(rewritten, owner, identifier)
+    agreed, detail = _drawn_terms(
+        rewritten.before, rewritten.after, rewritten.array, _short_text(rewritten)
+    )
+    status = (
+        Status.TESTED
+        if agreed
+        else Status.REFUTED
+        if agreed is False
+        else Status.ASSUMED
+    )
+    provenance: dict[str, Any] = {
+        "theorems": [step.identity.fact_id for step in rewritten.steps],
+        "detail": detail,
+        "proof": detail_words,
+    }
+    if agreed is False:
+        provenance["reason"] = (
+            f"{rewritten.text}: what the schedule compiles does not leave what the "
+            f"kernel's statement says; {detail}"
+        )
+    elif agreed is None:
+        provenance["reason"] = detail
+    if proof is None:
+        provenance["lean"] = f"not stated for Lean: {detail_words}"
+    rests = tuple(
+        dict.fromkeys(
+            [
+                *(step.identity.fact_id for step in rewritten.steps),
+                *(getattr(proof, "rests_on", ()) or ()),
+                *condition_ids,
+            ]
+        )
+    )
+    row = Fact(
+        id=identifier(f"{KIND}:passes"),
+        kind=KIND,
+        statement=_structural_words(rewritten),
+        term=proof,
+        status=status,
+        decided_by=None if status is Status.ASSUMED else "interpreter",
+        provenance=provenance,
+        where=where,
+        owner=owner,
+        rests_on=rests,
+    )
+    return [row, *assignment, *kept_facts(rewritten, owner, identifier)]
+
+
+def kept_facts(rewritten: Rewritten, owner: str, identifier: Any) -> list[Fact]:
+    """The kept arrays' facts: in bounds, distinct writes, and stored before read.
+
+    Stated as for a kernel whose arrays the kept ones are, decided by isl
+    where they are made, so that ``loopty run`` shows them settled.
+    """
+    if not rewritten.kept:
+        return []
+    from loopty.oracle import IslOracle
+    from loopty.typing import (
+        in_bounds_facts,
+        kernel_definedness_facts,
+        write_disjointness_facts,
+    )
+
+    after = rewritten.after
+    view = dataclasses.replace(
+        after, params=(*after.params, *after.temporaries), temporaries=()
+    )
+    stmts = {kept.stmt for kept in rewritten.kept}
+    arrays = {kept.name for kept in rewritten.kept}
+    rewritten_stmts = {match.stmt for match in rewritten.matches}
+    found: list[Fact] = []
+    for fact in in_bounds_facts(view, owner):
+        statement = fact.provenance.get("statement")
+        access = str(fact.provenance.get("access", ""))
+        if statement in stmts or (
+            statement in rewritten_stmts and access.split("[", 1)[0] in arrays
+        ):
+            found.append(fact)
+    for fact in write_disjointness_facts(view, owner):
+        if fact.provenance.get("statement") in stmts:
+            found.append(fact)
+    for fact in kernel_definedness_facts(view, owner):
+        if fact.provenance.get("array") in arrays:
+            found.append(fact)
+    oracle = IslOracle()
+    out = []
+    for k, fact in enumerate(found):
+        fact = dataclasses.replace(fact, id=identifier(f"kept:{fact.kind}:{k}"))
+        try:
+            if oracle.can_establish(fact):
+                fact = oracle.establish(fact) or fact
+        except Exception:  # noqa: BLE001 - a fact isl cannot answer stays assumed
+            pass
+        out.append(fact)
+    return out
 
 
 # }}}
