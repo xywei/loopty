@@ -381,64 +381,64 @@ time includes starting Lean.
 
 | file | isl facts | proved | decided, not proved | refuted, negation proved | Lean time |
 |---|---:|---:|---:|---:|---:|
-| `examples/advection.py` | 112 | 108 | 0 | 3 | 14.5 s |
-| `examples/assembly.py` | 38 | 38 | 0 | 0 | 2.3 s |
-| `examples/calls.py` | 44 | 44 | 0 | 0 | 1.1 s |
-| `examples/composition.py` | 10 | 10 | 0 | 0 | 0.3 s |
-| `examples/fusion.py` | 19 | 17 | 0 | 2 | 0.6 s |
-| `examples/hexahedra.py` | 64 | 62 | 0 | 2 | 23.0 s |
-| `examples/l2p.py` | 46 | 41 | 3 | 2 | 7.7 s |
-| `examples/layer_potential.py` | 32 | 31 | 1 | 0 | 2.8 s |
-| `examples/p2p.py` | 19 | 19 | 0 | 0 | 1.5 s |
-| `examples/pairs.py` | 14 | 14 | 0 | 0 | 0.5 s |
-| `examples/quadrature.py` | 12 | 12 | 0 | 0 | 0.7 s |
-| `examples/reshape_layouts.py` | 16 | 16 | 0 | 0 | 0.9 s |
-| `examples/spmv.py` | 20 | 20 | 0 | 0 | 0.5 s |
-| `examples/stencil_skew.py` | 10 | 9 | 0 | 1 | 1.5 s |
-| `examples/storage_layouts.py` | 18 | 18 | 0 | 0 | 1.7 s |
-| `examples/sum_factorization.py` | 16 | 15 | 0 | 1 | 1.2 s |
-| `examples/taylor_reconstruction.py` | 14 | 11 | 2 | 1 | 1.4 s |
-| `examples/travel.py` | 53 | 53 | 0 | 0 | 2.6 s |
-| `examples/wavefront_acoustic.py` | 24 | 21 | 0 | 3 | 7.5 s |
-| `tests/kernels/axpy.py` | 4 | 4 | 0 | 0 | 0.0 s |
-| `tests/kernels/calls.py` | 151 | 144 | 0 | 7 | 4.5 s |
-| `tests/kernels/dataflow.py` | 236 | 222 | 14 | 0 | 7.5 s |
-| `tests/kernels/domains.py` | 90 | 89 | 0 | 1 | 2.6 s |
+| `examples/advection.py` | 112 | 108 | 0 | 3 | 21.9 s |
+| `examples/assembly.py` | 38 | 38 | 0 | 0 | 3.7 s |
+| `examples/calls.py` | 44 | 44 | 0 | 0 | 1.6 s |
+| `examples/composition.py` | 10 | 10 | 0 | 0 | 0.4 s |
+| `examples/fusion.py` | 19 | 17 | 0 | 2 | 0.9 s |
+| `examples/hexahedra.py` | 64 | 62 | 0 | 2 | 30.3 s |
+| `examples/l2p.py` | 46 | 41 | 3 | 2 | 10.9 s |
+| `examples/layer_potential.py` | 32 | 31 | 1 | 0 | 3.8 s |
+| `examples/p2p.py` | 19 | 19 | 0 | 0 | 2.1 s |
+| `examples/pairs.py` | 14 | 14 | 0 | 0 | 0.6 s |
+| `examples/quadrature.py` | 12 | 12 | 0 | 0 | 0.9 s |
+| `examples/reshape_layouts.py` | 16 | 16 | 0 | 0 | 1.4 s |
+| `examples/spmv.py` | 20 | 20 | 0 | 0 | 0.8 s |
+| `examples/stencil_skew.py` | 10 | 9 | 0 | 1 | 2.3 s |
+| `examples/storage_layouts.py` | 18 | 18 | 0 | 0 | 2.6 s |
+| `examples/sum_factorization.py` | 16 | 15 | 0 | 1 | 1.8 s |
+| `examples/taylor_reconstruction.py` | 14 | 11 | 2 | 1 | 2.1 s |
+| `examples/travel.py` | 53 | 53 | 0 | 0 | 4.0 s |
+| `examples/wavefront_acoustic.py` | 24 | 21 | 0 | 3 | 10.9 s |
+| `tests/kernels/axpy.py` | 4 | 4 | 0 | 0 | 0.1 s |
+| `tests/kernels/calls.py` | 151 | 144 | 0 | 7 | 7.1 s |
+| `tests/kernels/dataflow.py` | 236 | 222 | 14 | 0 | 11.7 s |
+| `tests/kernels/domains.py` | 90 | 89 | 0 | 1 | 4.0 s |
 | `tests/kernels/out_of_bounds.py` | 4 | 3 | 0 | 1 | 0.1 s |
-| `tests/kernels/program_domains.py` | 15 | 15 | 0 | 0 | 0.5 s |
-| `tests/kernels/program_posts.py` | 41 | 40 | 1 | 0 | 1.1 s |
-| `tests/kernels/reals.py` | 26 | 25 | 1 | 0 | 0.2 s |
-| `tests/kernels/series.py` | 27 | 24 | 3 | 0 | 0.5 s |
+| `tests/kernels/program_domains.py` | 15 | 15 | 0 | 0 | 0.7 s |
+| `tests/kernels/program_posts.py` | 41 | 40 | 1 | 0 | 1.8 s |
+| `tests/kernels/reals.py` | 26 | 25 | 1 | 0 | 0.3 s |
+| `tests/kernels/series.py` | 27 | 24 | 3 | 0 | 0.7 s |
 | `tests/kernels/spmv_min.py` | 16 | 16 | 0 | 0 | 0.0 s |
 | `tests/kernels/stencil.py` | 5 | 5 | 0 | 0 | 0.0 s |
-| `tests/kernels/travel.py` | 70 | 69 | 0 | 1 | 1.4 s |
-| `tests/kernels/travel_wrong.py` | 194 | 187 | 0 | 7 | 19.4 s |
+| `tests/kernels/travel.py` | 70 | 69 | 0 | 1 | 2.2 s |
+| `tests/kernels/travel_wrong.py` | 194 | 187 | 0 | 7 | 24.3 s |
 | `tests/kernels/upstream.py` | 11 | 11 | 0 | 0 | 0.1 s |
-| `tests/kernels/windows.py` | 111 | 106 | 0 | 5 | 14.0 s |
+| `tests/kernels/windows.py` | 111 | 106 | 0 | 5 | 15.6 s |
 
 By kind:
 
 | kind | isl facts | proved | decided, not proved | refuted, negation proved | parts | median s per part | slowest part |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| argument | 2 | 1 | 0 | 1 | 1 | 0.026 | 0.03 s |
-| bijective | 54 | 54 | 0 | 0 | 236 | 0.072 | 0.47 s |
-| by-theorem | 10 | 1 | 9 | 0 | 1 | 0.105 | 0.10 s |
-| definedness | 87 | 87 | 0 | 0 | 148 | 0.016 | 0.50 s |
-| disjoint-writes | 248 | 246 | 0 | 1 | 246 | 0.011 | 0.09 s |
-| distinct-arguments | 2 | 1 | 0 | 1 | 1 | 0.018 | 0.02 s |
-| element-sort | 28 | 20 | 0 | 8 | 20 | 0.023 | 0.07 s |
-| in-bounds | 701 | 696 | 0 | 5 | 870 | 0.028 | 0.99 s |
-| layout | 6 | 6 | 0 | 0 | 12 | 0.076 | 11.65 s |
-| layout-in-bounds | 7 | 7 | 0 | 0 | 9 | 0.071 | 0.42 s |
-| layout-one-for-one | 7 | 7 | 0 | 0 | 11 | 0.079 | 4.63 s |
-| layout-onto | 7 | 7 | 0 | 0 | 7 | 0.171 | 2.04 s |
-| layout-same | 3 | 3 | 0 | 0 | 5 | 0.080 | 0.14 s |
-| monotone | 69 | 54 | 0 | 15 | 698 | 0.075 | 0.59 s |
-| no-clobber | 23 | 17 | 0 | 6 | 61 | 0.160 | 0.64 s |
-| ordering | 202 | 202 | 0 | 0 | 517 | 0.015 | 0.07 s |
-| postcondition | 47 | 31 | 16 | 0 | 49 | 0.057 | 0.15 s |
-| requirement | 16 | 16 | 0 | 0 | 16 | 0.129 | 0.42 s |
-| single-assignment | 63 | 63 | 0 | 0 | 141 | 0.010 | 0.08 s |
+| argument | 2 | 1 | 0 | 1 | 1 | 0.054 | 0.05 s |
+| bijective | 54 | 54 | 0 | 0 | 236 | 0.104 | 0.71 s |
+| by-theorem | 10 | 1 | 9 | 0 | 1 | 0.143 | 0.14 s |
+| definedness | 87 | 87 | 0 | 0 | 148 | 0.024 | 0.58 s |
+| disjoint-writes | 248 | 246 | 0 | 1 | 246 | 0.015 | 0.10 s |
+| distinct-arguments | 2 | 1 | 0 | 1 | 1 | 0.028 | 0.03 s |
+| element-sort | 28 | 20 | 0 | 8 | 20 | 0.036 | 0.05 s |
+| in-bounds | 701 | 696 | 0 | 5 | 870 | 0.040 | 1.66 s |
+| layout | 6 | 6 | 0 | 0 | 12 | 0.116 | 14.34 s |
+| layout-in-bounds | 7 | 7 | 0 | 0 | 9 | 0.097 | 0.52 s |
+| layout-one-for-one | 7 | 7 | 0 | 0 | 11 | 0.125 | 5.15 s |
+| layout-onto | 7 | 7 | 0 | 0 | 7 | 0.247 | 2.52 s |
+| layout-same | 3 | 3 | 0 | 0 | 5 | 0.107 | 0.22 s |
+| monotone | 69 | 54 | 0 | 15 | 698 | 0.105 | 0.95 s |
+| no-clobber | 23 | 17 | 0 | 6 | 61 | 0.229 | 1.09 s |
+| ordering | 202 | 202 | 0 | 0 | 517 | 0.019 | 0.09 s |
+| postcondition | 47 | 31 | 16 | 0 | 49 | 0.088 | 0.20 s |
+| requirement | 16 | 16 | 0 | 0 | 16 | 0.097 | 0.36 s |
+| single-assignment | 63 | 63 | 0 | 0 | 141 | 0.014 | 0.10 s |
 
 Every fact Lean did not prove, and why:
 
@@ -498,8 +498,8 @@ With Mathlib (`LANKY_LEAN_MATHLIB`), the 25 claims about reals,
 postconditions and the theorems applied to them, the terms a kernel adds
 among them, are proved too: 1544 proved, none left decided, and the same 37
 refuted facts proved false. The slowest part about reals is a theorem's
-application to the terms a kernel adds, 1.11 s, and a postcondition's,
-0.55 s.
+application to the terms a kernel adds, 1.24 s, and a postcondition's,
+0.54 s.
 
 ## What stays isl's
 

@@ -294,7 +294,7 @@ def test_target_c_on_a_device_schedule_says_c_has_no_hardware_axes(
         for line in out.splitlines()
         if "not buildable for the c target: " in line
     ]
-    assert limit.startswith("tag(scale.i, 'g.0') puts a loop on a hardware axis")
+    assert limit.startswith("the loop scale.i on g.0 is on a hardware axis")
     lines, header = refutation_block(out, "scale at fixture.py:")
     assert lines[header].endswith(
         "c code can be generated for scale after tag(scale.i, 'g.0')"
