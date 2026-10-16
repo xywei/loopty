@@ -548,6 +548,10 @@ class SeriesTerms:
     rewrites by the identities, applies the theorem with its variables given
     by name, and closes what is left with the hypotheses or arithmetic. A
     claim about reals or complex numbers is Mathlib's.
+
+    The theorem's and the identities' hypotheses are citations
+    (:func:`loopty.obligations.cited`): lanky restates each from the text
+    its own command proved, not by printing it again.
     """
 
     term: Term
@@ -557,7 +561,13 @@ class SeriesTerms:
     def lean_obligation(self) -> Any:
         """The parts, one per order (see :mod:`lanky.obligations`)."""
         from loopty.hypotheses import _fresh, substitute
-        from loopty.obligations import Claim, _declined, _lanky_obligations, _obligation
+        from loopty.obligations import (
+            Claim,
+            _declined,
+            _lanky_obligations,
+            _obligation,
+            cited,
+        )
 
         lanky = _lanky_obligations()
         if "rewrites" not in getattr(lanky.Hints, "__dataclass_fields__", {}):
@@ -608,6 +618,7 @@ class SeriesTerms:
             ]
             rewritten.append((identity_term, values))
         family = mapping[series.family]
+        theorems = (theorem, *(identity.theorem for identity, _ in series.rewrites))
         parts = []
         for order, added in series.terms:
             claim = Claim(self.term, sorts=sorts)
@@ -636,6 +647,7 @@ class SeriesTerms:
                     closed,
                     hints,
                     mathlib=True,
+                    **cited(guards, theorems),
                 )
             )
         return _obligation(

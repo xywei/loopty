@@ -8,6 +8,21 @@ All notable changes to loopty are recorded here. The format follows
 
 ### Fixed
 
+- **A cited theorem is restated from the text Lean proved of it.** A theorem
+  applied to a kernel's postcondition, the theorem and identities of a
+  series row, and the theorems a program's postcondition unfolds through are
+  hypotheses of the part loopty states for Lean, and were printed again from
+  the theorem's term: a printer that dropped a condition of the theorem
+  would have handed the part a hypothesis that proves anything (a theorem
+  restated without its recurrence proves that any offsets that start at
+  zero increase). Each part now names those hypotheses as citations, and
+  lanky's Lean oracle restates each from the `as_cited` text the theorem's
+  own command proved, before any variable of the part, and refuses a part
+  whose citation is not the theorem's statement. A theorem with no proved
+  text, an axiom or one only tested, is restated as before, and the row
+  says so. Needs the lanky of the same name; against lanky 0.4.0 the parts
+  are what they were.
+
 - **A run leaves no `tmp_loopy*` directory behind (#335).** loopy 2025.2's C
   compiler makes a directory in `$TMPDIR` with each C target and never
   removes it, and loopty made a target with each kernel: `loopty run
