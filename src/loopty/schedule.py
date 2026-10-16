@@ -302,6 +302,7 @@ from loopty.handles import (
     _Index,
     _Several,
     binders_of,
+    statement_names,
 )
 from loopty.handles import (
     _index as _handles_of,
@@ -317,7 +318,7 @@ from loopty.lower import (
     reductions_of,
 )
 from loopty.obligations import IslOnly
-from loopty.source import instances_text
+from loopty.source import Named, as_spelled, instances_text
 from loopty.term import Stmt, Term, commutes
 from loopty.typing import layout_fact_ids
 
@@ -4057,15 +4058,25 @@ class Schedule:
                 return f"{self._shown(name[: -len(prefix)], loops)}.{prefix[1:]}"
         return name
 
+    def _statement_names(self) -> Named:
+        """The term's statements as a message names them, by the schedule's paths."""
+        return statement_names(self._term, self._handles)
+
     def _stmt_shown(self, stmt_id: str) -> str:
-        """A statement as the source writes it, with its line, or its id."""
-        try:
-            stmt = self._term.stmt(stmt_id)
-        except KeyError:
+        """A statement as the source writes it, with its line, or its id.
+
+        A statement loopty adds by what it is (:class:`loopty.source.Named`).
+        """
+        return self._statement_names()(stmt_id)
+
+    def _mapped_shown(self, stmt_id: str) -> str:
+        """A statement a map names by its id, with its text: ``S0 (u[t + 1, i] =
+        ..., stencil_skew.py:62)``, which tells the reader which one it is."""
+        shown = self._stmt_shown(stmt_id)
+        if shown == stmt_id or not shown.endswith(")"):
             return stmt_id
-        if stmt.text and stmt.where:
-            return f"{stmt.text} ({stmt.where})"
-        return stmt.text or stmt_id
+        text, _, where = shown[:-1].rpartition(" (")
+        return f"{stmt_id} ({text}, {where})"
 
     def _stmts_shown(self, stmt_ids: Iterable[str], word: str = "or") -> str:
         """Statements as a reader knows them: by their call, or as written.
@@ -4085,9 +4096,6 @@ class Schedule:
         for stmt_id in stmt_ids:
             if stmt_id in calls:
                 out.append(self._handles.scope_path(calls[stmt_id]))
-            elif stmt_id.endswith(".zeros"):
-                array = stmt_id[: -len(".zeros")]
-                out.append(f"the zeros of {self._shown_array(array)}")
             else:
                 out.append(self._stmt_shown(stmt_id))
         return _joined(list(dict.fromkeys(out)), word)
@@ -4431,9 +4439,10 @@ class Schedule:
                 if part is None:
                     outside = [name for name in inputs if name not in coords]
                     raise ValueError(
-                        f"{text}: {stmt_id} runs in {', '.join(inside)} but not "
-                        f"in {', '.join(outside)}, and the map mixes them, so it "
-                        "has no part that moves the loops of that statement alone"
+                        f"{text}: {self._stmt_shown(stmt_id)} runs in "
+                        f"{', '.join(inside)} but not in {', '.join(outside)}, "
+                        "and the map mixes them, so it has no part that moves "
+                        "the loops of that statement alone"
                     )
                 own = part
             first = min(coords.index(name) for name in inside)
@@ -4507,9 +4516,10 @@ class Schedule:
                     "make, so their maps have to make the same new ones"
                 )
                 raise ValueError(
-                    f"{text}: the map of {stmt_id} takes [{', '.join(ins)}] to "
-                    f"[{', '.join(outs)}] and the map of {other} takes "
-                    f"[{', '.join(other_ins)}] to [{', '.join(other_outs)}]; {why}"
+                    f"{text}: the map of {self._mapped_shown(stmt_id)} takes "
+                    f"[{', '.join(ins)}] to [{', '.join(outs)}] and the map of "
+                    f"{self._mapped_shown(other)} takes [{', '.join(other_ins)}] "
+                    f"to [{', '.join(other_outs)}]; {why}"
                 )
             for name in ins:
                 taken.setdefault(name, (stmt_id, ins))
@@ -4522,30 +4532,33 @@ class Schedule:
             if not inside:
                 if piece is not None:
                     raise ValueError(
-                        f"{text}: {stmt_id} does not run in {', '.join(ins)}, so "
-                        "its map has no loop of it to move"
+                        f"{text}: {self._mapped_shown(stmt_id)} does not run in "
+                        f"{', '.join(ins)}, so its map has no loop of it to move"
                     )
                 continue
             if piece is None:
                 raise ValueError(
-                    f"{text}: {stmt_id} runs in {', '.join(inside)} and is given "
-                    "no map; with a map per statement, every statement in the "
-                    "loops the maps name needs one"
+                    f"{text}: {self._mapped_shown(stmt_id)} runs in "
+                    f"{', '.join(inside)} and is given no map; with a map per "
+                    "statement, every statement in the loops the maps name "
+                    "needs one"
                 )
             outside = [name for name in ins if name not in coords]
             if outside:
                 mine = [name for name in ins if name in coords]
                 raise ValueError(
-                    f"{text}: {stmt_id} runs in {', '.join(mine)} but not in "
-                    f"{', '.join(outside)}, and a map per statement moves "
-                    "statements that run in every loop it names"
+                    f"{text}: {self._mapped_shown(stmt_id)} runs in "
+                    f"{', '.join(mine)} but not in {', '.join(outside)}, and a "
+                    "map per statement moves statements that run in every loop "
+                    "it names"
                 )
             extra = [name for name in inside if name not in ins]
             if extra:
                 owner = taken[extra[0]][0]
                 raise ValueError(
-                    f"{text}: {stmt_id} runs in {', '.join(extra)} as well, which "
-                    f"the map of {owner} moves and its own does not; a "
+                    f"{text}: {self._mapped_shown(stmt_id)} runs in "
+                    f"{', '.join(extra)} as well, which the map of "
+                    f"{self._mapped_shown(owner)} moves and its own does not; a "
                     "statement's map moves every loop of the step it runs in"
                 )
 
@@ -5636,7 +5649,7 @@ class Schedule:
                 "computes the value of the one statement that stores it"
             )
         (producer,) = producers
-        why = _not_pointwise(producer, array, term)
+        why = _not_pointwise(producer, array, term, self._statement_names())
         if why is not None:
             raise ValueError(f"{text}: {why}")
         # The reads of the producer move to the readers, and a window is
@@ -5754,7 +5767,8 @@ class Schedule:
         staged._flow_note = (
             f"those of {term.name} with {array} computed where it is read: the "
             f"dependences of {', '.join(sorted(gone))} dropped, and those of "
-            f"{producer.id}'s reads carried over to the reads of {array}"
+            f"{self._stmt_shown(producer.id)}'s reads carried over to the reads "
+            f"of {array}"
         )
         staged._reindex = self._reindex.intersect_domain(staged._origin)
         staged._instances = staged._reindex.range().coalesce()
@@ -5926,7 +5940,7 @@ class Schedule:
                     f"{self._shown_array(computed)} where it is read, not both"
                 )
         producers, readers = win.preconditions(
-            term, array, self._gone, text, lambda sid: self._stmts_shown([sid])
+            term, array, self._gone, text, self._stmt_shown
         )
         statements = {
             *(producer.id for producer in producers),
@@ -6171,7 +6185,7 @@ class Schedule:
                     [ids[producer.id] for producer in producers],
                     chosen,
                     removed,
-                    {insn: stmt_id for stmt_id, insn in ids.items()},
+                    {insn: self._stmt_shown(stmt_id) for stmt_id, insn in ids.items()},
                 )
                 if not isinstance(plan, str) and plan[0] in self._strides:
                     plan = (
@@ -6527,14 +6541,8 @@ class Schedule:
         if verdict.ok is not True:
             witness = verdict.witness
             detail = verdict.detail
-            # the statements as a reader knows them, by their calls
+            # the statements by their text and line, as the detail names them
             said = verdict.detail
-            for stmt in (*producers, *readers):
-                said = re.sub(
-                    rf"(?<![\w.@]){re.escape(stmt.id)}(?![\w])",
-                    self._stmts_shown([stmt.id]),
-                    said,
-                )
             message = (
                 f"{text} illegal: {said}, so the read would see the "
                 f"zeros the array was made with, and {losing}"
@@ -6558,7 +6566,10 @@ class Schedule:
                 witness = self._pair_in(early.relation)
                 (reader, coords), (writer, stored), params = witness
                 cell = _cell_text(early.source_indices, coords, params)
-                detail = f"{reader} reads {array} before {writer} stores it"
+                detail = (
+                    f"{self._stmt_shown(reader)} reads {array} before "
+                    f"{self._stmt_shown(writer)} stores it"
+                )
                 reading, storing = self._named((reader, coords), (writer, stored))
                 message = (
                     f"{text} illegal: {reading} reads {array}[{cell}] before "
@@ -6956,7 +6967,9 @@ class Schedule:
                 raise ValueError(f"{text}: {name} does not write {handle!r}")
             raise ValueError(
                 f"{text}: {name} does not update {handle!r}: "
-                + "; ".join(_no_update_text(stmt) for stmt in writers)
+                + "; ".join(
+                    _no_update_text(stmt, self._statement_names()) for stmt in writers
+                )
                 + f". An update adds to the cell it writes a value that reads "
                 f"nothing else of {array}, {array}[...] += v, and atomic makes "
                 "two such updates safe to run at the same time"
@@ -8404,21 +8417,24 @@ def _sizes_text(
     return f" (at {inner}, {how})"
 
 
-def _no_update_text(stmt: Stmt) -> str:
+def _no_update_text(stmt: Stmt, named: Named) -> str:
     """What a statement that writes an array does instead of updating it.
 
-    ``S0 writes y[cell[c, k]] = y[cell[c, k]] * yl[c, k], which is not
-    y[cell[c, k]] plus a value that reads nothing else of y``, for
-    :meth:`Schedule.atomic`; the sum of a value that is not an integer into
-    an integer array is named as such (see :func:`loopty.trace.update_exactness`).
+    ``y[cell[c, k]] *= yl[c, k] (f.py:12) writes y[cell[c, k]] = y[cell[c,
+    k]] * yl[c, k], which is not y[cell[c, k]] plus a value that reads
+    nothing else of y``, for :meth:`Schedule.atomic`, the statement named as
+    ``named`` names it; the sum of a value that is not an integer into an
+    integer array is named as such (see :func:`loopty.trace.update_exactness`).
     """
     from lanky.terms import render
 
     from loopty.trace import update_operands
 
     array = stmt.assignee.array
-    cell = f"{array}[{', '.join(render(i) for i in stmt.assignee.indices)}]"
-    written = f"{stmt.id} writes {cell} = {render(stmt.expr)}"
+    indices = as_spelled(stmt, *stmt.assignee.indices)
+    (value,) = as_spelled(stmt, stmt.expr)
+    cell = f"{array}[{', '.join(render(i) for i in indices)}]"
+    written = f"{named(stmt.id)} writes {cell} = {render(value)}"
     if stmt.kind != "accumulate":
         return f"{written}, which replaces the cell's value"
     if update_operands(stmt.expr, stmt.assignee, stmt.guard) is not None:
@@ -8469,21 +8485,8 @@ def _subscript_text(dep: _Dep, term: Term | None = None) -> str:
             stmt = term.stmt(dep.sink if sink else dep.source)
         except KeyError:
             stmt = None
-        if stmt is not None and stmt.spelled and len(set(stmt.spelled)) == len(
-            stmt.spelled
-        ):
-            names = {
-                name: spelled
-                for name, spelled in zip(stmt.inames, stmt.spelled, strict=False)
-                if name != spelled
-            }
-            if names:
-                from loopty.compose import rename_expr
-
-                try:
-                    indices = tuple(rename_expr(index, names, {}) for index in indices)
-                except Exception:  # noqa: BLE001 - the term's names stand
-                    pass
+        if stmt is not None:
+            indices = as_spelled(stmt, *indices)
     return f"{dep.array}[{', '.join(render(i) for i in indices)}]"
 
 
@@ -8638,7 +8641,9 @@ def _joined(names: Iterable[str], word: str = "and") -> str:
     return f"{', '.join(shown[:-1])} {word} {shown[-1]}"
 
 
-def _not_pointwise(stmt: Stmt, array: str, term: Term) -> str | None:
+def _not_pointwise(
+    stmt: Stmt, array: str, term: Term, named: Named | None = None
+) -> str | None:
     """Why :meth:`Schedule.substitute` cannot compute ``stmt`` where it is read.
 
     ``None`` when it can: an assignment of one cell per instance, at its own
@@ -8648,38 +8653,40 @@ def _not_pointwise(stmt: Stmt, array: str, term: Term) -> str | None:
     expression with the loop variables replaced by ``e``, which is what
     loopy's ``assignment_to_subst`` writes.
     """
+    said = (named or statement_names(term))(stmt.id)
     indices = stmt.assignee.indices
     names = [
         index.name if isinstance(index, prim.Variable) else None for index in indices
     ]
     if stmt.kind != "assign":
         return (
-            f"{stmt.id} accumulates into {array}, and a substitution computes a "
+            f"{said} accumulates into {array}, and a substitution computes a "
             "value stored once"
         )
     if None in names or len(set(names)) != len(names) or set(names) != set(stmt.inames):
-        shown = ", ".join(str(index) for index in indices)
+        shown = ", ".join(str(index) for index in as_spelled(stmt, *indices))
+        loops = as_spelled(stmt, *(prim.Variable(name) for name in stmt.inames))
         return (
-            f"{stmt.id} stores {array}[{shown}], and a substitution computes a "
+            f"{said} stores {array}[{shown}], and a substitution computes a "
             "statement that stores one cell per instance, at its own loop "
-            f"variables ({', '.join(stmt.inames)}), each once"
+            f"variables ({', '.join(str(loop) for loop in loops)}), each once"
         )
     if reductions_of(stmt.expr):
         return (
-            f"{stmt.id} stores a sum, which a substitution would compute again "
+            f"{said} stores a sum, which a substitution would compute again "
             "at every read of it; only a pointwise statement is substituted"
         )
     if stmt.unnarrowed:
         conjuncts = ", ".join(conjunct for conjunct, _why in stmt.unnarrowed)
         return (
-            f"{stmt.id} runs under a guard isl cannot state ({conjuncts}), so "
+            f"{said} runs under a guard isl cannot state ({conjuncts}), so "
             "which cells it stores is not known"
         )
     if any(
         kind == "read" and name == array
         for kind, name, _indices, _part in _accesses(stmt, term)
     ):
-        return f"{stmt.id} reads {array} as well as storing it"
+        return f"{said} reads {array} as well as storing it"
     return None
 
 

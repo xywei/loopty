@@ -91,6 +91,7 @@ from loopty.description import (
     describe,
     description_of,
 )
+from loopty.handles import statement_names
 from loopty.oracle import Empty
 from loopty.term import ArrType, Hypothesis, Stmt, Term
 
@@ -273,6 +274,7 @@ def _stored(
             owner=owner,
         )
     equations: list[Hypothesis] = []
+    named = statement_names(term)
     for stmt in term.stmts:
         array = stmt.assignee.array
         if array not in facts:
@@ -301,7 +303,7 @@ def _stored(
         equations.append(
             Hypothesis(
                 claim=equation,
-                source=f"what {stmt.id} stores in {array} at {stmt.where}",
+                source=f"what {named(stmt.id)} stores in {array}",
                 rests_on=tuple(facts[name].id for name in needs),
                 mentions=frozenset(mentions),
             )
@@ -314,18 +316,19 @@ def _single_assignment(term: Term, array: str) -> tuple[Any, list[Stmt], list] |
     from loopty.obligations import _affine, _both, _time_map, stated_writers
 
     writers = [stmt for stmt in term.stmts if stmt.assignee.array == array]
+    named = statement_names(term)
     for stmt in writers:
         if stmt.kind == "assign":
             continue
         if stmt.exactness is None:
             # y[i] = 2 * y[i]: the store reads the cell it stores, first
-            return f"{stmt.id} stores a cell of {array} that {stmt.id} reads before it"
+            return f"{named(stmt.id)} stores a cell of {array} that it reads before"
         # an update, y[i] += v or a scatter-add y[cell[c, k]] += v: the cell
         # holds what it held on entry and every update, which is no one
         # statement's value
         shown = ", ".join(str(index) for index in stmt.assignee.indices)
         return (
-            f"{stmt.id} updates {array}[{shown}] in place, so a cell of {array} "
+            f"{named(stmt.id)} updates {array}[{shown}] in place, so a cell of {array} "
             "holds what it held on entry plus every update, not what one "
             "statement stores"
         )
@@ -367,8 +370,14 @@ def _single_assignment(term: Term, array: str) -> tuple[Any, list[Stmt], list] |
                 pairs = pairs.subtract(identity)
             if not keep(pairs, f"store{len(pieces)}"):
                 if second is first:
-                    return f"two instances of {first.id} store into one cell of {array}"
-                return f"{first.id} and {second.id} store into one cell of {array}"
+                    return (
+                        f"two instances of {named(first.id)} store into one cell "
+                        f"of {array}"
+                    )
+                return (
+                    f"{named(first.id)} and {named(second.id)} store into one cell "
+                    f"of {array}"
+                )
     for stmt, indices, inames, domain in places:
         reads = flow.access_relation(inames, domain, indices)
         reading = _reading_time(stmt, inames, depth)
@@ -385,8 +394,8 @@ def _single_assignment(term: Term, array: str) -> tuple[Any, list[Stmt], list] |
             same, after = _both(same, after)
             if not keep(same.intersect(after), f"read{len(pieces)}"):
                 return (
-                    f"{writer.id} stores a cell of {array} that {stmt.id} reads "
-                    "before it"
+                    f"{named(writer.id)} stores a cell of {array} that "
+                    f"{named(stmt.id)} reads before it"
                 )
     question = None
     for piece in pieces:

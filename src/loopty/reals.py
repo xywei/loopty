@@ -281,6 +281,9 @@ def _cell_value(term: Term, cell: Any, written: set[str]) -> tuple[str, Any]:
     at = tuple(_concrete(item) for item in index)
     if any(item is None for item in at):
         raise _Unstated(f"{render(cell)} is no cell at a point with a value")
+    from loopty.handles import statement_names
+
+    named = statement_names(term)
     found = []
     for stmt in term.stmts:
         if (
@@ -303,15 +306,19 @@ def _cell_value(term: Term, cell: Any, written: set[str]) -> tuple[str, Any]:
                 stored_here = stored_here and _concrete(item) == value
             else:
                 raise _Unstated(
-                    f"{stmt.id} stores {array} at cells that are not its loops"
+                    f"{named(stmt.id)} stores {array} at cells that are not its loops"
                 )
         if not stored_here:
             continue
         if set(values) != set(stmt.inames):
-            raise _Unstated(f"{stmt.id} stores {array} at cells that are not its loops")
+            raise _Unstated(
+                f"{named(stmt.id)} stores {array} at cells that are not its loops"
+            )
         domain = stmt.domain
         if domain.dim(isl.dim_type.param):
-            raise _Unstated(f"{stmt.id}'s loops run to a size, which has no value here")
+            raise _Unstated(
+                f"the loops of {named(stmt.id)} run to a size, which has no value here"
+            )
         point = domain
         for position, name in enumerate(domain.get_var_names(isl.dim_type.set)):
             point = point.fix_val(isl.dim_type.set, position, values[name])
@@ -320,7 +327,7 @@ def _cell_value(term: Term, cell: Any, written: set[str]) -> tuple[str, Any]:
         from loopty.hypotheses import _names
 
         if _names(stmt.expr) & written:
-            raise _Unstated(f"{stmt.id} reads what {term.name} writes")
+            raise _Unstated(f"{named(stmt.id)} reads what {term.name} writes")
         found.append(_expanded(stmt.expr, values, term))
     if len(found) != 1:
         raise _Unstated(f"no one statement of {term.name} stores {render(cell)}")

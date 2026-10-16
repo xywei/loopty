@@ -146,6 +146,7 @@ from loopty.obligations import (
     ordering_obligation,
 )
 from loopty.oracle import Empty, Monotone, Subset
+from loopty.source import Named, as_spelled
 from loopty.term import Argument, ArrType, Term, commutes
 from loopty.trace import reductions_in
 
@@ -339,7 +340,12 @@ def in_bounds_facts(
     ``Ft[3*x + 0, k, c]``, ``Ft[3*x + 1, k, c]`` and ``Ft[3*x + 2, k, c]``.
     Those are gathered into the access the source writes, with one fact,
     ``Ft[3*x + d, k, c] is in bounds for every d in Fin(3) and every instance
-    of S0``, about the cells all three reach (:func:`_gathered_over_unrolled`).
+    of Fe[x, ...] = reduce_sum(...) (hexahedra.py:207)``, about the cells all
+    three reach (:func:`_gathered_over_unrolled`).
+
+    A fact names the statement as a message does, by its text and line
+    (:class:`loopty.source.Named`); its id names it by the term's id, which
+    stays the same when a line moves.
     """
     from loopty.table import table_type
 
@@ -353,6 +359,7 @@ def in_bounds_facts(
     # ``cnt[r]`` by the parameter the statement domains already use.
     reflections = term.reflections
     families = _rewritten_layouts(term)
+    stmt_name = _names(term)
     facts: list[Fact] = []
     for stmt in term.stmts:
         listed: dict[
@@ -379,10 +386,11 @@ def in_bounds_facts(
             each = "" if unrolled is None else " for every {} in Fin({})".format(
                 *unrolled
             )
-            # "for every d in Fin(3) and every instance of S0": the binder
-            # first, which a table that cuts the row keeps on screen
+            # "for every d in Fin(3) and every instance of y[i] = ... (f.py:3)":
+            # the binder first, which a table that cuts the row keeps on screen
             instances = (
-                f"{each}{' and' if each else ' for'} every instance of {stmt.id}"
+                f"{each}{' and' if each else ' for'} every instance of "
+                f"{stmt_name(stmt.id)}"
             )
             identifier = fact_id(
                 "in-bounds",
@@ -768,8 +776,8 @@ def _mixed_fact(
         id=identifier,
         kind="in-bounds",
         statement=(
-            f"{subject} is in bounds for every instance of {stmt.id} "
-            f"({reason}, by type)"
+            f"{subject} is in bounds for every instance of "
+            f"{_names(term)(stmt.id)} ({reason}, by type)"
         ),
         term=Subset(
             reached,
@@ -906,6 +914,17 @@ def _listed(items: Sequence[str]) -> str:
     return f"{', '.join(items[:-1])} and {items[-1]}"
 
 
+def _names(term: Term) -> Named:
+    """``term``'s statements as a message names them: ``y[r] = ... (f.py:3)``.
+
+    By the source's text and line, and a statement loopty adds by what it
+    is (:class:`loopty.source.Named`); a call and an array by their paths.
+    """
+    from loopty.handles import statement_names
+
+    return statement_names(term)
+
+
 def _unnarrowed(stmt: Any) -> dict[str, Any]:
     """The provenance of a fact stated over a domain its guard left wide.
 
@@ -1004,6 +1023,7 @@ def element_sort_facts(
     reflections = term.reflections
     sorts = _element_sort_ids(term, owner, module=module, line=line)
     layouts = layout_fact_ids(term, owner, module=module, line=line)
+    stmt_name = _names(term)
     facts: list[Fact] = []
     for stmt in term.stmts:
         written = stmt.assignee
@@ -1014,11 +1034,21 @@ def element_sort_facts(
         value = stmt.expr
         shown = render(value)
         identifier = _element_sort_id(stmt, owner, module=module, line=line)
-        statement = (
-            f"the value {stmt.id} writes into {cell}, {shown}, is a point of {sort}"
-            if written.array != term.result
-            else f"the value {term.name} returns, {shown}, is a point of {sort}"
-        )
+        if written.array == term.result:
+            statement = f"the value {term.name} returns, {shown}, is a point of {sort}"
+        elif not stmt.text:
+            statement = (
+                f"the value {stmt.id} writes into {cell}, {shown}, is a point of "
+                f"{sort}"
+            )
+        elif "..." in stmt.text:
+            # the text keeps what it writes into, and the value where it is whole
+            statement = (
+                f"the value {stmt_name(stmt.id)} writes, {shown}, is a point of "
+                f"{sort}"
+            )
+        else:
+            statement = f"the value {stmt_name(stmt.id)} writes is a point of {sort}"
         common = {
             "statement": stmt.id,
             "array": written.array,
@@ -1079,8 +1109,8 @@ def element_sort_facts(
                 term=Empty(
                     outside,
                     description=(
-                        f"instances of {stmt.id} writing a value outside {sort} "
-                        f"into {written.array}"
+                        f"instances of {stmt_name(stmt.id)} writing a value "
+                        f"outside {sort} into {written.array}"
                     ),
                     labels=tuple(stmt.inames),
                     lean=Stated(
@@ -1198,10 +1228,13 @@ def layout_facts(
     native runs may still refute it (:func:`loopty.faithful.layout_fact`).
     """
     facts: list[Fact] = []
+    stmt_name = _names(term)
     for counts, family in _rewritten_layouts(term).items():
         arrays = _listed(family["arrays"])
         written = _listed(family["written"])
         writers = [stmt.id for stmt in family["statements"]]
+        said = stmt_name.listed(writers)
+        write = "writes" if len(set(map(stmt_name, writers))) == 1 else "write"
         provenance: dict[str, Any] = {
             "counts": counts,
             "arrays": list(family["arrays"]),
@@ -1214,7 +1247,7 @@ def layout_facts(
             induced = _layout_by_induction(term, counts, family)
             if isinstance(induced, str):
                 provenance["reason"] = (
-                    f"{_listed(writers)} write {written}, which the rows of "
+                    f"{said} {write} {written}, which the rows of "
                     f"{arrays} are read through. Their accesses are in bounds "
                     "against the length of their row, and their cells are told "
                     "apart as [r, j], which holds of the flat buffer while every "
@@ -1230,7 +1263,10 @@ def layout_facts(
         else:
             question, restated, fixed = question
             provenance["rule"] = _row_starts_rule(
-                term.offsets_of(counts) or "", counts, restated, fixed
+                term.offsets_of(counts) or "",
+                counts,
+                [stmt_name(stmt_id) for stmt_id in restated],
+                [stmt_name(stmt_id) for stmt_id in fixed],
             )
             provenance["restated"] = restated
             provenance["fixed"] = fixed
@@ -1264,7 +1300,7 @@ def layout_facts(
                 kind="layout",
                 statement=(
                     f"the rows of {arrays} stay inside their buffers and apart "
-                    f"while {_listed(writers)} write {written}"
+                    f"while {said} {write} {written}"
                 ),
                 term=None if isinstance(question, str) else question,
                 status=Status.ASSUMED,
@@ -1334,11 +1370,13 @@ def _row_starts_question(
             f"{counts} has {len(counts_type.axes)} axes, and the rule follows "
             "the starts of the rows of a counts array with one"
         )
+    stmt_name = _names(term)
     if counts in family["written"]:
         writers = [s.id for s in family["statements"] if s.assignee.array == counts]
+        verb = "writes" if len(writers) == 1 else "write"
         return (
-            f"{_listed(writers)} write {counts}, the lengths of the rows, and "
-            "no rule follows what a row's new length reaches"
+            f"{stmt_name.listed(writers)} {verb} {counts}, the lengths of the "
+            "rows, and no rule follows what a row's new length reaches"
         )
     offsets = term.offsets_of(counts)
     unchecked = [
@@ -1371,8 +1409,8 @@ def _row_starts_question(
         if instances is None:
             cell = _access_text(stmt.assignee.array, stmt.assignee.indices)
             return (
-                f"{stmt.id} writes {cell} = {render(stmt.expr)}, which is "
-                f"neither the start the counts give the row, {offsets}[q - 1] "
+                f"{stmt_name(stmt.id)} writes {cell} = {render(stmt.expr)}, which "
+                f"is neither the start the counts give the row, {offsets}[q - 1] "
                 f"+ {counts}[q - 1] at q >= 1, nor a value of the loop "
                 "variables and the sizes alone"
             )
@@ -1396,7 +1434,7 @@ def _row_starts_question(
     question = Empty(
         flow.assume_sizes(found, sizes),
         description=(
-            f"instances of {_listed(ids) or 'no statement'} that write into "
+            f"instances of {stmt_name.listed(ids) or 'no statement'} that write into "
             f"{offsets} the start of a row which the counts in {counts} can "
             "put elsewhere (the start of row q is the sum of the counts before "
             "it, and only row 0 starts at 0 whatever they are)"
@@ -1556,6 +1594,7 @@ def _beyond_the_order(
 
     statements = family["statements"]
     arrays = list(family["arrays"])
+    stmt_name = _names(term)
     if offsets is not None:
         movers = [stmt.id for stmt in statements if stmt.assignee.array == offsets]
         stored = [
@@ -1566,8 +1605,9 @@ def _beyond_the_order(
         if movers and stored:
             writers = [stmt.id for stmt in term.stmts if stmt.assignee.array in stored]
             return (
-                f"{_listed(movers)} {verb(movers)} {offsets}, which can move a row "
-                f"of {_listed(arrays)}, and {_listed(writers)} {verb(writers)} "
+                f"{stmt_name.listed(movers)} {verb(movers)} {offsets}, which can "
+                f"move a row of {_listed(arrays)}, and {stmt_name.listed(writers)} "
+                f"{verb(writers)} "
                 f"{_listed(stored)}, whose disjoint writes and dependences tell "
                 "its cells apart as [r, j]: one cell of the buffer each only "
                 "while every row keeps its start, which the rows in order do not "
@@ -1593,7 +1633,8 @@ def _beyond_the_order(
         ]
         if bounds:
             return (
-                f"{stmt.id} writes {lengths} inside a loop over a row, which runs "
+                f"{stmt_name(stmt.id)} writes {lengths} inside a loop over a row, "
+                "which runs "
                 f"to the length it read as {_listed(bounds)} when it started: the "
                 "in-bounds facts of the row's entries are stated against that "
                 "reading, which a write that shortens the row leaves behind, and "
@@ -1662,10 +1703,12 @@ def _read_behind(
                     continue
                 if not _may_write_a_read(writer, read):
                     continue
+                stmt_name = _names(term)
                 return (
-                    f"{writer.id} writes {writer.assignee.array} inside the loop "
-                    f"over {around[-1]}, which read the length of the row as "
-                    f"{name} when it started: from the write on, {stmt.id} reads "
+                    f"{stmt_name(writer.id)} writes {writer.assignee.array} inside "
+                    f"the loop over {around[-1]}, which read the length of the row "
+                    f"as {name} when it started: from the write on, "
+                    f"{stmt_name(stmt.id)} reads "
                     "the row against the length the write left, which isl cannot "
                     "read, and not against that reading"
                 )
@@ -1910,13 +1953,17 @@ def _layout_by_induction(
     #: Each statement's question as discharge stated it, for Lean.
     stated: list[tuple[str, Any]] = []
     writers: list[str] = []
+    stmt_name = _names(term)
     for index, stmt in enumerate(term.stmts):
         if not any(stmt is writer for writer in family["statements"]):
             continue
         writers.append(stmt.id)
         cell_text = _access_text(stmt.assignee.array, stmt.assignee.indices)
         if len(stmt.assignee.indices) != 1:
-            return f"{stmt.id} writes {cell_text}, which has more than one index"
+            return (
+                f"{stmt_name(stmt.id)} writes {cell_text}, which has more than "
+                "one index"
+            )
         (c,) = stmt.assignee.indices
         v = stmt.expr
         inside = unless(Comparison(c, "<", 0), Comparison(c, ">=", rows))
@@ -1972,7 +2019,8 @@ def _layout_by_induction(
             nonneg={*sizes, buffer.name},
             reflected=reflected,
             description=(
-                f"instances of {stmt.id} whose write of {cell_text} breaks the "
+                f"instances of {stmt_name(stmt.id)} whose write of {cell_text} "
+                "breaks the "
                 f"order of the rows of {_listed(arrays)} where it held"
             ),
         )
@@ -1982,7 +2030,8 @@ def _layout_by_induction(
                 shown = list(outcome.unstated[:3])
                 reason += "; isl cannot state " + "; ".join(shown)
             return (
-                f"by induction over the run, {stmt.id} writes {cell_text} = "
+                f"by induction over the run, {stmt_name(stmt.id)} writes "
+                f"{cell_text} = "
                 f"{render(v)}, and the rows in order before it leave room for a "
                 f"write out of order: {reason}"
             )
@@ -2008,7 +2057,8 @@ def _layout_by_induction(
     question = Empty(
         flow.assume_sizes(found, {*sizes, buffer.name}),
         description=(
-            f"instances of {_listed(writers)} whose write breaks the order of the "
+            f"instances of {stmt_name.listed(writers)} whose write breaks the "
+            "order of the "
             f"rows of {_listed(arrays)} where it held"
         ),
         labels=labels,
@@ -2017,7 +2067,7 @@ def _layout_by_induction(
         lean=Stated(partial(merged_obligation, tuple(stated))),
     )
     rule = _INDUCTION_RULE.format(
-        arrays=_listed(arrays), laid=laid, writers=_listed(writers)
+        arrays=_listed(arrays), laid=laid, writers=stmt_name.listed(writers)
     )
     return question, rule, writers
 
@@ -2059,6 +2109,7 @@ def write_disjointness_facts(
     layouts = layout_fact_ids(term, owner, module=module, line=line)
     by_statement = {stmt.id: stmt for stmt in term.stmts}
     sums = accumulating(term)
+    stmt_name = _names(term)
     facts: list[Fact] = []
     for footprint in flow.footprints(term):
         if not footprint.touches_memory or footprint.array == term.result:
@@ -2074,7 +2125,7 @@ def write_disjointness_facts(
             detail=f"{stmt.id}:{footprint.array}",
         )
         statement = (
-            f"distinct instances of {stmt.id} write distinct cells of "
+            f"distinct instances of {stmt_name(stmt.id)} write distinct cells of "
             f"{footprint.array}"
         )
         if _is_widened(footprint.relation, stmt.assignee.indices):
@@ -2119,7 +2170,10 @@ def write_disjointness_facts(
                 statement=statement,
                 term=Empty(
                     collisions,
-                    description=f"pairs of {stmt.id} instances writing the same cell",
+                    description=(
+                        f"pairs of instances of {stmt_name(stmt.id)} writing the "
+                        "same cell"
+                    ),
                     labels=labels,
                     lean=Stated(
                         partial(
@@ -2239,10 +2293,8 @@ def kernel_definedness_facts(
             continue
         question, relations = found
         readers = list(dict.fromkeys(stmt.id for stmt, *_ in places))
-        verb = "reads" if len(readers) == 1 else "read"
-        statement = (
-            f"every cell of {array} that {' and '.join(readers)} {verb}, "
-            f"{' or '.join(writer.id for writer in writers)} wrote before the read"
+        statement = _defined_text(
+            _names(term), array, readers, [writer.id for writer in writers]
         )
         facts.append(
             Fact(
@@ -2278,6 +2330,27 @@ def kernel_definedness_facts(
             )
         )
     return facts
+
+
+def _defined_text(
+    named: Named, array: str, readers: Sequence[str], writers: Sequence[str]
+) -> str:
+    """``every cell of off that b reads was written before the read, by a or itself``.
+
+    A definedness fact's statement: the readers, and the writers each named
+    once, a reader that writes the cells it reads as ``itself``.
+    """
+    verb = "reads" if len(readers) == 1 else "read"
+    alone = readers[0] if len(readers) == 1 else None
+    by = list(dict.fromkeys(named(writer) for writer in writers if writer != alone))
+    if alone in writers:
+        by.append("itself")
+    if len(by) > 2:
+        by = [", ".join(by[:-1]), by[-1]]
+    return (
+        f"every cell of {array} that {named.listed(readers)} {verb} was written "
+        f"before the read, by {' or '.join(by)}"
+    )
 
 
 def ordering_facts(
@@ -2318,8 +2391,9 @@ def ordering_facts(
     # A statement whose guard is only partly stated contributes dependences
     # from instances that write nothing; see _unnarrowed.
     provenance: dict[str, Any] = {"dependences": str(deps)}
+    stmt_name = _names(term)
     wide = {
-        stmt.id: _unnarrowed(stmt)["unnarrowed"]
+        stmt_name(stmt.id): _unnarrowed(stmt)["unnarrowed"]
         for stmt in term.stmts
         if stmt.unnarrowed
     }
@@ -2703,12 +2777,12 @@ def definedness_facts(
     When isl shows it, the fact is the subset question, for the isl oracle
     to decide. Where a call reads zeros no call before it stored, the fact
     says so in its statement (``... or one of the zeros f was made with``),
-    and its reason lists the cells (``shifted.S0 reads the zeros at f[0] and
-    f[n - 1]``), so the ledger shows where the zeros are read and a reader
-    of it can tell padding that is meant from a producer that stores too
-    little. Where no call does, the statement is the stricter one, every
-    cell read was stored by a call before it, which is what lets a schedule
-    compute the array where it is read instead
+    and its reason lists the cells (``rhs[i] = ... (composition.py:74) reads
+    the zeros at f[0] and f[n - 1]``), so the ledger shows where the zeros
+    are read and a reader of it can tell padding that is meant from a
+    producer that stores too little. Where no call does, the statement is
+    the stricter one, every cell read was stored by a call before it, which
+    is what lets a schedule compute the array where it is read instead
     (:meth:`loopty.schedule.Schedule.substitute`, whose own ``definedness``
     fact keeps that claim, since the zeros would not be there). It is
     ``refuted`` by isl only for a cell the call reads that neither a call
@@ -2942,6 +3016,7 @@ def scoped_in_bounds_facts(
         for name, typ in term.params
         if not isinstance(typ, ArrType) and _integral(typ)
     }
+    stmt_name = _names(term)
     facts: list[Fact] = []
     for scope in term.scopes:
         for stmt_id in scope.statements:
@@ -2987,8 +3062,8 @@ def scoped_in_bounds_facts(
                     nonneg=set(sizes),
                     reflected={k: v for k, v in reflected.items() if k in params},
                     description=(
-                        f"instances of {stmt.id} at which {text} leaves {array} "
-                        "where the hypotheses used hold"
+                        f"instances of {stmt_name(stmt.id)} at which {text} leaves "
+                        f"{array} where the hypotheses used hold"
                     ),
                 )
                 if not outcome.decided:
@@ -3004,7 +3079,8 @@ def scoped_in_bounds_facts(
                         ),
                         kind="in-bounds",
                         statement=(
-                            f"{text} is in bounds for every instance of {stmt.id}, "
+                            f"{_access_text(array, as_spelled(stmt, *indices))} is "
+                            f"in bounds for every instance of {stmt_name(stmt.id)}, "
                             f"where {scope.call} is called at {scope.where}"
                         ),
                         term=outcome.question,

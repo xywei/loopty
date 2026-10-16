@@ -1914,6 +1914,13 @@ def is_reserved(name: str) -> bool:
     return name in RESERVED_WORDS or RESERVED_PREFIX.match(name) is not None
 
 
+def _said(term: Term, stmt_id: str) -> str:
+    """A statement as a message names it: ``y[i] = x[i] (f.py:3)``."""
+    from loopty.handles import statement_names
+
+    return statement_names(term)(stmt_id)
+
+
 def _sanitize(name: str) -> str:
     """A loopy-safe identifier: every non-word character becomes an underscore."""
     return re.sub(r"\W", "_", name)
@@ -2213,9 +2220,8 @@ def _refuse_bounds_over_reduction_binders(term: Term, builder: _Builder) -> None
                     else:
                         continue
                     over = ", ".join(sorted(depends))
-                    where = f" ({stmt.where})" if stmt.where else ""
                     raise LoweringError(
-                        f"statement {stmt.id} of {term.name}{where} has a "
+                        f"the statement {_said(term, stmt.id)} of {term.name} has a "
                         f"reduction over {', '.join(inner.inames)} bounded by "
                         f"{bound}, which depends on {over}, the binder of the "
                         "reduction it is nested in. A bound that is not affine "
@@ -3409,11 +3415,12 @@ def _refuse_bounds_rewritten_in_a_loop(
                     continue
                 loop = user.inames[row]
                 raise LoweringError(
-                    f"statement {user.id} is bounded by the row length "
-                    f"{count_params[count_id]}, which is computed from {source} "
-                    f"once per row, before the loop over {loop}; {writer.id} "
-                    f"rewrites that row's {source} inside that loop, so from its "
-                    f"second iteration on {user.id} would see the old length "
+                    f"the statement {_said(term, user.id)} is bounded by the row "
+                    f"length {count_params[count_id]}, which is computed from "
+                    f"{source} once per row, before the loop over {loop}; "
+                    f"{_said(term, writer.id)} rewrites that row's {source} inside "
+                    "that loop, so from its second iteration on it would see the "
+                    "old length "
                     "where the body reads the new one. Rewrite it outside the "
                     f"loop over {loop}, or in a kernel of its own."
                 )
@@ -3637,11 +3644,11 @@ def lower_generic(
                 count_id = stale[0]
                 source = count_reads[count_id]
                 raise LoweringError(
-                    f"statement {stmt.id} is bounded by the row length "
-                    f"{count_params[count_id]}, which is computed from {source} "
-                    f"once, where {first_use[count_id]} first needs it; "
-                    f"{rewritten[count_id]} rewrites {source} before {stmt.id} "
-                    f"runs, so {stmt.id} would see the old length. Rewrite "
+                    f"the statement {_said(term, stmt.id)} is bounded by the row "
+                    f"length {count_params[count_id]}, which is computed from "
+                    f"{source} once, where {_said(term, first_use[count_id])} first "
+                    f"needs it; {_said(term, rewritten[count_id])} rewrites {source} "
+                    "before it runs, so it would see the old length. Rewrite "
                     f"{source} after the last statement bounded by it, or in a "
                     "kernel of its own."
                 )

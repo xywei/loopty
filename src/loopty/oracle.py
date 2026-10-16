@@ -524,7 +524,8 @@ def _refutation(question: IslQuestion, verdict: Verdict) -> str:
 
     The question's ``description`` says what was asked. For :class:`Empty` it
     names the bad case, so the witness is one of them: ``[s=0, d0=1] -> [s=0,
-    d0=0] is one of the pairs of S0 instances writing the same cell``. For the
+    d0=0] is one of the pairs of instances of y[i // 2] = x[i] (f.py:3)
+    writing the same cell``. For the
     other three it states the claim, so the witness is the exception: ``cells
     u[i + 1] reaches are cells u has, except [a0=1]``. The sizes the witness was
     read off at close the sentence. A question with no description, or a

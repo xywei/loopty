@@ -103,6 +103,13 @@ def _statement(lowering: Lowering, instruction: str) -> Stmt | None:
     return None
 
 
+def _said(term: Term, stmt_id: str) -> str:
+    """A statement as a message names it: ``y[i] = x[i] (f.py:3)``."""
+    from loopty.handles import statement_names
+
+    return statement_names(term)(stmt_id)
+
+
 def _unread_guard(error: LoopyIndexError, lowering: Lowering) -> GuardNotRead | None:
     """:class:`GuardNotRead` for loopy's refusal where a guard explains it, or ``None``.
 
@@ -137,8 +144,8 @@ def _unread_guard(error: LoopyIndexError, lowering: Lowering) -> GuardNotRead | 
         )
     plural = "s" if len(conjuncts) > 1 else ""
     return GuardNotRead(
-        f"loopy's bounds check refuses an access of {stmt.id} of {term.name} at "
-        f"{stmt.where}: it reads into isl only a guard that is an affine "
+        f"loopy's bounds check refuses an access of {_said(term, stmt.id)} in "
+        f"{term.name}: it reads into isl only a guard that is an affine "
         f"comparison of integers, so under the guard{plural} {guard} it checks "
         "the access at every point of the loops around it, and cannot show it "
         f"in bounds there. {fix}. loopy said: {text}"
@@ -302,7 +309,7 @@ def _called_in_a_guard(error: KeyError, lowering: Lowering) -> LoweringError | N
         return None
     stmt = guarded[0]
     return LoweringError(
-        f"the guard of {stmt.id} of {term.name} at {stmt.where} calls {name}, "
+        f"the guard of {_said(term, stmt.id)} in {term.name} calls {name}, "
         "which loopy cannot call there: its type inference visits a statement's "
         "value and never its guard, so a function only a guard calls is never "
         f"resolved, and loopy failed with KeyError: {name!r} (note 20 in "
