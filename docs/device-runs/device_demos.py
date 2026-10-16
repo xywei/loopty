@@ -155,7 +155,10 @@ def main() -> int:
         fact = ex.differential(spmv_mod.spmv, sched, inputs)
         report(fact)
         dense = spmv_mod.dense(data) @ data["x"].numpy()
-        got = ex.run(sched, **{k: spmv_mod._reset(k, v) for k, v in inputs.items()})
+        # The run writes y in place, so it is given the same matrix afresh:
+        # random_csr is seeded, and the differential above ran on copies.
+        fresh = spmv_mod.random_csr()
+        got = ex.run(sched, **{k: fresh[k] for k in inputs})
         print("  device y   =", np.array2string(np.asarray(got["y"]), precision=6))
         print("  dense ref  =", np.array2string(dense, precision=6))
         print("  max |diff| =", float(np.max(np.abs(np.asarray(got["y"]) - dense))))
