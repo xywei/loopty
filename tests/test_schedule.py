@@ -1424,7 +1424,9 @@ def test_a_statement_in_one_of_two_tiled_loops_is_split_by_its_own_loop() -> Non
     # part over r alone that means anything for it.
     with pytest.raises(ValueError, match="not in j, and the map mixes them"):
         Schedule(term, sizes={"n": 5}).skew(scope(term).j, by=scope(term).r)
-    with pytest.raises(ValueError, match="S0 runs in r but not in j"):
+    # one map for every statement: the statement by its text and line
+    with pytest.raises(ValueError, match=r"y\[r\] = 0\.0 \(test_schedule\.py:\d+\) "
+                       "runs in r but not in j"):
         Schedule(term, sizes={"n": 5}).affine(
             "{ [r, j] -> [a, b] : a = r + j and b = r - j }"
         )
@@ -2214,12 +2216,15 @@ def test_maps_per_statement_move_statements_that_run_in_all_their_loops() -> Non
     from loopty.trace import trace
 
     term = trace(ragged_row_totals, evaluate_annotations(ragged_row_totals))
-    with pytest.raises(ValueError, match="S0 runs in r but not in j"):
+    # a map per statement names it by its id, and the message by both
+    with pytest.raises(
+        ValueError, match=r"S0 \(y\[r\] = 0\.0, test_schedule\.py:\d+\) runs in r but"
+    ):
         Schedule(term).affine(
             "{ S0[r, j] -> [q, k] : q = r and k = j; "
             "S1[r, j] -> [q, k] : q = r and k = j }"
         )
-    with pytest.raises(ValueError, match="S0 does not run in j"):
+    with pytest.raises(ValueError, match=r"S0 \(y\[r\] = 0\.0, .*\) does not run in j"):
         Schedule(term).affine("{ S0[j] -> [k] : k = j; S1[j] -> [k] : k = j }")
     with pytest.raises(ValueError, match="have to take the same loops"):
         Schedule(term).affine(

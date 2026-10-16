@@ -139,6 +139,44 @@ the ledger, the refusals and the fixes they suggest, and `loopty run`.
   value, on its example inputs`, where it said only that the two agree to
   the `approx` class, a millionth. On the example inputs the two differ by
   8.3e-17 where the largest potential is 0.217.
+- A ledger row, a reason and a refusal about one statement name it as a
+  refused pair names its instances, by its text, shortened as they shorten
+  it, and its line, where they named it by its id (#274): `y[r] is in bounds
+  for every instance of y[r] = reduce_sum(...) (spmv.py:114)`, not `... of
+  S0`; `every cell of off that off[r + 1] = off[r] + cnt[r] (spmv.py:83)
+  reads was written before the read, by off[0] = 0 (spmv.py:81) or itself`,
+  not `every cell of off that S1 reads, S0 or S1 wrote before the read`;
+  the definedness reasons, `y[i] = f[i] + 1.0 (padding.py:19) reads the
+  zeros at f[0] and f[n - 1]`, not `shifted.S0 reads ...`; and atomic's,
+  the window refusals, a program's flat access and loopy's guard refusals
+  the same way. A statement loopty adds is named by what it is: `the zeros
+  of l2p.R (l2p.py:317)`, and `the check of perm before travel.gather
+  (travel.py:106)` with its flag `the check's flag`. A program's access is
+  spelled with the source's loop names, `val[off[r] + j]` and not
+  `val[off[r_0] + j]`, and so is the cell of an update it refuses. Fact
+  ids, the witnesses in a fact's provenance and a map per statement still
+  name a statement by its id, which is how such a map names it; its
+  refusals give both, `S0 (y[r] = 0.0, rows.py:12)`.
+  `loopty.source.Named` and `loopty.handles.statement_names` do the naming.
+- The parts of a cast, and of a kernel's ordering and definedness facts,
+  that `--verbose` and Lean show name their statements the same way, and
+  spell each cell with the loops and sums the source names (#307):
+  `R[box, a, b] written again by R[box, a, b] = C[box, a, b] (l2p.py:276)
+  after the same cell is written by the zeros of l2p.R (l2p.py:320)`, not
+  `R[i_0, a_0, b_0] written again by reconstruct.S0 ...`, and a sum's
+  binder as written, `R[box, a, b]` and not `R[box, a_1, b_1]`. So does the
+  reason a cast through the part of a tile isl computed is not offered to
+  Lean, and the rule of a theorem's series row.
+- **`IllegalCast.instances`** is the witness's pair as the message names
+  it, `('u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2 (stencil_skew.py:62)
+  at t=0, i=8', 'the same statement at t=1, i=7')`; `witness` keeps the
+  ids. `examples/stencil_skew.py` and `examples/wavefront_acoustic.py`
+  print it, `witness: ... runs before the same statement at t=1, i=7, where
+  nt=16, nx=16`, where they printed the tuple, and their `rejected_*`
+  functions return the refusal, not its message and witness. The wave demo
+  lists the ids its map per statement names, each with its statement, and
+  `examples/calls.py` and `examples/composition.py` show a statement's text
+  where they showed its id.
 
 ### Fixed
 

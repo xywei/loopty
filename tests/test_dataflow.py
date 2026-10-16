@@ -22,6 +22,7 @@ from lanky.plugins import registry
 from lanky.prelude import Fn, Int, Nat, Real
 from lanky.terms import render
 
+from lines import named
 from loopty import Arr, Fin, kernel
 from loopty.dataflow import APPLIED, KIND, stores
 from loopty.schedule import IllegalCast
@@ -107,9 +108,9 @@ def test_the_scans_postcondition_is_decided_from_what_it_stores() -> None:
     assert single.id == f"{KIND}:dataflow.scan@18:off"
     ids = [fact.id for fact in kernels.scan.facts()]
     assert ids.index(single.id) == ids.index(post.id) - 1
+    term = kernels.scan.term
     assert post.provenance["used"] == [
-        f"what {stmt.id} stores in off at {stmt.where}"
-        for stmt in kernels.scan.term.stmts
+        f"what {named(term, stmt.id)} stores in off" for stmt in term.stmts
     ]
 
 
@@ -147,7 +148,8 @@ def test_a_statement_without_loops_is_stated_for_lean_as_storing_once() -> None:
     obligation = fact.term.lean_obligation()
     assert not obligation.declined
     (part,) = obligation.parts
-    assert "two instances of S0 storing into lim" in part.label
+    stored = named(kernels.one_cell.term, "S0")
+    assert f"two instances of {stored} storing into lim" in part.label
 
 
 # }}}
@@ -159,7 +161,11 @@ def test_a_statement_without_loops_is_stated_for_lean_as_storing_once() -> None:
 def test_a_cell_stored_twice_leaves_the_postcondition_tested() -> None:
     (post,) = facts(kernels.twice, "postcondition")
     assert post.status is Status.TESTED
-    assert "S0 and S1 store into one cell of y" in post.provenance["undecided"]
+    term = kernels.twice.term
+    assert (
+        f"{named(term, 'S0')} and {named(term, 'S1')} store into one cell of y"
+        in post.provenance["undecided"]
+    )
     assert not facts(kernels.twice, KIND)
 
 
@@ -167,8 +173,10 @@ def test_a_read_before_its_store_leaves_the_postcondition_tested() -> None:
     """True at every input, and not decided: what ``S0`` read was stored after it."""
     (post,) = facts(kernels.from_the_right, "postcondition")
     assert post.status is Status.TESTED
+    reading = named(kernels.from_the_right.term, "S0")
     assert (
-        "S0 stores a cell of y that S0 reads before it" in post.provenance["undecided"]
+        f"{reading} reads a cell of y before it stores it"
+        in post.provenance["undecided"]
     )
 
 
@@ -187,7 +195,7 @@ def test_a_cell_the_storing_instance_reads_first_is_read_before_its_store(
     assert post.status is Status.TESTED
     array = "x" if name == "in_place" else "y"
     assert (
-        f"S0 stores a cell of {array} that S0 reads before it"
+        f"{named(k.term, 'S0')} reads a cell of {array} before it stores it"
         in post.provenance["undecided"]
     )
     assert not facts(k, KIND)
@@ -243,7 +251,8 @@ def _update_reason(stmt: str, cell: str) -> str:
     [
         ("bumped", "S0", "y[i]"),
         ("scattered", "S0", "y[cell[c, k]]"),
-        ("zeroed_then_added", "S1", "y[i_0]"),  # its second loop's i
+        # its second loop's i, which the term calls i_0
+        ("zeroed_then_added", "S1", "y[i]"),
     ],
 )
 def test_an_updated_array_has_no_equation_and_its_claim_is_left_to_the_runs(
@@ -261,11 +270,12 @@ def test_an_updated_array_has_no_equation_and_its_claim_is_left_to_the_runs(
     (post,) = facts(k, "postcondition")
     assert post.status is not Status.DECIDED
     assert post.status is not Status.REFUTED
-    assert _update_reason(stmt, cell) in post.provenance["undecided"]
+    reason = _update_reason(named(k.term, stmt), cell)
+    assert reason in post.provenance["undecided"]
     assert not facts(k, KIND)
     found = stores(k.term, name)
     assert not found.equations
-    assert found.why == {"y": _update_reason(stmt, cell)}
+    assert found.why == {"y": reason}
 
 
 def test_an_update_beside_an_array_stored_once_leaves_that_arrays_claim_decided() -> (
@@ -277,8 +287,9 @@ def test_an_update_beside_an_array_stored_once_leaves_that_arrays_claim_decided(
     (single,) = facts(kernels.doubled_beside, KIND)
     assert single.provenance["array"] == "z"
     assert post.rests_on == (single.id,)
-    found = stores(kernels.doubled_beside.term, "doubled_beside")
-    assert found.why == {"y": _update_reason("S1", "y[i]")}
+    term = kernels.doubled_beside.term
+    found = stores(term, "doubled_beside")
+    assert found.why == {"y": _update_reason(named(term, "S1"), "y[i]")}
 
 
 # }}}

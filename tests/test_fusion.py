@@ -25,7 +25,7 @@ import pytest
 from lanky.ledger import Status
 from lanky.prelude import Int, Nat, Real
 
-from lines import where
+from lines import named, where
 from loopty import Arr, Fin, Schedule, kernel, program, reduce_sum, when
 from loopty.executor import LoopyExecutor, emit_code
 from loopty.oracle import IslOracle
@@ -753,7 +753,9 @@ def test_a_consumer_that_reads_the_zeros_is_decided_with_the_cells() -> None:
         "every cell of f that shifted reads is one interior_flux stored before "
         "it or one of the zeros f was made with"
     )
-    reason = "shifted.S0 reads the zeros at f[0] and f[n - 1]"
+    reading = named(padded.term, "shifted.S0")
+    assert reading == f"y[i] = f[i] + 1.0 ({where(shifted, 'y[i] =')})"
+    reason = f"{reading} reads the zeros at f[0] and f[n - 1]"
     assert fact.provenance["reason"] == reason
     decided = IslOracle().establish(fact)
     assert decided.status is Status.DECIDED
@@ -767,12 +769,14 @@ def test_a_consumer_that_reads_the_zeros_is_decided_with_the_cells() -> None:
     )
     assert "reason" not in front_half.provenance
     assert back_half.provenance["reason"] == (
-        "back.S0 reads the zeros at h[a0] for a0 <= n - 1, 2*a0 >= n"
+        f"{named(between.term, 'back.S0')} reads the zeros at h[a0] for "
+        "a0 <= n - 1, 2*a0 >= n"
     )
     # halved_flux stores the first half of f, and divergence reads the rest.
     (top,) = definedness(halved)
     assert top.provenance["reason"] == (
-        "divergence.S0 reads the zeros at f[a0] for 2 <= a0 <= n - 1, 2*a0 >= n"
+        f"{named(halved.term, 'divergence.S0')} reads the zeros at f[a0] for "
+        "2 <= a0 <= n - 1, 2*a0 >= n"
     )
     for fact in (front_half, back_half, top):
         assert IslOracle().establish(fact).status is Status.DECIDED
@@ -844,17 +848,21 @@ def test_a_cell_the_reader_stores_itself_is_a_zero_or_its_own() -> None:
     # of what bounded stored, and the reason says it is one or the other.
     (fact,) = definedness(edged)
     assert IslOracle().establish(fact).status is Status.DECIDED
+    term = edged.term
     assert fact.provenance["reason"] == (
-        "bounded.S2 reads f[0] and f[n - 1], the zeros there unless bounded.S0 "
-        "or bounded.S1 stored them before the read, which is not asked"
+        f"{named(term, 'bounded.S2')} reads f[0] and f[n - 1], the zeros there "
+        f"unless {named(term, 'bounded.S0')} or {named(term, 'bounded.S1')} "
+        "stored them before the read, which is not asked"
     )
     # Storing only the first, the last cell is a zero nobody stored, at
     # every size it is not the first.
     (fact,) = definedness(half_edged)
     assert IslOracle().establish(fact).status is Status.DECIDED
+    reading = named(half_edged.term, "first_edge.S1")
     assert fact.provenance["reason"] == (
-        "first_edge.S1 reads the zeros at f[n - 1] when n >= 2; first_edge.S1 "
-        "reads f[0], the zeros there unless first_edge.S0 stored them before "
+        f"{reading} reads the zeros at f[n - 1] when n >= 2; {reading} "
+        f"reads f[0], the zeros there unless "
+        f"{named(half_edged.term, 'first_edge.S0')} stored them before "
         "the read, which is not asked"
     )
 
@@ -865,9 +873,11 @@ def test_a_write_isl_cannot_list_may_have_stored_the_zeros_read() -> None:
     # the fact is decided, and the reason says the zeros may be gone.
     (fact,) = definedness(scattered_into)
     assert IslOracle().establish(fact).status is Status.DECIDED
+    term = scattered_into.term
     assert fact.provenance["reason"] == (
-        "shifted.S0 reads the zeros at f[a0] for 0 <= a0 <= n - 1, unless "
-        "scatter.S0 stored them, which isl cannot list"
+        f"{named(term, 'shifted.S0')} reads the zeros at f[a0] for "
+        f"0 <= a0 <= n - 1, unless {named(term, 'scatter.S0')} stored them, "
+        "which isl cannot list"
     )
 
 
@@ -883,7 +893,8 @@ def test_a_read_under_a_guard_isl_cannot_state_is_not_shown_to_see_zeros() -> No
         assert fact.status is Status.ASSUMED, fact.statement
         assert fact.term is None
         reason = fact.provenance["reason"]
-        assert f"masked.S0 reads {array} under a guard isl cannot state (m[" in reason
+        reading = named(marked.term, "masked.S0")
+        assert f"{reading} reads {array} under a guard isl cannot state (m[" in reason
     y = Arr.zeros(6)
     marked(Arr.from_numpy(velocity(6)), y)
     assert y.numpy()[0] == 0.0 and y.numpy()[-1] == 0.0
@@ -1262,7 +1273,9 @@ def test_a_statement_s_map_moves_every_loop_of_the_step_it_runs_in() -> None:
     term = rows.term
     row = term.stmt("rows_then_cells.S0").inames[0]
     cell = term.stmt("rows_then_cells.S1").inames[1]
-    with pytest.raises(ValueError, match=f"S1 runs in {row} as well"):
+    # named by the id the map names it by, with its text and line
+    shown = rf"S1 \(g\[r, c\] = .*\) runs in {row} as well"
+    with pytest.raises(ValueError, match=shown):
         Schedule(rows).affine(
             f"{{ rows_then_cells_S0[{row}] -> [q] : q = {row}; "
             f"rows_then_cells_S1[{cell}] -> [q] : q = {cell} }}"
@@ -1452,14 +1465,17 @@ def test_a_read_of_a_cell_the_producer_does_not_store_is_refused() -> None:
         "padded.interior_flux has stored by the time it is read"
     )
     message = str(caught.value)
-    assert message.startswith("substitute(padded.f) illegal: padded.shifted reads f[")
-    assert "which padded.interior_flux does not store" in message
+    term = padded.term
+    assert message.startswith(
+        f"substitute(padded.f) illegal: {named(term, 'shifted.S0')} reads f["
+    )
+    assert f"which {named(term, 'interior_flux.S0')} does not store" in message
     assert "would see the zeros" in message
     assert len(fact.provenance["witness"]) == 1
     (program_fact,) = definedness(padded)
     assert IslOracle().establish(program_fact).status is Status.DECIDED
     # The same for h, whose back half back reads and front leaves zero.
-    with pytest.raises(IllegalCast, match="between.back reads h\\["):
+    with pytest.raises(IllegalCast, match=r"\(test_fusion.py:\d+\) reads h\["):
         Schedule(between).substitute(between.h)
 
 

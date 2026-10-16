@@ -121,14 +121,15 @@ row per work group, is the schedule for this shape that does build and did run.
 ```console
 $ uv run lanky check examples/spmv.py
 STATUS   BY             WHERE        OWNER          STATEMENT
--------  -------------  -----------  -------------  ----------------------------------------------------------------------------------------------
-decided  isl            spmv.py:81   scan           off[0] is in bounds for every instance of S0
-decided  isl            spmv.py:83   scan           off[r + 1] is in bounds for every instance of S1
-decided  isl            spmv.py:83   scan           off[r] is in bounds for every instance of S1
-decided  isl            spmv.py:83   scan           cnt[r] is in bounds for every instance of S1
-decided  isl            spmv.py:81   scan           distinct instances of S0 write distinct cells of off
-decided  isl            spmv.py:83   scan           distinct instances of S1 write distinct cells of off
-decided  isl            spmv.py:83   scan           every cell of off that S1 reads, S0 or S1 wrote before the read
+-------  -------------  -----------  -------------  ---------------------------------------------------------------------------------------------------
+decided  isl            spmv.py:81   scan           off[0] is in bounds for every instance of off[0] = 0 (spmv.py:81)
+decided  isl            spmv.py:83   scan           off[r + 1] is in bounds for every instance of off[r + 1] = off[r] + cnt[r] (spmv.py:83)
+decided  isl            spmv.py:83   scan           off[r] is in bounds for every instance of off[r + 1] = off[r] + cnt[r] (spmv.py:83)
+decided  isl            spmv.py:83   scan           cnt[r] is in bounds for every instance of off[r + 1] = off[r] + cnt[r] (spmv.py:83)
+decided  isl            spmv.py:81   scan           distinct instances of off[0] = 0 (spmv.py:81) write distinct cells of off
+decided  isl            spmv.py:83   scan           distinct instances of off[r + 1] = off[r] + cnt[r] (spmv.py:83) write distinct cells of off
+decided  isl            spmv.py:83   scan           every cell of off that off[r + 1] = off[r] + cnt[r] (spmv.py:83) reads was written before the read,
+                                                      by off[0] = 0 (spmv.py:81) or itself
 decided  isl            spmv.py:71   scan           the source order runs every dependence forward in time
 decided  isl            spmv.py:81   scan           no cell of off is stored twice, or read before its store
 decided  isl            spmv.py:71   scan           off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
@@ -138,12 +139,13 @@ tested   property-test  spmv.py:86   scan_monotone  n : Nat, cnt : Fn[Fin(n), Na
                                                     | hs: forall r in Fin(n). off(r + 1) == off(r) + cnt(r)
                                                     |- forall a in Fin(n + 1), b in Fin(n + 1) where a <= b. off(a) <= off(b)
 tested   python         spmv.py:86   scan_monotone  the term computes what the annotations compute
-decided  isl            spmv.py:114  spmv           y[r] is in bounds for every instance of S0
-decided  isl            spmv.py:114  spmv           val[r, j] is in bounds for every instance of S0
+decided  isl            spmv.py:114  spmv           y[r] is in bounds for every instance of y[r] = reduce_sum(...) (spmv.py:114)
+decided  isl            spmv.py:114  spmv           val[r, j] is in bounds for every instance of y[r] = reduce_sum(...) (spmv.py:114)
 decided  type           spmv.py:114  spmv           x[col[r, j]] is in bounds by type (col[r, j] : Fin(m))
-decided  isl            spmv.py:114  spmv           col[r, j] is in bounds for every instance of S0
-decided  isl            spmv.py:114  spmv           cnt[r], the length of row r that bounds the loop over j, is in bounds for every instance of S0
-decided  isl            spmv.py:114  spmv           distinct instances of S0 write distinct cells of y
+decided  isl            spmv.py:114  spmv           col[r, j] is in bounds for every instance of y[r] = reduce_sum(...) (spmv.py:114)
+decided  isl            spmv.py:114  spmv           cnt[r], the length of row r that bounds the loop over j, is in bounds
+                                                      for every instance of y[r] = reduce_sum(...) (spmv.py:114)
+decided  isl            spmv.py:114  spmv           distinct instances of y[r] = reduce_sum(...) (spmv.py:114) write distinct cells of y
 decided  isl            spmv.py:104  spmv           the source order runs every dependence forward in time
 decided  type           spmv.py:114  spmv           the accumulation into y[r] over j is approx
 tested   interpreter    spmv.py:104  spmv           the traced term computes what the body computes
@@ -187,9 +189,9 @@ Read the `BY` column.
 - `isl` decided `scan`'s postcondition too, from the term. A postcondition is
   a claim about the arguments once the kernel has run, and the row before it
   says that no cell of `off` is stored twice, or read before its store: so
-  what each statement stores is what `off` holds when `scan` returns, `S0`'s
-  `off[0] == 0` and `S1`'s `off[r + 1] == off[r] + cnt[r]` at every `r`, and
-  the claim is those two equations. The native runs test it as well, at
+  what each statement stores is what `off` holds when `scan` returns, `off[0]
+  == 0` and `off[r + 1] == off[r] + cnt[r]` at every `r`, and the claim is
+  those two equations. The native runs test it as well, at
   what each of them left in the arguments, and it held after every one,
   which its provenance keeps (`native`).
 - `isl` decided the casts of `rows_split`, the schedule the file holds: `lanky
@@ -327,7 +329,7 @@ native, the 16 by 16 array (first six levels around the spike):
 
 Schedule(jacobi).tile(jacobi.t, jacobi.i, 8, 8) ->
   IllegalCast: tile(jacobi.t, jacobi.i, 8, 8) illegal: u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2 (stencil_skew.py:62) at t=0, i=8 writes u[1, 8], read by the same statement at t=1, i=7, scheduled earlier (at nt=16, nx=16, as hinted)
-  witness: S0{'t': 0, 'i': 8} runs before S0{'t': 1, 'i': 7} at {'nt': 16, 'nx': 16}
+  witness: u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2 (stencil_skew.py:62) at t=0, i=8 runs before the same statement at t=1, i=7, where nt=16, nx=16
 
 accepted: Schedule(jacobi, target='c').skew(jacobi.i, by=jacobi.t).tile(jacobi.t, jacobi.i, 8, 8)
   loop nest: jacobi.t.outer jacobi.i.outer jacobi.t.inner jacobi.i.inner
@@ -345,8 +347,9 @@ The pair is the whole point. The statement on line 62 writes `u[1, 8]` at
 second one first, because `i = 7` is in the first tile column and `i = 8` is in
 the second. That is a pair of real instances of this kernel at these sizes,
 produced by pulling an isl solution back from time space into instance space.
-The `witness` under it is the same pair as the ledger records it, by the
-statement's id, `S0`. No code was generated, and
+The `witness` under it is the same pair, from the refusal's `instances`; its
+`witness` keeps the pair as the ledger records it, by the statement's id,
+`S0`, which is how a map per statement names it. No code was generated, and
 the schedule the cast was asked of is unchanged, so the demo can go on and ask
 for a legal one.
 
@@ -359,11 +362,15 @@ Checking and running the file behave the same way as the sparse product:
 ```console
 $ uv run lanky check examples/stencil_skew.py
 STATUS   BY           WHERE                OWNER   STATEMENT
--------  -----------  -------------------  ------  --------------------------------------------------------------------------------------
-decided  isl          stencil_skew.py:62   jacobi  u[t + 1, i] is in bounds for every instance of S0
-decided  isl          stencil_skew.py:62   jacobi  u[t, i - 1] is in bounds for every instance of S0
-decided  isl          stencil_skew.py:62   jacobi  u[t, i + 1] is in bounds for every instance of S0
-decided  isl          stencil_skew.py:62   jacobi  distinct instances of S0 write distinct cells of u
+-------  -----------  -------------------  ------  ----------------------------------------------------------------------------------------------
+decided  isl          stencil_skew.py:62   jacobi  u[t + 1, i] is in bounds for every instance of u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2
+                                                     (stencil_skew.py:62)
+decided  isl          stencil_skew.py:62   jacobi  u[t, i - 1] is in bounds for every instance of u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2
+                                                     (stencil_skew.py:62)
+decided  isl          stencil_skew.py:62   jacobi  u[t, i + 1] is in bounds for every instance of u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2
+                                                     (stencil_skew.py:62)
+decided  isl          stencil_skew.py:62   jacobi  distinct instances of u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2 (stencil_skew.py:62) write
+                                                     distinct cells of u
 decided  isl          stencil_skew.py:54   jacobi  the source order runs every dependence forward in time
 tested   interpreter  stencil_skew.py:54   jacobi  the traced term computes what the body computes
 decided  isl          stencil_skew.py:116  jacobi  skew(jacobi.i, by=jacobi.t) renames the instances of jacobi one for one
@@ -474,7 +481,7 @@ $ uv run python examples/calls.py
 native: matvec agrees with A @ x: True
 ...
 the term of matvec, with dot inlined at calls.py:100:
-  S0 over i: y[i] = sum over k of A[i, k]*x[k]
+  for every i: y[i] = sum over k of A[i, k]*x[k]
   dot's a is A[i]
   dot's b is x
 ...
@@ -491,7 +498,7 @@ The same file applies firedrake's quadrature rule to an integrand,
 - Break something. Change the stencil's guard from `i > 0` to `i >= 0` and
   re-check. The in-bounds fact for `u[t, i - 1]` turns `refuted`, `lanky check`
   prints `6 facts: 1 assumed, 4 decided, 1 refuted` and then
-  `REFUTED jacobi at ...: u[t, i - 1] is in bounds for every instance of S0`
+  `REFUTED jacobi at ...: u[t, i - 1] is in bounds for every instance of u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2 (stencil_skew.py:62)`
   with the cell that escapes under it, first as isl's tuple,
   `witness: (0, -1)`, then named, at the sizes isl read it off at:
   `cells u[t, i - 1] reaches are cells u has, except [a0=0, a1=-1] at [nt=2, nx=2]`.

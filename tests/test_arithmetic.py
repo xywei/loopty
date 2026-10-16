@@ -2905,7 +2905,8 @@ def test_a_function_only_a_guard_calls_is_refused_with_the_fix_named():
     with pytest.raises(LoweringError, match="calls sqrt, which loopy") as refused:
         LoopyExecutor().run(root_in_a_guard, **make())
     message = str(refused.value)
-    assert "S0 of root_in_a_guard at test_arithmetic.py:" in message
+    assert "the guard of y[i] = 1.0 (test_arithmetic.py:" in message
+    assert ") in root_in_a_guard calls sqrt" in message
     assert "into an array the guard then reads" in message
     with pytest.raises(LoweringError, match="calls sqrt"):
         emit_code(root_in_a_guard)

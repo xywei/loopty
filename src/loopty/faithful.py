@@ -733,10 +733,11 @@ class Collision:
         ``y[cell[c, j]] = yl[c, j] (f.py:12) at c=0, j=1 and at c=1, j=2``
         (:func:`loopty.source.instances_text`).
         """
+        from loopty.handles import statement_names
         from loopty.source import instances_text
 
         first, second = instances_text(
-            {stmt.id: stmt for stmt in term.stmts}, self.first, self.second
+            statement_names(term), self.first, self.second
         )
         if second.startswith("the same statement at "):
             second = second.removeprefix("the same statement ")
@@ -967,11 +968,19 @@ def collision_fact(term: Term, fact: Fact, touched: Sequence[Logged]) -> Fact:
             **provenance,
             "inputs": tried,
             "detail": (
-                f"no two instances of {stmt_id} wrote one cell of {array} on "
+                f"no two instances of {_statement_named(term, stmt_id)} wrote one "
+                f"cell of {array} on "
                 + ", ".join(tried)
             ),
         },
     )
+
+
+def _statement_named(term: Term, stmt_id: str) -> str:
+    """A statement of ``term`` as a message names it (:class:`loopty.source.Named`)."""
+    from loopty.handles import statement_names
+
+    return statement_names(term)(stmt_id)
 
 
 def _broken_layout(

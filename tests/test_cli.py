@@ -438,7 +438,9 @@ def test_check_prints_the_witness_of_an_isl_refutation_under_its_line(
     out = capsys.readouterr().out
     assert code == 1
     lines, header = refutation_block(out, "shift at ")
-    assert lines[header].endswith("u[i + 1] is in bounds for every instance of S0")
+    assert lines[header].endswith(
+        "u[i + 1] is in bounds for every instance of v[i] = u[i + 1] (fixture.py:14)"
+    )
     facts = json.loads(out_path.read_text(encoding="utf-8"))
     refuted = {fact["owner"]: fact for fact in facts if fact["status"] == "refuted"}
     assert [f["owner"] for f in facts if f["status"] == "refuted"] == [
@@ -452,9 +454,14 @@ def test_check_prints_the_witness_of_an_isl_refutation_under_its_line(
     assert f"  {reason}" in lines[header + 1 : header + 3]
 
     lines, header = refutation_block(out, "collide at ")
-    assert lines[header].endswith("distinct instances of S0 write distinct cells of y")
+    written = "y[0] = x[i] (fixture.py:20)"
+    assert lines[header].endswith(
+        f"distinct instances of {written} write distinct cells of y"
+    )
     reason = refuted["collide"]["provenance"]["reason"]
-    assert " is one of the pairs of S0 instances writing the same cell" in reason
+    assert f" is one of the pairs of instances of {written} writing the same cell" in (
+        reason
+    )
     assert reason.startswith("[s=0, d0=")
     assert f"  {reason}" in lines[header + 1 : header + 3]
 
@@ -1137,7 +1144,10 @@ def test_run_lists_the_layout_fact_a_cast_rests_on(tmp_path, capsys) -> None:
     assert monotone["effective"] == "decided"
     assert [fact["kind"] for fact in facts.values()].count("layout") == 1
     out = capsys.readouterr().out
-    assert "stay inside their buffers and apart while S1 write cnt" in out
+    assert (
+        "stay inside their buffers and apart while cnt[r + 1] = 0 (fixture.py:19) "
+        "writes cnt"
+    ) in out
 
 
 MOVES_ROWS = (
@@ -1337,7 +1347,9 @@ def test_check_says_a_witness_may_be_one_the_guard_masks(tmp_path, capsys) -> No
     out = capsys.readouterr().out
     assert code == 1
     lines, header = refutation_block(out, "clipped at ")
-    assert lines[header].endswith("x[i] is in bounds for every instance of S0")
+    assert lines[header].endswith(
+        "x[i] is in bounds for every instance of y[i] = x[i] (fixture.py:15)"
+    )
     block = lines[header + 1 : header + 6]
     assert block[0].startswith("  witness: ")
     assert block[1].startswith("  cells x[i] reaches are cells x has, except")
@@ -1350,7 +1362,9 @@ def test_check_says_a_witness_may_be_one_the_guard_masks(tmp_path, capsys) -> No
     assert block[4].startswith("    a < m, which compares with the scalar a")
 
     lines, header = refutation_block(out, "stated at ")
-    assert lines[header].endswith("u[i + 1] is in bounds for every instance of S0")
+    assert lines[header].endswith(
+        "u[i + 1] is in bounds for every instance of v[i] = u[i + 1] (fixture.py:22)"
+    )
     assert lines[header + 2].startswith("  cells u[i + 1] reaches are cells u has")
     assert "the domain is wider" not in "\n".join(lines[header:])
 

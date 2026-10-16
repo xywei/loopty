@@ -27,7 +27,7 @@ import islpy as isl
 import numpy as np
 import pytest
 
-from lines import where
+from lines import said, where
 
 pytest.importorskip("loopy")
 
@@ -371,12 +371,24 @@ def test_one_row_per_group_is_the_schedule_that_does_build(plain_opencl) -> None
 
 def test_the_rectangular_tiling_is_refuted_with_a_witness_pair() -> None:
     module = _module("stencil_skew")
-    message, witness = module.rejected_tiling()
+    refused = module.rejected_tiling()
+    message, witness = str(refused), refused.witness
     assert "illegal" in message
     assert "scheduled earlier" in message
 
     (source_id, source), (sink_id, sink), params = witness
     assert source_id == sink_id
+    # the pair as the message names it, each statement by its text and line
+    stmt = said(
+        module.jacobi,
+        "u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2",
+        "u[t + 1, i] = (",
+    )
+    assert refused.instances == (
+        f"{stmt} at t={source['t']}, i={source['i']}",
+        f"the same statement at t={sink['t']}, i={sink['i']}",
+    )
+    assert all(instance in message for instance in refused.instances)
     # The two instances are one time step apart and one space step apart: the
     # (1, 1) and (1, -1) dependences a rectangular tile cuts.
     assert sink["t"] == source["t"] + 1
@@ -452,10 +464,19 @@ def test_the_wave_example_has_cross_instruction_time_dependence() -> None:
     module = _module("wavefront_acoustic")
     assert [stmt.id for stmt in module.acoustic.term.stmts] == ["S0", "S1"]
 
-    message, witness = module.rejected_tiling()
+    refused = module.rejected_tiling()
+    message, witness = str(refused), refused.witness
     assert "illegal" in message
     assert "writes pressure[" in message
     (source_id, source), (sink_id, sink), params = witness
+    pressure, velocity = (
+        said(module.acoustic, f"{array}[t + 1, i] = ...", f"{array}[t + 1, i] =")
+        for array in ("pressure", "velocity")
+    )
+    assert refused.instances == (
+        f"{pressure} at t={source['t']}, i={source['i']}",
+        f"{velocity} at t={sink['t']}, i={sink['i']}",
+    )
 
     # Unlike stencil_skew, the cut dependence crosses the two instructions:
     # pressure from S1 at the previous time level feeds velocity in S0. It is
@@ -551,7 +572,14 @@ def test_the_wave_demo_prints_the_rejections_then_every_agreement() -> None:
     # tiling, and two fields each.
     result, _ = _invoke("wavefront_acoustic", "python")
     assert result.stdout.count("IllegalCast") == 3
-    assert "witness: S1" in result.stdout
+    # the witness as the refusal names it, and not by the statements' ids
+    pressure = said(
+        _module("wavefront_acoustic").acoustic,
+        "pressure[t + 1, i] = ...",
+        "pressure[t + 1, i] =",
+    )
+    assert f"witness: {pressure} at t=" in result.stdout
+    assert "witness: S" not in result.stdout
     assert "pressure: difference" in result.stdout
     assert "velocity: difference" in result.stdout
     assert result.stdout.count("-> tested") == 6
@@ -588,7 +616,8 @@ def test_the_space_first_diamond_runs_the_cross_statement_dependence_backwards()
     # a = i + t and b = i - t: S1 at (t, i) feeds S0 at (t + 1, i - 1), which
     # has the same a and a b two lower, so the order runs it the wrong way.
     module = _module("wavefront_acoustic")
-    message, witness = module.rejected_diamond()
+    refused = module.rejected_diamond()
+    message, witness = str(refused), refused.witness
     assert message.startswith("affine(")
     assert "writes pressure[" in message
     (source_id, source), (sink_id, sink), _params = witness
@@ -646,7 +675,8 @@ def test_tiling_the_wave_diamond_cuts_the_same_step_dependence() -> None:
     # (t, i + 1) reads, a distance of (0, 1), which t - i runs backwards. A
     # diamond tiling of this pair needs a time offset between the statements.
     module = _module("wavefront_acoustic")
-    message, witness = module.rejected_diamond_tiling()
+    refused = module.rejected_diamond_tiling()
+    message, witness = str(refused), refused.witness
     assert message.startswith("tile(acoustic.loops.a, acoustic.loops.b, 4, 4) illegal")
     assert "writes velocity[" in message
     (source_id, source), (sink_id, sink), _params = witness
@@ -793,7 +823,12 @@ def test_every_in_bounds_obligation_of_the_pairs_is_decided_by_isl() -> None:
     assert {fact["status"] for fact in in_bounds} == {"decided"}
     assert {fact["decided_by"] for fact in in_bounds} == {"isl"}
     statements = {fact["statement"] for fact in in_bounds}
-    assert "f[k, p] is in bounds for every instance of S1" in statements
+    summed = said(
+        _module("pairs").pairs,
+        "e[p] = reduce_sum(...) + reduce_sum(...)",
+        "e[p] = reduce_sum(",
+    )
+    assert f"f[k, p] is in bounds for every instance of {summed}" in statements
 
 
 def test_the_pairs_run_in_both_layouts_and_both_agree() -> None:
@@ -1052,9 +1087,15 @@ def test_the_hexahedra_demo_decides_its_layouts_and_its_programs() -> None:
     along_t = [
         fact["statement"] for fact in facts if fact["owner"] == "gradient_along_t"
     ]
+    module = _module("hexahedra")
+    summed = said(
+        module.gradient_along_t,
+        "grad[x, e, k, j, i] = reduce_sum(...)",
+        "grad[x, e, k, j, i] = reduce_sum(",
+    )
     assert (
         "Ft[3*x + d, k, c] is in bounds for every d in Fin(3) and every instance "
-        "of S0"
+        f"of {summed}"
     ) in along_t
     assert not [line for line in along_t if "3*x + 0" in line]
     assert [line for line in along_t if line.startswith("the accumulation")] == [
@@ -1064,9 +1105,14 @@ def test_the_hexahedra_demo_decides_its_layouts_and_its_programs() -> None:
     contravariant = [
         fact["statement"] for fact in facts if fact["owner"] == "contravariant"
     ]
+    summed = said(
+        module.contravariant,
+        "w[d, e, k, j, i] = reduce_sum(...)",
+        "w[d, e, k, j, i] = reduce_sum(",
+    )
     assert (
         "G[3*x + d, e, k, j, i] is in bounds for every x in Fin(3) and every "
-        "instance of S0"
+        f"instance of {summed}"
     ) in contravariant
 
 
@@ -1195,10 +1241,18 @@ def test_the_advection_demo_decides_every_access_and_every_launch() -> None:
         for fact in facts
         if fact["owner"] == "upwind" and fact["statement"].startswith("u[")
     }
+    flux = said(
+        _module("advection").upwind,
+        "flux[e, f, a, b] = upwind_flux(...)",
+        "flux[e, f, a, b] = upwind_flux(",
+    )
     assert gathers == {
         "u[e, inside[f, a, b, 0], inside[f, a, b, 1], inside[f, a, b, 2]] is in "
-        "bounds for every instance of S0 (inside[f, a, b, 0] : Fin(n), inside[f, "
-        "a, b, 1] : Fin(n), inside[f, a, b, 2] : Fin(n), by type)": ("decided", "isl"),
+        f"bounds for every instance of {flux} (inside[f, a, b, 0] : Fin(n), "
+        "inside[f, a, b, 1] : Fin(n), inside[f, a, b, 2] : Fin(n), by type)": (
+            "decided",
+            "isl",
+        ),
         "u[nbr[e, f], outside[f, a, b, 0], outside[f, a, b, 1], outside[f, a, b, "
         "2]] is in bounds by type (nbr[e, f] : Fin(ne), outside[f, a, b, 0] : "
         "Fin(n), outside[f, a, b, 1] : Fin(n), outside[f, a, b, 2] : Fin(n))": (
@@ -1758,8 +1812,10 @@ def test_the_qbx_demo_states_the_fact_sumpy_silences_for_both_layers() -> None:
             for fact in facts
             if fact["owner"] == owner and fact["kind"] == "disjoint-writes"
         ]
+        kernel = getattr(_module("layer_potential"), owner)
+        summed = said(kernel, "out[t] = SCALE * reduce_sum(...)", "out[t] =")
         assert writes["statement"] == (
-            "distinct instances of S0 write distinct cells of out"
+            f"distinct instances of {summed} write distinct cells of out"
         )
         assert writes["status"] in ("decided", "proved"), writes
         assert writes["decided_by"] in ("isl", "lean"), writes
@@ -1896,7 +1952,14 @@ def test_the_qbx_demo_prints_the_tile_the_fact_and_the_rows() -> None:
         "decided  isl  prioritize(single_layer.s.outer, single_layer.t.inner) "
         "renames the instances of single_layer one for one"
     ) in out
-    assert "decided  isl  distinct instances of S0 write distinct cells of out" in out
+    summed = said(
+        _module("layer_potential").single_layer,
+        "out[t] = SCALE * reduce_sum(...)",
+        "out[t] =",
+    )
+    assert (
+        f"decided  isl  distinct instances of {summed} write distinct cells of out"
+    ) in out
     # the tile is shown as sumpy writes it, without the target its casts were
     # decided on, which cannot build its hardware axes
     assert (

@@ -118,7 +118,8 @@ def _in_bounds(kernel_object, array: str) -> list:
     oracle = IslOracle()
     out = []
     for fact in facts_for(term, owner=term.name):
-        if fact.kind != "in-bounds" or f"{array}[" not in fact.statement:
+        # the statement names the access first, and then the statement's text
+        if fact.kind != "in-bounds" or not fact.statement.startswith(f"{array}["):
             continue
         out.append(oracle.establish(fact) if oracle.can_establish(fact) else fact)
     return out

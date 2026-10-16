@@ -268,19 +268,19 @@ row verbatim, and checked by `scripts/refresh_example_outputs.py`):
 ```console
 $ lanky check examples/spmv.py
 STATUS   BY             WHERE        OWNER          STATEMENT
--------  -------------  -----------  -------------  ----------------------------------------------------------------------------------------------
-decided  isl            spmv.py:81   scan           off[0] is in bounds for every instance of S0
-decided  isl            spmv.py:83   scan           off[r + 1] is in bounds for every instance of S1
-decided  isl            spmv.py:81   scan           distinct instances of S0 write distinct cells of off
+-------  -------------  -----------  -------------  ---------------------------------------------------------------------------------------------------
+decided  isl            spmv.py:81   scan           off[0] is in bounds for every instance of off[0] = 0 (spmv.py:81)
+decided  isl            spmv.py:83   scan           off[r + 1] is in bounds for every instance of off[r + 1] = off[r] + cnt[r] (spmv.py:83)
+decided  isl            spmv.py:81   scan           distinct instances of off[0] = 0 (spmv.py:81) write distinct cells of off
 decided  isl            spmv.py:81   scan           no cell of off is stored twice, or read before its store
 decided  isl            spmv.py:71   scan           off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
 tested   property-test  spmv.py:86   scan_monotone  n : Nat, cnt : Fn[Fin(n), Nat], off : Fn[Fin(n + 1), Nat]
                                                     | h0: off(0) == 0
                                                     | hs: forall r in Fin(n). off(r + 1) == off(r) + cnt(r)
                                                     |- forall a in Fin(n + 1), b in Fin(n + 1) where a <= b. off(a) <= off(b)
-decided  isl            spmv.py:114  spmv           y[r] is in bounds for every instance of S0
+decided  isl            spmv.py:114  spmv           y[r] is in bounds for every instance of y[r] = reduce_sum(...) (spmv.py:114)
 decided  type           spmv.py:114  spmv           x[col[r, j]] is in bounds by type (col[r, j] : Fin(m))
-decided  isl            spmv.py:114  spmv           distinct instances of S0 write distinct cells of y
+decided  isl            spmv.py:114  spmv           distinct instances of y[r] = reduce_sum(...) (spmv.py:114) write distinct cells of y
 decided  type           spmv.py:114  spmv           the accumulation into y[r] over j is approx
 tested   interpreter    spmv.py:104  spmv           the traced term computes what the body computes
 decided  isl            spmv.py:195  spmv           the order after split(spmv.j, 2) runs every dependence of spmv forward
@@ -307,8 +307,8 @@ and the first cell that differs.
 
 `scan`'s postcondition is `decided` by `isl`, from what the kernel's
 statements store. No cell of `off` is stored twice, or read before its store,
-which is the row above it, so what `S1` stores at `r`, `off[r] + cnt[r]`, is
-what `off[r + 1]` holds when `scan` returns, and the claim is that equation
+which is the row above it, so what `off[r + 1] = off[r] + cnt[r]` stores at
+`r` is what `off[r + 1]` holds when `scan` returns, and the claim is that equation
 at every `r`. It is also evaluated at what every native run of `scan` left in
 its arguments, on the file's example inputs and on drawn ones, and held after
 each, which its provenance keeps. The `split(j, 2)` row is a cast of the
@@ -384,11 +384,12 @@ the exact set:
 ```console
 $ lanky check examples/pairs.py
 STATUS   BY           WHERE        OWNER  STATEMENT
--------  -----------  -----------  -----  -------------------------------------------------------
-decided  isl          pairs.py:78  pairs  f[i, j] is in bounds for every instance of S0
+-------  -----------  -----------  -----  ----------------------------------------------------------------------------------------------------
+decided  isl          pairs.py:78  pairs  f[i, j] is in bounds for every instance of f[i, j] = q[i] * q[j] /
+                                            (1.0 + dx * dx + dy * dy) (pairs.py:78)
 ...
-decided  isl          pairs.py:80  pairs  f[p, j] is in bounds for every instance of S1
-decided  isl          pairs.py:80  pairs  f[k, p] is in bounds for every instance of S1
+decided  isl          pairs.py:80  pairs  f[p, j] is in bounds for every instance of e[p] = reduce_sum(...) + reduce_sum(...) (pairs.py:80)
+decided  isl          pairs.py:80  pairs  f[k, p] is in bounds for every instance of e[p] = reduce_sum(...) + reduce_sum(...) (pairs.py:80)
 ...
 17 facts: 16 decided, 1 tested
 ```
@@ -542,8 +543,9 @@ interface can change in a minor release; the CHANGELOG says when one does.
   of run, and the callees' terms follow one another in call order, in the
   program's names. Sizes are unified through the arrays passed (`scale`'s `n`
   is `scan`'s `n + 1` when both are handed `off`), each call's loops get names
-  of their own, and its statements are named after it (`scan.S1`,
-  `step@2.S0`). An array the body makes with `Arr.zeros_like(u)` is a
+  of their own, and its statements' ids are named after it (`scan.S1`,
+  `step@2.S0`), which a map per statement names them by; a message names a
+  statement by its text and line. An array the body makes with `Arr.zeros_like(u)` is a
   temporary of the term, zeroed where it was made, and a loopy temporary of
   the lowered kernel, so the intermediate between two kernels is nobody's
   argument. The edges between the calls are not declared: an array one call
@@ -590,8 +592,8 @@ interface can change in a minor release; the CHANGELOG says when one does.
   edge, and the program has a `definedness` fact for it, decided by isl:
   every cell the reader reads is one a call before it stored, or one of the
   zeros the array was made with, which the fact's reason then lists
-  (`shifted.S0 reads the zeros at f[0] and f[n - 1]`), so zero padding at a
-  boundary is read as written and `lanky check` passes.
+  (`y[i] = f[i] + 1.0 (padding.py:19) reads the zeros at f[0] and f[n - 1]`),
+  so zero padding at a boundary is read as written and `lanky check` passes.
   `Schedule(burgers_rhs).fuse(burgers_rhs.flux.j, burgers_rhs.divergence.i,
   shift=1)` runs the reader's loop inside the writer's, one step behind, and
   is `affine` with the map per statement it builds, the divergence's `i` at
@@ -797,7 +799,7 @@ interface can change in a minor release; the CHANGELOG says when one does.
   an array a kernel writes is stored twice, or read before its store, a
   `single-assignment` fact says so, decided by isl and proved by Lean, and
   what each statement stores is what the kernel leaves: its value equation,
-  `off[r + 1] == off[r] + cnt[r]` at every `r` of `S1`'s loop. The
+  `off[r + 1] == off[r] + cnt[r]` at every `r` of its statement's loop. The
   postcondition is decided under those equations, each taken at the cells
   the claim reads, and rests on the `single-assignment` facts. A claim about
   reals is decided the same way, each equation isl cannot read an atom, so
@@ -1468,7 +1470,8 @@ on the inputs it runs.
   an index leaves its array, the native run raises `IndexError` and the
   compiled run reads or writes outside the buffer, with no error. `lanky
   check` shows where this can happen: the access's row, `x[i + 4] is in bounds
-  for every instance of S0`, reads `refuted` or `assumed`. Put the access
+  for every instance of y[i] = x[i + 4] (shift.py:9)`, reads `refuted` or
+  `assumed`. Put the access
   under a guard isl can read, which decides the fact: `with when(i + 4 <
   x.dom.size):` before `y[i] = x[i + 4]`.
 - **A numpy scalar on the left of an operation loses its type**
@@ -1673,8 +1676,10 @@ term is interpreted on its own and compared with the native run.
 
 **Transformations are casts.** Each states a reindexing map, which isl checks for
 bijectivity, and a new execution order, which isl checks for monotonicity on the
-dependence relation. Failure is an `IllegalCast` carrying the witness and the
-refuted fact, whose reason is the exception's message. Casts that change
+dependence relation. Failure is an `IllegalCast` carrying the witness (by the
+statements' ids), its `instances` as the message names them (by the
+statements' text and line), and the refuted fact, whose reason is the
+exception's message. Casts that change
 floating-point semantics mark the result's exactness class instead of being
 refused.
 
