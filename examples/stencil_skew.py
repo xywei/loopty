@@ -42,6 +42,7 @@ import numpy as np
 from lanky.prelude import Real
 
 from loopty import Arr, Fin, Schedule, kernel, when
+from loopty.schedule import IllegalCast
 
 #: Sixteen time levels over sixteen points. Large enough that a tile of eight by
 #: eight is a real tiling with four tiles and a boundary between them, small
@@ -92,20 +93,21 @@ def reference(u: np.ndarray) -> np.ndarray:
     return out
 
 
-def rejected_tiling() -> tuple[str, tuple]:
-    """Ask for the illegal tiling and return the message and the witness.
+def rejected_tiling() -> IllegalCast:
+    """Ask for the illegal tiling and return its refusal.
+
+    ``str()`` of it is the message, ``witness`` isl's pair by the statements'
+    ids, and ``instances`` the same pair as the message names it.
 
     The schedule the cast was asked of is untouched by the rejection, which is
     why this can be called from a demo, a test, and a docstring without leaving
     anything half-transformed behind.
     """
-    from loopty.schedule import IllegalCast
-
     schedule = Schedule(jacobi, target="c", sizes={"nt": NT, "nx": NX})
     try:
         schedule.tile(jacobi.t, jacobi.i, 8, 8)
     except IllegalCast as refused:
-        return str(refused), refused.witness
+        return refused
     raise AssertionError("the rectangular tiling of a Jacobi stencil is illegal")
 
 
@@ -140,12 +142,14 @@ def main() -> int:
     print(f"native, the {NT} by {NX} array (first six levels around the spike):")
     print(np.array2string(u.numpy()[:6, middle], precision=3, suppress_small=True))
 
-    message, witness = rejected_tiling()
-    (source_id, source), (sink_id, sink), params = witness
+    refused = rejected_tiling()
+    first, second = refused.instances
+    *_, sizes = refused.witness
+    at = ", ".join(f"{name}={value}" for name, value in sizes.items())
     print()
     print("Schedule(jacobi).tile(jacobi.t, jacobi.i, 8, 8) ->")
-    print(f"  IllegalCast: {message}")
-    print(f"  witness: {source_id}{source} runs before {sink_id}{sink} at {params}")
+    print(f"  IllegalCast: {refused}")
+    print(f"  witness: {first} runs before {second}, where {at}")
 
     schedule = skewed()
     print()

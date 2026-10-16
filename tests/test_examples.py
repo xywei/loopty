@@ -371,12 +371,24 @@ def test_one_row_per_group_is_the_schedule_that_does_build(plain_opencl) -> None
 
 def test_the_rectangular_tiling_is_refuted_with_a_witness_pair() -> None:
     module = _module("stencil_skew")
-    message, witness = module.rejected_tiling()
+    refused = module.rejected_tiling()
+    message, witness = str(refused), refused.witness
     assert "illegal" in message
     assert "scheduled earlier" in message
 
     (source_id, source), (sink_id, sink), params = witness
     assert source_id == sink_id
+    # the pair as the message names it, each statement by its text and line
+    stmt = said(
+        module.jacobi,
+        "u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2",
+        "u[t + 1, i] = (",
+    )
+    assert refused.instances == (
+        f"{stmt} at t={source['t']}, i={source['i']}",
+        f"the same statement at t={sink['t']}, i={sink['i']}",
+    )
+    assert all(instance in message for instance in refused.instances)
     # The two instances are one time step apart and one space step apart: the
     # (1, 1) and (1, -1) dependences a rectangular tile cuts.
     assert sink["t"] == source["t"] + 1
@@ -452,10 +464,19 @@ def test_the_wave_example_has_cross_instruction_time_dependence() -> None:
     module = _module("wavefront_acoustic")
     assert [stmt.id for stmt in module.acoustic.term.stmts] == ["S0", "S1"]
 
-    message, witness = module.rejected_tiling()
+    refused = module.rejected_tiling()
+    message, witness = str(refused), refused.witness
     assert "illegal" in message
     assert "writes pressure[" in message
     (source_id, source), (sink_id, sink), params = witness
+    pressure, velocity = (
+        said(module.acoustic, f"{array}[t + 1, i] = ...", f"{array}[t + 1, i] =")
+        for array in ("pressure", "velocity")
+    )
+    assert refused.instances == (
+        f"{pressure} at t={source['t']}, i={source['i']}",
+        f"{velocity} at t={sink['t']}, i={sink['i']}",
+    )
 
     # Unlike stencil_skew, the cut dependence crosses the two instructions:
     # pressure from S1 at the previous time level feeds velocity in S0. It is
@@ -551,7 +572,14 @@ def test_the_wave_demo_prints_the_rejections_then_every_agreement() -> None:
     # tiling, and two fields each.
     result, _ = _invoke("wavefront_acoustic", "python")
     assert result.stdout.count("IllegalCast") == 3
-    assert "witness: S1" in result.stdout
+    # the witness as the refusal names it, and not by the statements' ids
+    pressure = said(
+        _module("wavefront_acoustic").acoustic,
+        "pressure[t + 1, i] = ...",
+        "pressure[t + 1, i] =",
+    )
+    assert f"witness: {pressure} at t=" in result.stdout
+    assert "witness: S" not in result.stdout
     assert "pressure: difference" in result.stdout
     assert "velocity: difference" in result.stdout
     assert result.stdout.count("-> tested") == 6
@@ -588,7 +616,8 @@ def test_the_space_first_diamond_runs_the_cross_statement_dependence_backwards()
     # a = i + t and b = i - t: S1 at (t, i) feeds S0 at (t + 1, i - 1), which
     # has the same a and a b two lower, so the order runs it the wrong way.
     module = _module("wavefront_acoustic")
-    message, witness = module.rejected_diamond()
+    refused = module.rejected_diamond()
+    message, witness = str(refused), refused.witness
     assert message.startswith("affine(")
     assert "writes pressure[" in message
     (source_id, source), (sink_id, sink), _params = witness
@@ -646,7 +675,8 @@ def test_tiling_the_wave_diamond_cuts_the_same_step_dependence() -> None:
     # (t, i + 1) reads, a distance of (0, 1), which t - i runs backwards. A
     # diamond tiling of this pair needs a time offset between the statements.
     module = _module("wavefront_acoustic")
-    message, witness = module.rejected_diamond_tiling()
+    refused = module.rejected_diamond_tiling()
+    message, witness = str(refused), refused.witness
     assert message.startswith("tile(acoustic.loops.a, acoustic.loops.b, 4, 4) illegal")
     assert "writes velocity[" in message
     (source_id, source), (sink_id, sink), _params = witness

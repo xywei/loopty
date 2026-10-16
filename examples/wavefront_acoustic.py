@@ -86,6 +86,7 @@ import numpy as np
 from lanky.prelude import Real
 
 from loopty import Arr, Fin, Schedule, kernel, when
+from loopty.schedule import IllegalCast
 
 #: Sixteen time levels over thirty-two points, tiled four by eight: enough tiles
 #: that the skewed nest has boundaries in both directions, small enough that the
@@ -144,19 +145,17 @@ def reference(
     return p, v
 
 
-def rejected_tiling(nt: int = NT, nx: int = NX) -> tuple[str, tuple]:
-    """Ask for the rectangular tiling and return the message and the witness.
+def rejected_tiling(nt: int = NT, nx: int = NX) -> IllegalCast:
+    """Ask for the rectangular tiling and return its refusal.
 
     As in :mod:`stencil_skew`, the schedule the cast was asked of is untouched
     by the rejection.
     """
-    from loopty.schedule import IllegalCast
-
     schedule = Schedule(acoustic, target="c", sizes={"nt": nt, "nx": nx})
     try:
         schedule.tile(acoustic.t, acoustic.i, 4, 8)
     except IllegalCast as refused:
-        return str(refused), refused.witness
+        return refused
     raise AssertionError("the unskewed time/space tiling should be illegal")
 
 
@@ -178,15 +177,13 @@ DIAMOND = "{ [t, i] -> [a, b] : a = t + i and b = t - i }"
 DIAMOND_SPACE_FIRST = "{ [t, i] -> [a, b] : a = i + t and b = i - t }"
 
 
-def rejected_diamond(nt: int = NT, nx: int = NX) -> tuple[str, tuple]:
-    """Ask for the space-first diamond and return the message and the witness."""
-    from loopty.schedule import IllegalCast
-
+def rejected_diamond(nt: int = NT, nx: int = NX) -> IllegalCast:
+    """Ask for the space-first diamond and return its refusal."""
     schedule = Schedule(acoustic, target="c", sizes={"nt": nt, "nx": nx})
     try:
         schedule.affine(DIAMOND_SPACE_FIRST)
     except IllegalCast as refused:
-        return str(refused), refused.witness
+        return refused
     raise AssertionError("the space-first diamond should be illegal")
 
 
@@ -197,15 +194,13 @@ def diamond_schedule(nt: int = NT, nx: int = NX) -> Schedule:
     )
 
 
-def rejected_diamond_tiling(nt: int = NT, nx: int = NX) -> tuple[str, tuple]:
-    """Ask to tile the diamond and return the message and the witness."""
-    from loopty.schedule import IllegalCast
-
+def rejected_diamond_tiling(nt: int = NT, nx: int = NX) -> IllegalCast:
+    """Ask to tile the diamond and return its refusal."""
     diamond = diamond_schedule(nt, nx)
     try:
         diamond.tile(acoustic.loops.a, acoustic.loops.b, 4, 4)
     except IllegalCast as refused:
-        return str(refused), refused.witness
+        return refused
     raise AssertionError("tiling the diamond should be illegal for this pair")
 
 
@@ -315,17 +310,19 @@ def main() -> int:
     )
     pressure = data["pressure"].numpy()
     print(np.array2string(pressure[:5, middle], precision=3, suppress_small=True))
-    writes = ", ".join(
-        f"{stmt.id} writes {stmt.assignee.array}" for stmt in acoustic.term.stmts
-    )
-    print(f"statements: {writes}")
+    # a map per statement, OFFSET_DIAMOND's, names each statement by its id
+    print("the statements, as a map per statement names them:")
+    for stmt in acoustic.term.stmts:
+        print(f"  {stmt.id}: {stmt.text} ({stmt.where})")
 
-    message, witness = rejected_tiling()
-    (source_id, source), (sink_id, sink), params = witness
+    refused = rejected_tiling()
+    first, second = refused.instances
+    *_, sizes = refused.witness
+    at = ", ".join(f"{name}={value}" for name, value in sizes.items())
     print()
     print("Schedule(acoustic).tile(acoustic.t, acoustic.i, 4, 8) ->")
-    print(f"  IllegalCast: {message}")
-    print(f"  witness: {source_id}{source} runs before {sink_id}{sink} at {params}")
+    print(f"  IllegalCast: {refused}")
+    print(f"  witness: {first} runs before {second}, where {at}")
 
     schedule = wavefront_schedule()
     print()
@@ -348,7 +345,7 @@ def main() -> int:
     )
     print(f"  the native run matches the hand-written recurrence: {agrees}")
 
-    message, _witness = rejected_diamond()
+    message = str(rejected_diamond())
     print()
     print(f"Schedule(acoustic).affine({DIAMOND_SPACE_FIRST!r}) ->")
     print(f"  IllegalCast: {message}")
@@ -370,7 +367,7 @@ def main() -> int:
             f"{diamond_fact.status.value}"
         )
 
-    message, _witness = rejected_diamond_tiling()
+    message = str(rejected_diamond_tiling())
     print()
     print(f"{schedule!r}.tile(acoustic.loops.a, acoustic.loops.b, 4, 4) ->")
     print(f"  IllegalCast: {message}")

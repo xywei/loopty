@@ -73,7 +73,7 @@ from loopty.description import (
     disjunction,
 )
 from loopty.hypotheses import _sort_terms, substitute
-from loopty.source import as_spelled
+from loopty.source import as_spelled, is_check, is_zeros
 from loopty.term import Stmt, Term
 
 __all__ = [
@@ -313,6 +313,25 @@ def _said(term: Term, stmt_id: str) -> str:
     from loopty.handles import statement_names
 
     return statement_names(term)(stmt_id)
+
+
+def _added(stmt: Stmt) -> bool:
+    """Whether loopty added ``stmt``: the zeros a program makes an array with,
+    or a check it puts before a call, whose loops no line of the source names."""
+    return not stmt.text and (is_zeros(stmt.id) or is_check(stmt.id))
+
+
+def _cell(term: Term, stmt: Stmt, array: str, indices: Sequence[Any]) -> str:
+    """``R[box, a, b]``: a cell ``stmt`` reaches, with the loops the source names.
+
+    Not ``R[box_0, a_1, b_1]``, as a program renames its calls' loops and
+    sums apart (:func:`loopty.source.as_spelled`); a statement loopty adds
+    reaches ``a cell of R``, by loops a program made for it.
+    """
+    if _added(stmt):
+        return f"a cell of {array}"
+    spelled = as_spelled(stmt, *indices, binders=term.binders)
+    return f"{array}[{', '.join(render(i) for i in spelled)}]"
 
 
 def _renamed(expr: Any, inames: Sequence[str], coords: Sequence[Any]) -> Any:
@@ -831,8 +850,7 @@ def _access_label(
     verbs = {"write": "writes", "read": "reads", "acc": "updates"}
 
     def said(stmt: Stmt, access: tuple, name: str) -> str:
-        indices = as_spelled(stmt, *access[1])
-        cell = f"{access[0]}[{', '.join(render(i) for i in indices)}]"
+        cell = _cell(term, stmt, access[0], access[1])
         return f"{name} {verbs.get(access[2], access[2])} {cell}"
 
     other = "the same statement" if a.id == b.id else _said(term, b.id)
@@ -1090,11 +1108,7 @@ def defined_obligation(
                 per_writer, coords, at, reflected, multiple=len(options) > 1
             )
             hints = lanky.Hints(witness=tuple(pieces)) if pieces else lanky.Hints()
-            spelled = as_spelled(stmt, *indices)
-            label = (
-                f"{_said(term, stmt.id)} reads "
-                f"{array}[{', '.join(render(i) for i in spelled)}]"
-            )
+            label = f"{_said(term, stmt.id)} reads {_cell(term, stmt, array, indices)}"
             parts.append(lanky.Part(f"read_{k}", label, claim.close(goal), hints))
     except Unstatable as exc:
         return _declined(str(exc))
@@ -1255,8 +1269,7 @@ def single_assignment_obligation(
                 goal = lexicographically_before(
                     _source_time(writer, depth, y), _source_time(stmt, depth, at)
                 )
-                spelled = as_spelled(stmt, *indices)
-                cell = f"{array}[{', '.join(render(i) for i in spelled)}]"
+                cell = _cell(term, stmt, array, indices)
                 parts.append(
                     lanky.Part(
                         f"read_{len(parts)}",
@@ -2025,22 +2038,20 @@ def _same_cell(
 def _class_label(term: Term, a: Stmt, b: Stmt, first: tuple, second: tuple) -> str:
     """``u[t, i - 1] read by ... (f.py:3) after u[t + 1, i] is written by the
     same statement``: each statement named as a message names it, and each
-    cell with the loops the source names (``R[box, a, b]``, not a program's
-    ``R[box_0, a_0, b_0]``)."""
-    from lanky.terms import render
-
-    def cell(stmt: Stmt, access: tuple) -> str:
-        indices = as_spelled(stmt, *access[2])
-        return f"{access[1]}[{', '.join(render(i) for i in indices)}]"
-
+    cell with the loops the source names (:func:`_cell`), and the one the
+    zeros of an array write, the cell the other statement reaches, as ``the
+    same cell``."""
+    second_cell = _cell(term, b, second[1], second[2])
+    first_cell = (
+        "the same cell" if _added(a) else _cell(term, a, first[1], first[2])
+    )
     verb = {
         ("write", "read"): ("read", "written"),
         ("read", "write"): ("overwritten", "read"),
         ("write", "write"): ("written again", "written"),
     }[first[0], second[0]]
     return (
-        f"{cell(b, second)} {verb[0]} by {_said(term, b.id)} after "
-        f"{cell(a, first)} is "
+        f"{second_cell} {verb[0]} by {_said(term, b.id)} after {first_cell} is "
         f"{verb[1]} by "
         + ("the same statement" if a.id == b.id else _said(term, a.id))
     )
@@ -2355,8 +2366,7 @@ def _within_parts(origin: Any, steps: Sequence[Any], work: Any) -> list[Any]:
         chain = _chain(claim, origin, stmt, steps, "a")
         same = _same_cell(origin, stmt, stmt, cell, write[2], chain[0], chain[0])
         claim.hypotheses.append(same)
-        indices = as_spelled(stmt, *write[2])
-        written = f"{write[1]}[{', '.join(render(i) for i in indices)}]"
+        written = _cell(term, stmt, write[1], write[2])
         parts.append(
             lanky.Part(
                 f"within_{count}",
@@ -3439,10 +3449,7 @@ def window_obligation(window: Any) -> Any:
                         if isinstance(overwritten, bool)
                         else LogicalNot(overwritten)
                     )
-                    spelled = as_spelled(access.stmt, *access.indices)
-                    cell = (
-                        f"{window.array}[{', '.join(render(i) for i in spelled)}]"
-                    )
+                    cell = _cell(term, access.stmt, window.array, access.indices)
                     label = (
                         f"{_said(term, access.stmt.id)} reads {cell} before "
                         "another cell is "

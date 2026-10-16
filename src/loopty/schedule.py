@@ -449,12 +449,26 @@ class IllegalCast(TypeError):
     ``witness`` this witness when isl gave one. A substitution refused on a
     question isl could not answer carries it ``ASSUMED`` instead (see
     :meth:`Schedule.substitute`).
+
+    The witness names each statement by its id, as a map per statement and a
+    fact's provenance do: ``(('S0', {'t': 0, 'i': 8}), ('S0', {'t': 1, 'i':
+    7}), {'nt': 16, 'nx': 16})``. ``instances`` names its instances as the
+    message does, each statement by its text and line: ``('u[t + 1, i] = ...
+    (stencil_skew.py:62) at t=0, i=8', 'the same statement at t=1, i=7')``,
+    and is empty where the witness is no such pair.
     """
 
-    def __init__(self, message: str, witness: Any = None, fact: Any = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        witness: Any = None,
+        fact: Any = None,
+        instances: Sequence[str] = (),
+    ) -> None:
         super().__init__(message)
         self.witness = witness
         self.fact = fact
+        self.instances = tuple(instances)
 
 
 class UnbuildableSchedule(TypeError):
@@ -5527,7 +5541,9 @@ class Schedule:
             message = f"{exc}; " + "; ".join(fixes)
             provenance = {**exc.fact.provenance, "reason": message}
             fact = dataclasses.replace(exc.fact, provenance=provenance)
-            raise IllegalCast(message, witness=exc.witness, fact=fact) from None
+            raise IllegalCast(
+                message, witness=exc.witness, fact=fact, instances=exc.instances
+            ) from None
 
     def _fused_check(self, handles: Sequence[Any], witness: Any) -> str | None:
         """The fusion of a checked point that a refused fusion ran past, or ``None``.
@@ -5996,6 +6012,7 @@ class Schedule:
                 fact.provenance["reason"],
                 witness=fact.provenance.get("witness"),
                 fact=fact,
+                instances=self._witnessed(fact.provenance.get("witness")),
             )
         gone = {stmt.id for stmt in writers}
         staged = self._clone()
@@ -6279,6 +6296,7 @@ class Schedule:
                 fact.provenance["reason"],
                 witness=fact.provenance.get("witness"),
                 fact=fact,
+                instances=self._witnessed(fact.provenance.get("witness")),
             )
 
         layout = self._origin_layout
@@ -6397,6 +6415,7 @@ class Schedule:
                 no_clobber.provenance["reason"],
                 witness=no_clobber.provenance.get("witness"),
                 fact=no_clobber,
+                instances=self._witnessed(no_clobber.provenance.get("witness")),
             )
 
         zeros = f"{array}.zeros"
@@ -7415,7 +7434,12 @@ class Schedule:
             )
         )
         if not verdict.ok:
-            raise IllegalCast(message, witness=verdict.witness, fact=facts[-1])
+            raise IllegalCast(
+                message,
+                witness=verdict.witness,
+                fact=facts[-1],
+                instances=self._witnessed(verdict.witness),
+            )
 
         reindex = self._reindex.apply_range(step)
         instances = step.range()
@@ -7475,7 +7499,12 @@ class Schedule:
             )
         )
         if refused:
-            raise IllegalCast(message, witness=witness, fact=facts[-1])
+            raise IllegalCast(
+                message,
+                witness=witness,
+                fact=facts[-1],
+                instances=self._witnessed(witness),
+            )
         concurrent = self._concurrent_updates(text, schedule, reindex, work, draft)
         if concurrent is not None:
             message, witness, detail, oracle, array = concurrent
@@ -7494,7 +7523,12 @@ class Schedule:
                     term=IslOnly(UPDATES_ISL_ONLY),
                 )
             )
-            raise IllegalCast(message, witness=witness, fact=facts[-1])
+            raise IllegalCast(
+                message,
+                witness=witness,
+                fact=facts[-1],
+                instances=self._witnessed(witness),
+            )
 
         other = self._clone()
         other._loops = loops
@@ -8081,6 +8115,30 @@ class Schedule:
         kernel need telling apart, and an array by its path.
         """
         return instances_text(self._statement_names(), *instances)
+
+    def _witnessed(self, witness: Any) -> tuple[str, ...]:
+        """A refusal's witness, its instances as its message names them.
+
+        ``(('S0', {'t': 0, 'i': 8}), ('S0', {'t': 1, 'i': 7}), {'nt': 16})``
+        is ``('u[t + 1, i] = ... (f.py:3) at t=0, i=8', 'the same statement at
+        t=1, i=7')`` (:meth:`_named`); a witness of another shape, a point of
+        isl's, has none.
+        """
+        if not isinstance(witness, tuple) or len(witness) < 2:
+            return ()
+        *instances, sizes = witness
+        if not isinstance(sizes, Mapping) or not all(
+            isinstance(instance, tuple)
+            and len(instance) == 2
+            and isinstance(instance[0], str)
+            and isinstance(instance[1], Mapping)
+            for instance in instances
+        ):
+            return ()
+        try:
+            return tuple(self._named(*instances))
+        except Exception:  # noqa: BLE001 - the witness by its ids still stands
+            return ()
 
     def _name_instance(self, point: Sequence[int]) -> tuple[str, dict[str, int]]:
         """A uniform-space point read back as ``(statement id, coordinates)``."""
@@ -8724,8 +8782,8 @@ def _no_update_text(stmt: Stmt, named: Named) -> str:
     from loopty.trace import update_operands
 
     array = stmt.assignee.array
-    indices = as_spelled(stmt, *stmt.assignee.indices)
-    (value,) = as_spelled(stmt, stmt.expr)
+    indices = named.spelled(stmt, *stmt.assignee.indices)
+    (value,) = named.spelled(stmt, stmt.expr)
     cell = f"{array}[{', '.join(render(i) for i in indices)}]"
     written = named(stmt.id)
     if not stmt.text or "..." in stmt.text:
@@ -8781,7 +8839,7 @@ def _subscript_text(dep: _Dep, term: Term | None = None) -> str:
         except KeyError:
             stmt = None
         if stmt is not None:
-            indices = as_spelled(stmt, *indices)
+            indices = as_spelled(stmt, *indices, binders=term.binders)
     return f"{dep.array}[{', '.join(render(i) for i in indices)}]"
 
 
@@ -8948,7 +9006,8 @@ def _not_pointwise(
     expression with the loop variables replaced by ``e``, which is what
     loopy's ``assignment_to_subst`` writes.
     """
-    said = (named or statement_names(term))(stmt.id)
+    named = named or statement_names(term)
+    said = named(stmt.id)
     indices = stmt.assignee.indices
     names = [
         index.name if isinstance(index, prim.Variable) else None for index in indices
@@ -8959,8 +9018,8 @@ def _not_pointwise(
             "value stored once"
         )
     if None in names or len(set(names)) != len(names) or set(names) != set(stmt.inames):
-        shown = ", ".join(str(index) for index in as_spelled(stmt, *indices))
-        loops = as_spelled(stmt, *(prim.Variable(name) for name in stmt.inames))
+        shown = ", ".join(str(index) for index in named.spelled(stmt, *indices))
+        loops = named.spelled(stmt, *(prim.Variable(name) for name in stmt.inames))
         return (
             f"{said} stores {array}[{shown}], and a substitution computes a "
             "statement that stores one cell per instance, at its own loop "

@@ -19,6 +19,7 @@ from lanky.ledger import Status
 from lanky.plugins import registry
 from lanky.terms import render
 
+from lines import said
 from loopty.summands import KIND, series_applications
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -60,6 +61,12 @@ def test_the_terms_a_kernel_adds_are_the_theorems_through_the_identity() -> None
     assert row.provenance["terms"][2] == "(x[i]*0.5)**2"
     assert row.rests_on == (kernels.halves.fact_id, kernels.halved.fact_id)
     assert row.where == f"series.py:{row.where.rsplit(':', 1)[1]}"
+    # the statement by its text and line, as a message names it (#307)
+    stmt = said(
+        kernels.power_sum,
+        "y[i] = reduce_sum((x[i] * 0.5) ** k for k in Fin[ORDER + 1])",
+    )
+    assert row.provenance["rule"].startswith(f"{stmt} adds (x[i]*0.5)**0 and ")
 
 
 def test_a_kernel_that_adds_other_terms_gets_no_row() -> None:

@@ -24,7 +24,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from loopty.term import Stmt
+    from loopty.term import Binder, Stmt
 
 __all__ = [
     "LIMIT",
@@ -235,28 +235,39 @@ def checked_array(stmt: Stmt) -> str:
     return ""
 
 
-def as_spelled(stmt: Stmt, *exprs: Any) -> tuple[Any, ...]:
+def as_spelled(
+    stmt: Stmt, *exprs: Any, binders: Iterable[Binder] = ()
+) -> tuple[Any, ...]:
     """``exprs`` with ``stmt``'s loops named as the source names them.
 
     ``val[off[r] + j]``, where a program named the loop of its call over
-    ``r`` ``r_0`` (:attr:`loopty.term.Stmt.spelled`). As they are where two
-    of the statement's loops are spelled alike, or where a spelling is a
-    name the expressions use for something else, which the renaming would
-    make one.
+    ``r`` ``r_0`` (:attr:`loopty.term.Stmt.spelled`). ``binders`` are the
+    term's (:attr:`loopty.term.Term.binders`), which spell the binder of a
+    sum in ``exprs`` too: ``R[box, a, b]``, where the program named the
+    sum's ``a`` ``a_1``. As they are where two of the loops ``exprs`` use
+    are spelled alike, or where a spelling is a name the expressions use
+    for something else, which the renaming would make one.
     """
     from pymbolic.primitives import Variable
 
-    if not stmt.spelled or len(set(stmt.spelled)) != len(stmt.spelled):
-        return exprs
+    spellings = {
+        binder.name: binder.binder
+        for binder in binders
+        if binder.sum and binder.binder and binder.name not in stmt.inames
+    }
+    if stmt.spelled:
+        spellings.update(zip(stmt.inames, stmt.spelled, strict=False))
+    used = {node.name for node in _nodes(exprs) if isinstance(node, Variable)}
     names = {
         name: spelling
-        for name, spelling in zip(stmt.inames, stmt.spelled, strict=False)
-        if name != spelling
+        for name, spelling in spellings.items()
+        if name in used and name != spelling
     }
     if not names:
         return exprs
-    used = {node.name for node in _nodes(exprs) if isinstance(node, Variable)}
-    if (used - set(names)) & set(names.values()):
+    kept = used - set(names)
+    shown = [names.get(name, name) for name in used]
+    if kept & set(names.values()) or len(set(shown)) != len(shown):
         return exprs
     from loopty.compose import rename_expr
 
@@ -294,7 +305,8 @@ class Named:
     the statement's id, ``calls`` a program's call by its label, and
     ``arrays`` an array of the term, each by its path (``l2p.reconstruct``
     and ``l2p.R``, :mod:`loopty.handles`); by the label and the name
-    otherwise.
+    otherwise. ``binders`` are the term's loops, which :meth:`spelled`
+    names a sum's binder by.
     """
 
     def __init__(
@@ -304,11 +316,13 @@ class Named:
         called: Callable[[str], str] | None = None,
         calls: Callable[[str], str] | None = None,
         arrays: Callable[[str], str] | None = None,
+        binders: Iterable[Binder] = (),
     ) -> None:
         if isinstance(stmts, Mapping):
             self.stmts = dict(stmts)
         else:
             self.stmts = {stmt.id: stmt for stmt in stmts}
+        self.binders = tuple(binders)
         self.called = called or _label
         self.calls = calls or _same
         self.arrays = arrays or _same
@@ -339,6 +353,14 @@ class Named:
         if len(self.places.get((stmt.text, stmt.where), ())) > 1:
             return f"{stmt.where}, {self.called(stmt_id)}"
         return stmt.where
+
+    def spelled(self, stmt: Stmt, *exprs: Any) -> tuple[Any, ...]:
+        """``exprs`` of ``stmt``, each loop and sum as the source names it.
+
+        ``R[box, a, b]``, where a program named them ``box_0``, ``a_1`` and
+        ``b_1`` (:func:`as_spelled`).
+        """
+        return as_spelled(stmt, *exprs, binders=self.binders)
 
     def listed(self, stmt_ids: Iterable[str], word: str = "and") -> str:
         """Statements, each once, as one sentence lists them: ``a, b and c``."""

@@ -41,7 +41,7 @@ from lanky.ledger import Status  # noqa: E402
 from lanky.prelude import Int, Real  # noqa: E402
 from lanky.terms import Var, evaluate, render  # noqa: E402
 
-from lines import named, said  # noqa: E402
+from lines import named, said, where  # noqa: E402
 from loopty import Arr, Fin, Schedule, kernel, program, reduce_sum  # noqa: E402
 from loopty.description import (  # noqa: E402
     Unstatable,
@@ -479,6 +479,13 @@ def test_a_programs_cast_names_each_cell_by_the_loops_the_source_names() -> None
     renamed = [label for label in labels if re.search(r"\b[a-z]+_[0-9]+\b", label)]
     assert not renamed, renamed
     assert any(label.startswith("R[box, a, b] written again by ") for label in labels)
+    # the zeros run in loops the program made, and write the cell the other
+    # statement reaches
+    zeros = f"the zeros of l2p.R ({where(l2p.l2p, 'R = Arr.zeros(')})"
+    assert any(
+        label.endswith(f"after the same cell is written by {zeros}")
+        for label in labels
+    ), labels
 
 
 def test_a_refused_cast_is_stated_with_isls_pair() -> None:

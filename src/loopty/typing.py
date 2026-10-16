@@ -146,7 +146,7 @@ from loopty.obligations import (
     ordering_obligation,
 )
 from loopty.oracle import Empty, Monotone, Subset
-from loopty.source import Named, as_spelled
+from loopty.source import Named
 from loopty.term import Argument, ArrType, Term, commutes
 from loopty.trace import reductions_in
 
@@ -3079,7 +3079,8 @@ def scoped_in_bounds_facts(
                         ),
                         kind="in-bounds",
                         statement=(
-                            f"{_access_text(array, as_spelled(stmt, *indices))} is "
+                            f"{_access_text(array, stmt_name.spelled(stmt, *indices))} "
+                            "is "
                             f"in bounds for every instance of {stmt_name(stmt.id)}, "
                             f"where {scope.call} is called at {scope.where}"
                         ),

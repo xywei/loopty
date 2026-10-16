@@ -447,7 +447,7 @@ def statement_names(term: Term, index: _Index | None = None) -> Named:
         try:
             named = statement_names(term, _Index(term, term))
         except Exception:  # noqa: BLE001 - named by labels and names, then
-            named = Named(term.stmts)
+            named = Named(term.stmts, binders=term.binders)
         if len(_NAMED) >= 16:
             _NAMED.pop(next(iter(_NAMED)))
         _NAMED[id(term)] = (term, named)
@@ -476,6 +476,7 @@ def statement_names(term: Term, index: _Index | None = None) -> Named:
         called=called,
         calls=lambda label: index.scope_path((label,)),
         arrays=arrays,
+        binders=term.binders,
     )
 
 
