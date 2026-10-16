@@ -383,6 +383,10 @@ for box, a, b in R.dom:
   inputs from `examples/spmv.py`'s `_reset`, which the example has never
   had, so the case failed with an `AttributeError` after its device run had
   agreed. It now runs on the same seeded matrix afresh.
+- The source distribution ships `benchmarks/`. `tests/test_benchmarks.py`
+  runs the hexahedra and advection drivers there without a device, so the
+  suite run from an unpacked sdist, as a downstream packager runs it, failed
+  those 15 tests for the files it left out (0.3.0's sdist too).
 
 ## [0.3.0] - 2026-10-15
 

@@ -96,7 +96,8 @@ run = "loopty.plugin:RunVerb"
 
 # The sdist is the source a downstream packager builds and tests from: the
 # package, its tests, the examples, the documentation whose transcripts the
-# tests and the refresh script compare with a real run, and that script.
+# tests and the refresh script compare with a real run, that script, and the
+# benchmark drivers, which tests/test_benchmarks.py runs without a device.
 # Named rather than left to the default, which takes every file git does not
 # ignore, so that a stray file in a checkout never ships. (pyproject.toml, the
 # README and the license file go in regardless.)
@@ -107,6 +108,7 @@ include = [
     "/examples",
     "/docs",
     "/scripts",
+    "/benchmarks",
     "/CHANGELOG.md",
 ]
 
