@@ -302,6 +302,16 @@ for box, a, b in R.dom:
 
 ### Fixed
 
+- **A `for` around a long body, and a `while` on 3.14, are read off the
+  bytecode again.** `for a, b in R.dom:` around a body longer than 255
+  instructions handed out single indices, natively and traced, and its
+  unpacking failed: the `FOR_ITER` that jumps past such a body carries an
+  `EXTENDED_ARG` before it, which the reading of the `for`'s names did not
+  step over. `examples/advection.py`'s lift on the faces is that long on
+  Python 3.14. And 3.14 tests a `while`'s condition once per pass, at the
+  top, so a `while` on a traced condition inside a `for` read as an `if`, and
+  was refused for asking more than 10000 conditions rather than as the
+  `while` it is (`loopty.bytecode`).
 - `realize(k.y, tree=True)` records one fact, that the accumulation into
   `k.y` is reassociated, and no `bijective` or `monotone` fact: the step
   moves no instance and changes no order, so the two said nothing about it,
