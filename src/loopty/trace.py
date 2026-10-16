@@ -791,9 +791,17 @@ class Tracer:
         #: where, by the frame's code, its instruction and the open loops.
         self._asks = 0
         self._asked_at: set[Any] = set()
+        #: The values this run asked the truth of, by identity, each with its
+        #: condition's index: a value asked again is the same condition.
+        self._asked_values: dict[int, tuple[Any, int]] = {}
         #: Every condition asked in any run, by index, as the trace computed
         #: it, with the line that asked it first.
         self.conditions: list[tuple[Any, str]] = []
+        #: The write each condition is asked after, by index: the place of the
+        #: last statement before the ask that writes an array the condition
+        #: reads, or ``None``. ``if x[i] > 0:`` asked again after ``x[i] =
+        #: -x[i]`` is another condition (:meth:`condition_index`).
+        self._epochs: list[Any] = []
         #: The guard the term is being built under: ``None`` while a run
         #: records, since its statements are joined across runs first, and
         #: the joined path condition while each is built (:meth:`joined`).
@@ -1217,6 +1225,7 @@ class Tracer:
         self._literals = []
         self._asks = 0
         self._asked_at = set()
+        self._asked_values = {}
         self.loops = []
         self.open_binders = []
         self.inlining = []
@@ -1232,6 +1241,7 @@ class Tracer:
         """Keep what the run recorded, unless it stopped at a path isl shows empty."""
         if finished:
             self._run.binders = list(self.binder_records)
+            self._run.answers = dict(self.answers)
             self._done.append(self._run)
 
     def site(self, kind: str) -> Any:
@@ -1256,13 +1266,35 @@ class Tracer:
         self._reached[place] = count + 1
         return (*place, count)
 
-    def condition_index(self, condition: Any, where: str) -> int:
-        """The index of ``condition`` among every condition any run asked."""
+    def condition_index(self, condition: Any, where: str, epoch: Any = None) -> int:
+        """The index of ``condition`` among every condition any run asked.
+
+        One condition is one index wherever it is asked, as long as no
+        statement between the asks writes an array it reads: ``epoch`` is the
+        place of the last such write before this ask (:meth:`_epoch`), and a
+        condition asked after another write is another index, which a run
+        answers apart from the first.
+        """
         for index, (known, _where) in enumerate(self.conditions):
-            if _same(known, condition):
+            if self._epochs[index] == epoch and _same(known, condition):
                 return index
         self.conditions.append((condition, where))
+        self._epochs.append(epoch)
         return len(self.conditions) - 1
+
+    def _epoch(self, condition: Any) -> Any:
+        """Where this run last wrote an array ``condition`` reads, or ``None``.
+
+        The place (:meth:`site`) of the statement, which every run that
+        recorded it names alike.
+        """
+        reads = _arrays_read(condition)
+        if not reads:
+            return None
+        for record in reversed(self._run.records):
+            if record.stmt.assignee.array in reads:
+                return record.key
+        return None
 
     def decide(self, condition: Any, frame: Any) -> bool:
         """Answer the truth value a branch of the body asks ``condition`` for.
@@ -1273,7 +1305,10 @@ class Tracer:
         each of those answered ``False``. A condition this run has answered
         already gets the same answer, since one run is one path: ``x and y``
         asks ``x`` twice when it is false, and ``if a < 2:`` twice in a row
-        branches alike.
+        branches alike. Computed again after the run wrote an array it
+        reads, it is another condition (:meth:`condition_index`): ``if x[i] >
+        0:`` after ``x[i] = -x[i]`` is answered apart. The value a name holds,
+        ``flag = x[i] > 0`` asked as ``if flag:``, is the condition it was.
 
         The condition is checked as any value the body computes is: ``~`` of
         a Python bool is refused (:func:`_refuse_bitwise`), since natively it
@@ -1288,6 +1323,7 @@ class Tracer:
         """
         where = _location(frame)
         sorts = {**self.params, **self.array_types}
+        held = condition
         condition = _exact_guard(condition, self)
         # Python's own if: nothing refuses the integer ~ makes of a Python
         # bool natively, so the trace refuses it wherever it is.
@@ -1310,7 +1346,14 @@ class Tracer:
         self._asks += 1
         if self._asks > MAX_ASKS:
             raise TraceError(_unending_message(condition, where))
-        index = self.condition_index(condition, where)
+        known = self._asked_values.get(id(held))
+        if known is not None and known[0] is held:
+            # The value Python holds, flag = x[i] > 0.0, asked again: what it
+            # was when it was computed, whatever the run wrote since.
+            index = known[1]
+        else:
+            index = self.condition_index(condition, where, self._epoch(condition))
+            self._asked_values[id(held)] = (held, index)
         for asked, value in self.answers:
             if asked == index:
                 self._literal(index, value, where)
@@ -1339,6 +1382,11 @@ class Tracer:
         self._literals.append(
             (index, value, tuple(id(loop) for loop in self.loops), where, term)
         )
+        if _arrays_read(self.conditions[index][0]):
+            # Where it went on the path among the statements, for what a
+            # write after it does to those under it (_refuse_stale_conditions).
+            parent = self.loops[-1].key if self.loops else None
+            self._run.children.setdefault(parent, []).append(("cond", index))
 
     def _said(self, index: int, value: bool) -> Any:
         """Condition ``index``, or its negation, as a guard says it here.
@@ -1728,6 +1776,8 @@ class Tracer:
                     final_of[key] = len(finals)
                 number, index = entry.records[0]
                 finals.append((runs[number].records[index], entry))
+        self._refuse_closed_choices(finals)
+        self._refuse_stale_conditions(final_of, finals)
         orders = self._orders(final_of, finals)
         ranked = sorted(range(len(finals)), key=lambda final: orders[final])
         ids = {final: f"S{rank}" for rank, final in enumerate(ranked)}
@@ -1751,22 +1801,34 @@ class Tracer:
         return stmts, calls
 
     def _merged(self, entries: Sequence[_Entry], select: bool = True) -> list[_Entry]:
-        """``entries`` joined two at a time until no two join."""
+        """``entries`` joined two at a time until no two join.
+
+        Records under one path, of runs that parted after the statement, are
+        joined before any two that answer a condition apart. In ``if a: ...``,
+        ``z[i] += 1.0``, ``if b: ...`` the update is recorded twice under
+        ``a`` and twice under ``not a``; joining one of each first would leave
+        the fourth record a statement of its own, and the update would run
+        twice where ``a`` is false.
+        """
         out = list(entries)
-        joined = True
-        while joined:
-            joined = False
-            for first in range(len(out)):
-                for second in range(first + 1, len(out)):
-                    both = self._join_two(out[first], out[second], select)
-                    if both is not None:
-                        out[first] = both
-                        del out[second]
-                        joined = True
-                        break
-                if joined:
-                    break
-        return out
+        while True:
+            found = next(
+                (
+                    (first, second, both)
+                    for alike in (True, False)
+                    for first in range(len(out))
+                    for second in range(first + 1, len(out))
+                    if alike == _alike(out[first], out[second])
+                    for both in (self._join_two(out[first], out[second], select),)
+                    if both is not None
+                ),
+                None,
+            )
+            if found is None:
+                return out
+            first, second, both = found
+            out[first] = both
+            del out[second]
 
     def _join_two(self, one: _Entry, other: _Entry, select: bool) -> _Entry | None:
         """The one statement two records of a place are, or ``None``.
@@ -1783,16 +1845,17 @@ class Tracer:
             return None
         apart = [index for index in mine if mine[index] != theirs[index]]
         records = [*one.records, *other.records]
+        chosen = one.chosen | other.chosen
         if not apart:
             if _same(one.lowered, other.lowered):
-                return _Entry(one.path, one.source, one.lowered, records)
+                return _Entry(one.path, one.source, one.lowered, records, chosen)
             return None
         if len(apart) > 1:
             return None
         (index,) = apart
         path = tuple(answer for answer in one.path if answer[0] != index)
         if _same(one.lowered, other.lowered):
-            return _Entry(path, one.source, one.lowered, records)
+            return _Entry(path, one.source, one.lowered, records, chosen)
         if not select or not self._chooses(index):
             return None
         then, otherwise = (one, other) if mine[index] else (other, one)
@@ -1803,7 +1866,7 @@ class Tracer:
         lowered = _select(
             condition, then.lowered, then.lowered, otherwise.lowered, otherwise.lowered
         )
-        return _Entry(path, source, lowered, records)
+        return _Entry(path, source, lowered, records, chosen | {index})
 
     def _chooses(self, index: int) -> bool:
         """Whether condition ``index`` can choose a value: isl states neither answer.
@@ -1854,6 +1917,135 @@ class Tracer:
         finally:
             self.loops, self.building = saved
 
+    def _refuse_closed_choices(self, finals: Sequence[tuple[_Record, _Entry]]) -> None:
+        """Refuse a statement that a branch inside a closed loop decides.
+
+        An answer given inside a loop is off the path once the loop closes
+        (:meth:`path`), since what follows the loop runs whichever way the
+        branch went. So every run whose answers agree with a statement's
+        joined path records it, with its value, unless what it writes, or
+        whether, rests on such an answer: ``a = 1 if i == 0 else 2`` in a
+        loop over ``i``, and ``y[0] = a`` after it. Natively that is what the
+        loop's last iteration chose, which a generic point of the loop
+        cannot tell.
+        """
+        runs = self._done
+        for record, entry in finals:
+            path = {index: value for index, value, _term in entry.path}
+            recorded = {number for number, _index in entry.records}
+            for number, run in enumerate(runs):
+                if number in recorded:
+                    continue
+                answers = run.answers
+                if any(answers.get(index) != value for index, value in path.items()):
+                    continue
+                other = runs[entry.records[0][0]].answers
+                apart = [
+                    index
+                    for index in sorted({*other, *answers})
+                    if other.get(index) != answers.get(index)
+                ]
+                if not apart:
+                    continue
+                condition, where = self.conditions[apart[0]]
+                raise TraceError(
+                    _closed_choice_message(record.stmt, condition, where)
+                )
+
+    def _refuse_stale_conditions(
+        self,
+        final_of: Mapping[tuple[int, int], int],
+        finals: Sequence[tuple[_Record, _Entry]],
+    ) -> None:
+        """Refuse a condition on an array that a write under it changes.
+
+        Python asks a condition once, at its ``if``. The term keeps it as the
+        guard of every statement under it, and as the choice of a select,
+        which the interpreter and the compiled kernel evaluate as each
+        statement runs. The two agree unless a statement between the ``if``
+        and one under it writes an array the condition reads: ``if x[i] >
+        0: x[i] = -1.0`` and then ``else: x[i] = 1.0``, where the ``else``
+        asks again after the write and runs too. Such a write, after the
+        ``if`` in its block and before the statement, or in a loop opened
+        after the ``if`` that holds both (whose next pass runs the statement
+        after the write), is refused, by the array it writes.
+        """
+        reads = {
+            index: _arrays_read(condition)
+            for index, (condition, _where) in enumerate(self.conditions)
+        }
+        if not any(reads.values()):
+            return
+        sequences: dict[Any, list[list[Any]]] = {}
+        for number, run in enumerate(self._done):
+            for parent, children in run.children.items():
+                seen: list[Any] = []
+                for kind, ident in children:
+                    child = (
+                        ("stmt", final_of[(number, ident)])
+                        if kind == "stmt"
+                        else (kind, ident)
+                    )
+                    if child not in seen:
+                        seen.append(child)
+                sequences.setdefault(parent, []).append(seen)
+        position: dict[tuple[Any, Any], int] = {}
+        for parent, runs in sequences.items():
+            for place, child in enumerate(_interleaved(runs)):
+                position[(parent, child)] = place
+
+        def chain(parent: Any, child: Any) -> tuple[int, ...]:
+            out = [position[(parent, child)]]
+            while parent is not None:
+                above = self._loop_parents[parent]
+                out.append(position[(above, ("loop", parent))])
+                parent = above
+            return tuple(reversed(out))
+
+        asks: dict[int, list[tuple[int, ...]]] = {}
+        for parent, child in position:
+            if child[0] == "cond":
+                asks.setdefault(child[1], []).append(chain(parent, child))
+        placed = []
+        for final, (record, entry) in enumerate(finals):
+            parent = record.loops[-1].key if record.loops else None
+            placed.append((chain(parent, ("stmt", final)), record, entry))
+        for at, record, entry in placed:
+            used = {index for index, _value, _term in entry.path} | entry.chosen
+            for index in sorted(used):
+                if not reads[index]:
+                    continue
+                before = [
+                    ask
+                    for ask in asks.get(index, ())
+                    if ask[:-1] == at[: len(ask) - 1] and ask < at
+                ]
+                if not before:
+                    continue
+                ask = max(before)
+                depth = len(ask) - 1
+                for written, writer, _entry in placed:
+                    if writer.stmt.assignee.array not in reads[index]:
+                        continue
+                    if written[:depth] != ask[:depth] or written < ask:
+                        continue
+                    shared = (
+                        written[depth] == at[depth]
+                        and len(written) > depth + 1
+                        and len(at) > depth + 1
+                    )
+                    if written < at or shared:
+                        condition, where = self.conditions[index]
+                        raise TraceError(
+                            _stale_condition_message(
+                                condition,
+                                where,
+                                writer.stmt,
+                                record.stmt,
+                                looped=shared and not written < at,
+                            )
+                        )
+
     def _orders(
         self, final_of: Mapping[tuple[int, int], int], finals: Sequence[Any]
     ) -> dict[int, tuple[int, ...]]:
@@ -1869,6 +2061,8 @@ class Tracer:
             for parent, children in run.children.items():
                 seen: list[Any] = []
                 for kind, ident in children:
+                    if kind == "cond":
+                        continue
                     child = (
                         ("loop", ident)
                         if kind == "loop"
@@ -1984,14 +2178,17 @@ class _Run:
     """What one run of the body recorded.
 
     ``children`` lists, for each loop by its key (``None`` for the body),
-    what the run met inside it in order: ``("loop", key)`` and ``("stmt",
-    index)``, an index into ``records``.
+    what the run met inside it in order: ``("loop", key)``, ``("stmt",
+    index)``, an index into ``records``, and ``("cond", index)``, where a
+    condition that reads an array went on the path, by the condition's index.
     """
 
     records: list[_Record] = dataclasses.field(default_factory=list)
     calls: list[_CallRecord] = dataclasses.field(default_factory=list)
     children: dict[Any, list[tuple[str, Any]]] = dataclasses.field(default_factory=dict)
     binders: list[Binder] = dataclasses.field(default_factory=list)
+    #: Every answer the run gave, by the condition's index.
+    answers: dict[int, bool] = dataclasses.field(default_factory=dict)
 
 
 @dataclass
@@ -2000,13 +2197,16 @@ class _Entry:
 
     ``source`` is the value as the body built it and ``lowered`` as it was
     recorded, with no guard on its sums, which is what two are compared by.
-    ``records`` are ``(run, index)`` pairs, the first the earliest.
+    ``records`` are ``(run, index)`` pairs, the first the earliest, and
+    ``chosen`` the conditions its value selects by (:func:`_select`), by
+    index.
     """
 
     path: tuple[tuple[int, bool, Any], ...]
     source: Any
     lowered: Any
     records: list[tuple[int, int]]
+    chosen: frozenset[int] = frozenset()
 
 
 @dataclass
@@ -2277,6 +2477,67 @@ def _branch_message(name: str, exc: BaseException, path: str) -> str:
         "branch, and a compiled kernel cannot raise: check the inputs before "
         "the kernel is called, or make the branch compute a value"
     )
+
+
+def _alike(one: _Entry, other: _Entry) -> bool:
+    """Whether two records of a place are under one path: the same answers."""
+    return {index: value for index, value, _term in one.path} == {
+        index: value for index, value, _term in other.path
+    }
+
+
+def _shown_stmt(stmt: Stmt) -> str:
+    """A statement as a message names it: its text and its line."""
+    text = stmt.text or f"the write to {stmt.assignee.array}"
+    return f"{text} ({stmt.where})" if stmt.where else text
+
+
+def _closed_choice_message(stmt: Stmt, condition: Any, where: str) -> str:
+    """Why a statement that a branch inside a closed loop decides is refused."""
+    at = f" at {where}" if where else ""
+    return (
+        f"{_shown_stmt(stmt)} rests on which way the branch on "
+        f"{_shown(condition)!r}{at} went, inside a loop that has closed before "
+        "it: natively it is what the loop's last iteration chose, and tracing "
+        "runs the loop's body once, at a generic point, so it cannot tell "
+        "which. Write what the branch chooses into an array inside the loop, "
+        "and read that cell after it, or make the choice after the loop"
+    )
+
+
+def _stale_condition_message(
+    condition: Any, where: str, writer: Stmt, reader: Stmt, looped: bool
+) -> str:
+    """Why a branch that writes an array its condition reads is refused.
+
+    ``looped`` says that the write comes after the statement in a loop
+    opened after the ``if``, whose next pass runs the statement after it.
+    """
+    at = f" at {where}" if where else ""
+    array = writer.assignee.array
+    if writer is reader:
+        written = f"writes {array} itself, in a loop opened after the if"
+    elif looped:
+        written = (
+            f"{_shown_stmt(writer)} writes {array} in a loop opened after the "
+            "if, whose next pass runs it after the write"
+        )
+    else:
+        written = f"{_shown_stmt(writer)} writes {array} after the if and before it"
+    return (
+        f"{_shown_stmt(reader)} is under the condition {_shown(condition)!r}"
+        f"{at}, which reads {array}, and {written}. Python tests the condition "
+        "once, at the if, and the compiled kernel tests it again at each "
+        "statement under it, so after that write the two can take different "
+        f"branches. Choose the value in one statement, '... if "
+        f"{_shown(condition)} else ...', or write what the branch computes "
+        f"into an array other than {array}"
+    )
+
+
+def _arrays_read(condition: Any) -> frozenset[str]:
+    """The arrays ``condition`` reads, by name."""
+    return frozenset(access.array for access in accesses_in(condition))
 
 
 _TRACERS: list[Tracer] = []

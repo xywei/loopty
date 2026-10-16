@@ -151,6 +151,37 @@ def test_a_join_inside_a_branch_keeps_the_outer_branchs_guard() -> None:
     agrees(nested, {"x": x, "y": np.zeros(4)}, "y", expected)
 
 
+@kernel
+def between_two(
+    x: Arr[Fin[n], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+    z: Arr[Fin[n], Real],  # noqa: F821
+    w: Arr[Fin[n], Real],  # noqa: F821
+):
+    for i in x.dom:
+        if x[i] > 0.0:
+            y[i] = 1.0
+        z[i] = z[i] + 1.0
+        if x[i] > 1.0:
+            w[i] = 1.0
+
+
+def test_a_statement_between_two_branches_is_one_statement() -> None:
+    # Four runs record the update, two under each answer of the first if;
+    # it is one statement with no guard, run once (it ran twice where
+    # x[i] <= 0 when the records of one path were not joined first).
+    stmts = between_two.term.stmts
+    assert [stmt.text for stmt in stmts] == [
+        "y[i] = 1.0",
+        "z[i] = z[i] + 1.0",
+        "w[i] = 1.0",
+    ]
+    assert stmts[1].guard is None
+    x = np.array([2.0, 0.5, -1.0])
+    inputs = {"x": x, "y": np.zeros(3), "z": np.zeros(3), "w": np.zeros(3)}
+    agrees(between_two, inputs, "z", np.ones(3))
+
+
 # }}}
 
 
@@ -318,6 +349,176 @@ def test_a_condition_on_a_closed_loops_variable_is_refused() -> None:
 
     with pytest.raises(TraceError, match="the condition 'i > 0' at .* loop variable"):
         term_of(after)
+
+
+# }}}
+
+
+# {{{ a condition its branch writes, asked again, or chosen inside a closed loop
+
+
+def test_a_branch_that_writes_what_its_condition_reads_is_refused() -> None:
+    # Run as the term says, the else would ask x[i] > 0.0 again after the
+    # then-branch wrote x[i], and run too where x[i] > 0.0 (Codex, #320).
+    def flipped(x: Arr[Fin[n], Real]):  # noqa: F821
+        for i in x.dom:
+            if x[i] > 0.0:
+                x[i] = -1.0
+            else:
+                x[i] = 1.0
+
+    with pytest.raises(TraceError) as caught:
+        term_of(flipped)
+    message = str(caught.value)
+    assert "x[i] = 1.0 (" in message
+    assert "is under the condition 'x[i] > 0.0'" in message
+    assert "x[i] = -1.0 (" in message
+    assert "writes x after the if and before it" in message
+    assert "'... if x[i] > 0.0 else ...'" in message
+
+
+def test_a_write_before_a_later_statement_of_its_branch_is_refused() -> None:
+    # Run as the term says, y[i] = 1.0 would ask x[i] > 0.0 again after the
+    # negation and be skipped (Codex, #319).
+    def negated(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in x.dom:
+            if x[i] > 0.0:
+                x[i] = -x[i]
+                y[i] = 1.0
+
+    with pytest.raises(TraceError, match=r"y\[i\] = 1.0 .* writes x after the if"):
+        term_of(negated)
+
+
+def test_a_write_between_an_if_and_a_statement_it_decides_is_refused() -> None:
+    # flag is a Python int the if chose; y[i] = 1.0 is under x[i] > 0.0,
+    # which the term would ask after x[i] = 0.0.
+    def flagged_before(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in x.dom:
+            if x[i] > 0.0:
+                flag = 1
+            else:
+                flag = 0
+            x[i] = 0.0
+            if flag:
+                y[i] = 1.0
+
+    with pytest.raises(TraceError) as caught:
+        term_of(flagged_before)
+    message = str(caught.value)
+    assert "y[i] = 1.0 (" in message
+    assert "is under the condition 'x[i] > 0.0'" in message
+    assert "x[i] = 0.0 (" in message
+    assert "writes x after the if and before it" in message
+
+
+def test_a_write_in_a_loop_under_the_branch_is_refused() -> None:
+    # The next pass of the loop over j would ask x[i] > 0.0 after the write.
+    def drained(x: Arr[Fin[n], Real], z: Arr[Fin[m], Real]):  # noqa: F821
+        for i in x.dom:
+            if x[i] > 0.0:
+                for j in z.dom:
+                    x[i] = x[i] - 1.0
+
+    with pytest.raises(TraceError, match="writes x itself, in a loop opened after"):
+        term_of(drained)
+
+
+def test_a_select_on_a_condition_written_before_it_is_refused() -> None:
+    def chosen_before(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in x.dom:
+            v = 1.0 if x[i] > 0.0 else 2.0
+            x[i] = 0.0
+            y[i] = v
+
+    with pytest.raises(TraceError, match=r"y\[i\] = v .* writes x after the if"):
+        term_of(chosen_before)
+
+
+def test_a_branch_whose_one_statement_writes_its_condition_is_one_statement() -> None:
+    # Its guard is asked as it runs, before it writes: nothing under
+    # x[i] > 1.0 runs after the write.
+    def clamped(x: Arr[Fin[n], Real]):  # noqa: F821
+        for i in x.dom:
+            if x[i] > 1.0:
+                x[i] = 1.0
+
+    (stmt,) = term_of(clamped).stmts
+    assert render(stmt.guard) == "x[i] > 1.0"
+
+
+@kernel
+def clamped_in_one(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+    for i in x.dom:
+        x[i] = 1.0 if x[i] > 1.0 else x[i]
+        y[i] = 2.0 * x[i]
+
+
+def test_a_value_chosen_by_what_its_statement_writes_runs() -> None:
+    # A select reads x[i] once, before the statement writes it, and compiles,
+    # where a guard that reads what its statement writes does not (#321).
+    x = np.array([0.5, 2.0, -1.0, 1.5])
+    agrees(clamped_in_one, {"x": x, "y": np.zeros(4)}, "y", 2.0 * np.minimum(x, 1.0))
+
+
+@kernel
+def asked_after_a_write(
+    x: Arr[Fin[n], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+    z: Arr[Fin[n], Real],  # noqa: F821
+):
+    for i in x.dom:
+        if x[i] > 0.0:
+            y[i] = 1.0
+        x[i] = -x[i]
+        if x[i] > 0.0:
+            z[i] = 1.0
+
+
+def test_a_condition_asked_again_after_a_write_is_another_condition() -> None:
+    # The second if is not answered as the first: where x[i] < 0, it holds
+    # after the negation, and z[i] is written (Codex, #320).
+    first, negation, second = asked_after_a_write.term.stmts
+    assert render(first.guard) == "x[i] > 0.0"
+    assert negation.guard is None
+    assert render(second.guard) == "x[i] > 0.0"
+    x = np.array([1.0, -2.0, 0.0, -0.5])
+    inputs = {"x": x, "y": np.zeros(4), "z": np.zeros(4)}
+    agrees(asked_after_a_write, inputs, "y", np.where(x > 0.0, 1.0, 0.0))
+    agrees(asked_after_a_write, inputs, "z", np.where(-x > 0.0, 1.0, 0.0))
+
+
+def test_a_value_chosen_inside_a_closed_loop_is_refused() -> None:
+    # Natively a is what the last iteration chose; the trace saw both
+    # choices at a generic i (Codex, #320).
+    def chosen(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in x.dom:
+            a = 1.0 if i == 0 else 2.0
+            x[i] = a
+        y[0] = a
+
+    with pytest.raises(TraceError) as caught:
+        term_of(chosen)
+    message = str(caught.value)
+    assert "y[0] = a (" in message
+    assert "rests on which way the branch on 'i == 0'" in message
+    assert "inside a loop that has closed before it" in message
+
+
+def test_a_write_made_or_not_inside_a_closed_loop_is_refused() -> None:
+    # flag is asked twice, before and after the write, and is the value it
+    # was: seen is 1 on one path and 0 on the other, both at a generic i.
+    def flagged(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in x.dom:
+            flag = x[i] > 0.0
+            if flag:
+                x[i] = 0.0
+            seen = 1 if flag else 0
+        if seen:
+            y[0] = 1.0
+
+    with pytest.raises(TraceError, match=r"y\[0\] = 1.0 .* rests on which way"):
+        term_of(flagged)
 
 
 # }}}
