@@ -286,9 +286,9 @@ tested   interpreter    spmv.py:104  spmv           the traced term computes wha
 decided  isl            spmv.py:195  spmv           the order after split(spmv.j, 2) runs every dependence of spmv forward
 decided  call           spmv.py:117  solve          after scan(...) in solve: off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
 ...
-29 facts: 24 decided, 5 tested
+27 facts: 22 decided, 5 tested
 
-WITHOUT LEAN: scan_monotone and 20 more rows are not proved. To have Lean prove what it can: pip install "lanky[lean]", and Lean v4.29.1 from elan (elan default leanprover/lean4:v4.29.1).
+WITHOUT LEAN: scan_monotone and 18 more rows are not proved. To have Lean prove what it can: pip install "lanky[lean]", and Lean v4.29.1 from elan (elan default leanprover/lean4:v4.29.1).
 ```
 
 Look at the `x[col[r, j]]` row, and at what decided it. That indirection is the
@@ -874,7 +874,8 @@ interface can change in a minor release; the CHANGELOG says when one does.
   every later cast is decided and stated where the condition holds and rests
   on an `assumption` fact, and a call whose sizes break it is refused.
 - `Schedule`: `tag`, `split`, `interchange`, `prioritize`, `tile`, `skew`,
-  `affine`, `fuse`, `realize`, each checked as a cast, each emitting its fact,
+  `affine`, `fuse`, each checked as a cast, each emitting its fact; `realize`
+  and `atomic`, which move no instance and record what they make of a sum;
   and `substitute` and `contract`, checked as storage decisions;
   `retarget`, which replays every step against another loopy target and
   re-checks it. `prioritize` and `interchange` also take the loop of a sum,
