@@ -312,10 +312,9 @@ def test_opencl_code_converts_an_integer_before_the_call(plain_opencl) -> None:
 
 
 def test_opencl_code_calls_pyopencls_complex_functions() -> None:
-    # loopy's plain OpenCL target has no complex functions; the pyopencl one
-    # calls those of pyopencl's complex header. Generating the code needs
-    # pyopencl and no device.
-    pytest.importorskip("pyopencl")
+    # loopy's plain OpenCL target has no complex functions; loopty's calls
+    # those of pyopencl's complex header, as loopy's pyopencl one does, and
+    # generating the code needs neither pyopencl nor a device (#291).
     import loopy as lp
 
     from loopty.isl_reading import declining

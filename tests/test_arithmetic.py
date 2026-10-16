@@ -2646,8 +2646,7 @@ def test_a_comparison_of_complex_values_compares_both_parts_on_opencl():
     # pyopencl's complex types are structs, which OpenCL C does not compare
     # with == and !=, and the kernel did not build (#158). Each is compared
     # part by part, as numpy compares, a real operand with a zero imaginary
-    # part. Generating the code needs pyopencl and no device.
-    pytest.importorskip("pyopencl")
+    # part. Generating the code needs neither pyopencl nor a device (#291).
     code = emit_code(complex_compared, "opencl")
     assert (
         "b[i] = (char) (cdouble_real(z[i]) == cdouble_real(w[i]) && "
