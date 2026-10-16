@@ -140,8 +140,9 @@ for box, a, b in R.dom:
   different values, `j = i if flag[i] else i + 1` before `small(j)`, is
   refused with the fix, a call on each branch, since its facts are about
   one value of each argument; and a call made on paths that do not join
-  into one lists them among its `unnarrowed` conjuncts, its points being
-  wider than where it is made.
+  into one, whose points are wider than where it is made, keeps the points
+  of each path (`Call.paths`), where what is checked before the run is
+  checked.
 - **One-line loop nests.** `for box, a, b in R.dom:` is the three loops `for
   box in R.dom`, `for a in R.dom[box]` and `for b in R.dom[box, a]`, natively
   and traced, with those binder names and their scoped handles
