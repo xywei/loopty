@@ -2652,8 +2652,8 @@ decided                          decided    isl          l2p.py:340  l2p        
                                                                                           l2p.unpack has stored by the time it is read
 decided                          decided    isl          l2p.py:340  l2p                no read of l2p.C sees its slot overwritten after contract(l2p.C, lambda box, a, b: (a, b)):
                                                                                           l2p.C kept in 22 cells, C[box, a, b] in slot (a, b)
-decided                          decided    isl          l2p.py:316  l2p                tag(l2p.unpack.box, 'g.0') renames the instances of l2p one for one
-decided                          decided    isl          l2p.py:316  l2p                the order after tag(l2p.unpack.box, 'g.0') runs every dependence of l2p forward,
+decided                          decided    isl          l2p.py:347  l2p                tag(l2p.unpack.box, 'g.0') renames the instances of l2p one for one
+decided                          decided    isl          l2p.py:347  l2p                the order after tag(l2p.unpack.box, 'g.0') runs every dependence of l2p forward,
                                                                                           within one work item
 tested                           tested     upstream     l2p.py:469  l2p                the native run of l2p agrees with sumpy_l2p in pot, on its example inputs
 
@@ -2695,8 +2695,8 @@ decided  isl    l2p.py:340  l2p          for contract(l2p.C), every cell of l2p.
 decided  isl    l2p.py:340  l2p          no read of l2p.C sees its slot overwritten after contract(l2p.C, lambda box, a, b: (a, b)):
                                            l2p.C kept in 22 cells, C[box, a, b] in slot (a, b)
 tested   loopy  l2p.py:340  l2p          the scheduled run of l2p agrees with the native run to the accuracy its types state
-decided  isl    l2p.py:316  l2p          tag(l2p.unpack.box, 'g.0') renames the instances of l2p one for one
-decided  isl    l2p.py:316  l2p          the order after tag(l2p.unpack.box, 'g.0') runs every dependence of l2p forward,
+decided  isl    l2p.py:347  l2p          tag(l2p.unpack.box, 'g.0') renames the instances of l2p one for one
+decided  isl    l2p.py:347  l2p          the order after tag(l2p.unpack.box, 'g.0') runs every dependence of l2p forward,
                                            within one work item
 tested   loopy  l2p.py:222  unpack       the scheduled run of unpack agrees with the native run to the accuracy its types state
 tested   loopy  l2p.py:249  reconstruct  the scheduled run of reconstruct agrees with the native run to the accuracy its types state
