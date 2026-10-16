@@ -654,8 +654,9 @@ def _converted(
     ``i + 120`` for an ``np.int8`` one from ``i = 8``. The compiled kernel
     converts it as C does, and wraps round (:mod:`loopty.calls`, #232). The
     points are the call's, narrowed by the guards around it, under which the
-    native run makes no call; a call under a guard isl does not read is left
-    to the native refusal, as a store is.
+    native run makes no call, and those of each of its paths where they do
+    not join into one (:attr:`loopty.term.Call.paths`); a call under a guard
+    isl does not read is left to the native refusal, as a store is.
     """
     from loopty.contract import native_storage
 
@@ -671,7 +672,15 @@ def _converted(
         value = argument.value
         if dtype is None or not _loop_arithmetic(value, promotion.types(value)[0]):
             continue
-        leaves = _leaves(value, dtype, call.domain, sizes, term, ())
+        leaves = next(
+            (
+                found
+                for points in call.paths or (call.domain,)
+                if (found := _leaves(value, dtype, points, sizes, term, ()))
+                is not None
+            ),
+            None,
+        )
         if leaves is None:
             continue
         raise RefusedNatively(

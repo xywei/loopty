@@ -2095,9 +2095,11 @@ class Tracer:
         A call made on paths that do not join into one, the ``else`` of ``if
         a and b:``, is made where the answers all its paths share hold, which
         is wider than where it is made, as a guard isl cannot state leaves a
-        statement's domain, and says so as such a statement does: its paths
-        are a conjunct of its own in ``unnarrowed``, so that nothing takes its
-        points for exact (:func:`loopty.refusal.refuse_where_native_does`).
+        statement's domain. The points of each path are kept besides
+        (:attr:`loopty.term.Call.paths`), where isl states them, so that what
+        is checked before the run is checked where the call is made
+        (:func:`loopty.refusal.refuse_where_native_does`); where it does not,
+        the conjuncts it cannot state are the call's ``unnarrowed``.
 
         A call is one record, whose facts are about the arguments it was
         passed, so every path that makes it has to pass the same ones. One
@@ -2127,7 +2129,7 @@ class Tracer:
                             records[entry.records[0][1]],
                         )
                     )
-            widened: tuple[tuple[str, str], ...] = ()
+            pieces: tuple[Any, ...] = ()
             if len(entries) == 1:
                 path = entries[0].path
             else:
@@ -2140,20 +2142,16 @@ class Tracer:
                 path = tuple(
                     answer for answer in entries[0].path if answer[:2] in shared
                 )
-                if all(entry.path for entry in entries):
-                    paths = " or ".join(
-                        f"({self.path_text(entry.path)})" for entry in entries
-                    )
-                    widened = (
-                        (
-                            paths,
-                            "the call is made on paths that do not join into one, "
-                            "and its points are where the answers they share hold, "
-                            "which is wider",
-                        ),
-                    )
+                pieces = tuple(
+                    first.points(self.guard_of(entry.path)) for entry in entries
+                )
             domain, loop_domain, unnarrowed = first.points(self.guard_of(path))
-            unnarrowed = (*unnarrowed, *widened)
+            unstated = tuple(
+                dict.fromkeys(
+                    (*unnarrowed, *(part for piece in pieces for part in piece[2]))
+                )
+            )
+            paths = tuple(piece[0] for piece in pieces) if not unstated else ()
             finals = {
                 final_of[(number, int(stmt_id[1:]))]
                 for number, record in records
@@ -2164,7 +2162,8 @@ class Tracer:
                     first.call,
                     domain=domain,
                     loop_domain=loop_domain,
-                    unnarrowed=unnarrowed,
+                    unnarrowed=unstated,
+                    paths=paths,
                     statements=tuple(
                         ids[final] for final in sorted(finals, key=rank.get)
                     ),
@@ -2197,13 +2196,17 @@ class Tracer:
         if apart:
             condition, where = self.conditions[apart[0]]
             branch = f", by the branch on {_shown(condition)!r} at {where}"
+        one_call, other_call = (
+            f"{call.callee}({', '.join(a.spelled for a in made.arguments)})"
+            for made in (call, theirs.call)
+        )
         return (
             f"the call of {call.callee} at {call.where} is passed {this} for its "
             f"{param} on one path and {that} on another{branch}. A call's facts, "
             "and what is checked before it runs, are about the one value each "
             "argument has, so each path has to make a call of its own: call "
-            f"{call.callee} on each branch, '{call.callee}({this})' on one and "
-            f"'{call.callee}({that})' on the other"
+            f"{call.callee} on each branch, '{one_call}' on one and "
+            f"'{other_call}' on the other"
         )
 
     # }}}
