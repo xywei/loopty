@@ -285,7 +285,7 @@ def _with_aff_conversion_guard(
     loopy 2025.2's guard caught it and declined the expression, as it
     declines a call. loopy main's catches only isl's errors and its own, so
     the ``TypeError`` escaped from its bounds check, and a kernel with
-    ``when(i < i ^ 1)`` failed to build there. Inside, it is declined again;
+    ``if i < i ^ 1:`` failed to build there. Inside, it is declined again;
     outside, loopy's own guard.
     """
     own = _OWN["with_aff_conversion_guard"]

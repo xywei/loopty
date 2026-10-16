@@ -17,7 +17,7 @@ import pymbolic.primitives as prim
 import pytest
 from lanky.prelude import Nat, Real
 
-from loopty import Arr, Fin, Schedule, isl_reading, kernel, when
+from loopty import Arr, Fin, Schedule, isl_reading, kernel
 from loopty.executor import LoopyExecutor, emit_code
 from loopty.lower import lower
 from loopty.named import (
@@ -180,7 +180,7 @@ def test_a_kernels_domains_are_read_and_written_as_islpy() -> None:
 def squared_index(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
     """A subscript with a conversion in it, under a guard."""
     for i in y.dom:
-        with when(i + 1 < y.dom.size):
+        if i + 1 < y.dom.size:
             y[i] = x[(i * i) % x.dom.size]
 
 
@@ -251,7 +251,7 @@ def test_a_split_loop_is_counted_with_a_division_of_a_size_known_not_negative() 
     # division of a non-negative number, which C's division rounds the way
     # loopy means: loopy writes it so, where it called its floor-division
     # helper before.
-    code = emit_code(Schedule(copy).split("i", 4))
+    code = emit_code(Schedule(copy).split(copy.i, 4))
     assert "i_outer <= -1 + (3 + n) / 4;" in code, code
     assert "loopy_floor_div_pos_b" not in code
 

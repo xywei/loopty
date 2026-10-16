@@ -80,7 +80,7 @@ Each takes an object already on its side as it is. A domain comes back as an
    of `loopty.isl_reading` (note 23) decline with loopy's own
    `ExpressionToAffineConversionError`, as loopy declines a call, and a fourth
    reading turns the `TypeError` an operator isl has none of raises back into
-   a decline: `when(i < i ^ 1)` failed in loopy's bounds check without it.
+   a decline: `if i < i ^ 1:` failed in loopy's bounds check without it.
    The guard is replaced only inside `declining()`, like the other three.
 3. **The bounds check sees every size.** loopy main checks an access over its
    instruction's domain intersected with the kernel's assumptions, aligned by

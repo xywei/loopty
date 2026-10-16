@@ -209,7 +209,7 @@ for box, a, b in R.dom:
   decline with loopy's own `ExpressionToAffineConversionError`, as loopy
   declines a call: loopy main's guard no longer catches the `TypeError` they
   raised. A fourth reading declines the `TypeError` an operator isl has none
-  of raises in loopy main's reader, so that `when(i < i ^ 1)` builds there,
+  of raises in loopy main's reader, so that `if i < i ^ 1:` builds there,
   as on loopy 2025.2.
 - `buildable` refuses a sum on a local axis inside a `vec` loop saying loopy
   "cannot generate working code for it": loopy main generates OpenCL for it,

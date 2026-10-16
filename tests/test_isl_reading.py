@@ -116,7 +116,7 @@ def test_the_reader_declines_what_isl_has_no_operator_for() -> None:
     # The reader evaluates an expression with isl's operators, and a bitwise
     # one, i ^ 1, raises a TypeError there. loopy 2025.2 declined it, as it
     # declines a call; loopy main's guard lets the TypeError out, and a kernel
-    # with when(i < i ^ 1) failed in loopy's bounds check. Declined inside;
+    # with if i < i ^ 1: failed in loopy's bounds check. Declined inside;
     # outside, as loopy main has it, which a loopy that declines it again
     # makes fail.
     i = prim.Variable("i")
