@@ -9,13 +9,13 @@ is running are answered by the instructions around the one a frame is at.
   one loop (:func:`for_targets`). The names are those of the source, which
   keeps the term's loop variables the source's.
 * **Whether a truth value closes a loop.** ``while a < 2:`` asks ``a < 2``
-  for its truth again at the end of each pass, and the jump that takes the
-  answer leads back to the loop's start (:func:`loops_back`), which is how a
-  ``while`` on a traced condition is told from an ``if``.
+  for its truth again at each pass, and the pass ends with a jump back
+  (:func:`loops_back`), which is how a ``while`` on a traced condition is
+  told from an ``if``.
 
-The instruction set is CPython's, of 3.12 and 3.13; an instruction layout
-neither has is no answer, ``None`` or ``False``, and the caller falls back on
-what it did before.
+The instruction set is CPython's, of 3.12, 3.13 and 3.14; an instruction
+layout none has is no answer, ``None`` or ``False``, and the caller falls back
+on what it did before.
 """
 
 from __future__ import annotations
@@ -26,8 +26,21 @@ from typing import Any
 
 __all__ = ["for_targets", "loops_back"]
 
-#: Instructions that do nothing, which 3.14 puts after a conditional jump.
-_INERT = ("NOT_TAKEN", "NOP")
+#: Instructions that do nothing here: ``NOT_TAKEN``, which 3.14 puts after a
+#: conditional jump, ``NOP``, and ``EXTENDED_ARG``, the high bits of the next
+#: instruction's argument, which a jump over a long loop body needs: ``GET_ITER``
+#: is followed by ``EXTENDED_ARG`` and then ``FOR_ITER`` where the body is
+#: longer than 255 instructions.
+_INERT = ("NOT_TAKEN", "NOP", "EXTENDED_ARG")
+
+#: The instructions that end a statement, or start a loop's next pass, which
+#: the evaluation of a condition has none of.
+_STATEMENT_ENDS = (
+    *("STORE_FAST", "STORE_NAME", "STORE_GLOBAL", "STORE_DEREF", "STORE_ATTR"),
+    *("STORE_SUBSCR", "STORE_FAST_STORE_FAST", "STORE_FAST_LOAD_FAST"),
+    *("POP_TOP", "FOR_ITER", "END_FOR", "POP_ITER", "JUMP_FORWARD"),
+    *("JUMP_BACKWARD", "RETURN_VALUE"),
+)
 
 #: The instructions that store one name, the target of a ``for`` or a part
 #: of it.
@@ -151,19 +164,22 @@ def _first_targets(code: Any) -> tuple[str, ...] | None:
 def loops_back(code: Any, offset: int) -> bool:
     """Whether the truth value asked for at ``offset`` decides whether a loop goes on.
 
-    A ``while`` tests its condition at its start and again at the end of
-    each pass, and the second test is a conditional jump out of the loop
-    followed by the jump back to its start: when the condition holds,
-    control falls through to ``JUMP_BACKWARD``. An ``if`` is followed by its
-    own block, or, last in a ``for`` loop's body, by the jump back to the
-    ``FOR_ITER`` that takes the next point, which is no ``while``. The truth
-    value is asked for by the jump itself (3.12), or by the ``TO_BOOL`` or the
-    comparison just before it (3.13).
+    3.12 and 3.13 test a ``while``'s condition at its start and again at the
+    end of each pass, and the second test is a conditional jump out of the
+    loop followed by the jump back to its start: when the condition holds,
+    control falls through to ``JUMP_BACKWARD``. 3.14 tests it once per pass,
+    at the loop's start, and each pass ends with the jump back to that test
+    (:func:`_tested_at_the_top`). An ``if`` is followed by its own block, or,
+    last in a ``for`` loop's body, by the jump back to the ``FOR_ITER`` that
+    takes the next point, which is no ``while``. The truth value is asked for
+    by the jump itself (3.12), or by the ``TO_BOOL`` or the comparison just
+    before it (3.13 and 3.14).
     """
     listing, index_of = _instructions(code)
     position = index_of.get(offset)
     if position is None:
         return False
+    asked = position
     if not listing[position].opname.startswith("POP_JUMP_IF"):
         position = _next(listing, position + 1)
         if position >= len(listing) or not listing[position].opname.startswith(
@@ -172,11 +188,54 @@ def loops_back(code: Any, offset: int) -> bool:
             return False
     jump = listing[position]
     after = _next(listing, position + 1)
-    if after >= len(listing):
+    if after < len(listing):
+        back = listing[after]
+        target = jump.argval if isinstance(jump.argval, int) else -1
+        if back.opname == "JUMP_BACKWARD" and target > back.offset:
+            start = index_of.get(back.argval)
+            if start is None or listing[start].opname != "FOR_ITER":
+                return True
+    return _tested_at_the_top(listing, index_of, asked, position)
+
+
+def _tested_at_the_top(
+    listing: tuple[Any, ...], index_of: dict[int, int], asked: int, jump: int
+) -> bool:
+    """Whether a pass of a loop ends with a jump back to the condition at ``asked``.
+
+    3.14's ``while`` inside a ``for``: the test at the top, whose jump leads
+    into the body when the condition holds, and the body's last instruction
+    jumps back to the test's first::
+
+        L4: LOAD_FAST_BORROW_LOAD_FAST_BORROW (u, i); BINARY_OP ([])
+            LOAD_CONST (1.0); COMPARE_OP (bool(<))   # asked here
+            POP_JUMP_IF_TRUE L5; NOT_TAKEN; JUMP_BACKWARD (to the FOR_ITER)
+        L5: ...; JUMP_BACKWARD L4
+
+    The jump back lands on the condition's own line, with nothing between it
+    and the test that ends a statement, and not on a ``FOR_ITER``: an ``if``
+    in a ``for`` is jumped back to from its ``FOR_ITER``, and an ``if`` in a
+    ``while`` whose test is plain Python from that test, on its own line.
+    """
+    line = _line(listing[asked])
+    if line is None:
         return False
-    back = listing[after]
-    target = jump.argval if isinstance(jump.argval, int) else -1
-    if back.opname != "JUMP_BACKWARD" or target <= back.offset:
-        return False
-    start = index_of.get(back.argval)
-    return start is None or listing[start].opname != "FOR_ITER"
+    first = asked
+    while first > 0 and _line(listing[first - 1]) in (line, None):
+        if listing[first - 1].opname in _STATEMENT_ENDS:
+            break
+        first -= 1
+    span = range(listing[first].offset, listing[asked].offset + 1)
+    for instruction in listing[jump + 1 :]:
+        if instruction.opname != "JUMP_BACKWARD" or instruction.argval not in span:
+            continue
+        start = index_of.get(instruction.argval)
+        if start is not None and listing[start].opname != "FOR_ITER":
+            return True
+    return False
+
+
+def _line(instruction: Any) -> int | None:
+    """The source line an instruction is on, if it is on one."""
+    positions = getattr(instruction, "positions", None)
+    return getattr(positions, "lineno", None)
