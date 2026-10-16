@@ -509,6 +509,21 @@ def test_tag_and_on_groups_and_on_items_are_one_step() -> None:
     assert {fact.where for fact in grouped.facts()[-2:]} == {line}
 
 
+def test_two_handles_of_one_fused_loop_take_one_tag() -> None:
+    # after the fusion the two handles are one loop, which a dict of tags
+    # cannot give two
+    fused = Schedule(burgers, target="opencl").fuse(
+        burgers.flux.j, burgers.divergence.i, shift=1
+    )
+    with pytest.raises(ValueError) as caught:
+        fused.tag({burgers.flux.j: "g.0", burgers.divergence.i: "l.0"})
+    assert str(caught.value) == (
+        "tag({burgers.flux.j: 'g.0', burgers.divergence.i: 'l.0'}): burgers.flux.j "
+        "and burgers.divergence.i are one loop, burgers.flux.j, which takes one "
+        "tag, not 'g.0' and 'l.0'"
+    )
+
+
 def test_a_condition_of_sizes_is_written_with_their_handles() -> None:
     condition = (stencil.nx % 4 == 0) & (stencil.nt >= 2)
     assert isinstance(condition, Condition)
