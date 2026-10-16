@@ -176,6 +176,22 @@ def test_a_name_a_scope_does_not_have_is_refused_with_what_it_has() -> None:
     )
 
 
+def test_a_name_after_a_loop_or_an_array_says_what_it_has() -> None:
+    with pytest.raises(AttributeError) as caught:
+        burgers.flux.j.outr  # noqa: B018
+    assert str(caught.value) == (
+        "burgers.flux.j has no outr: the loops a loop's handle reaches are the two "
+        "a split of it makes, burgers.flux.j.outer and burgers.flux.j.inner"
+    )
+    # Schedule.nest prints the loops a program zeroes an array in by the
+    # array, and says so where they are asked for
+    assert Schedule(burgers).nest[0] == "burgers.f.zeros"
+    with pytest.raises(AttributeError, match="no step names them: they take the tag"):
+        burgers.f.zeros  # noqa: B018
+    with pytest.raises(AttributeError, match="burgers.f is an array, which has no j"):
+        burgers.f.j  # noqa: B018
+
+
 def test_the_names_of_a_scope_complete() -> None:
     assert {"flux", "divergence", "f", "u", "rhs"} <= set(dir(burgers))
     assert {"i", "f", "rhs"} <= set(dir(burgers.divergence))

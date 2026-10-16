@@ -535,6 +535,14 @@ class Loop(Handle):
     def where(self) -> str:
         return "" if self._binder is None else self._binder.where
 
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("_"):
+            raise AttributeError(name)
+        raise AttributeError(
+            f"{self.path} has no {name}: the loops a loop's handle reaches are "
+            f"the two a split of it makes, {self.path}.outer and {self.path}.inner"
+        )
+
 
 class Array(Handle):
     """An array: a parameter, an array a program makes, or a call's argument.
@@ -570,6 +578,21 @@ class Array(Handle):
             site = self._index.sites.get(self._labels)
             return "" if site is None else site.where
         return getattr(self._index.root, "where", "") or self._index.term.where
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("_"):
+            raise AttributeError(name)
+        if name == "zeros":
+            # what Schedule.nest prints a loop the program zeroes it in by
+            raise AttributeError(
+                f"{self.path}.zeros, the loops the program zeroes {self.path} in, "
+                "are no line's, and no step names them: they take the tag of the "
+                f"loop that stores {self.path}, and a window of it drops them"
+            )
+        raise AttributeError(
+            f"{self.path} is an array, which has no {name}; a step that takes "
+            f"an array takes {self.path} itself"
+        )
 
 
 class _Scoped(Handle):
