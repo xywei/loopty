@@ -267,7 +267,7 @@ row verbatim, and checked by `scripts/refresh_example_outputs.py`):
 ```console
 $ lanky check examples/spmv.py
 STATUS   BY             WHERE        OWNER          STATEMENT
--------  -------------  -----------  -------------  ----------------------------------------------------------------------------------------------
+-------  -------------  -----------  -------------  ---------------------------------------------------------------------------------------------------
 decided  isl            spmv.py:81   scan           off[0] is in bounds for every instance of off[0] = 0 (spmv.py:81)
 decided  isl            spmv.py:83   scan           off[r + 1] is in bounds for every instance of off[r + 1] = off[r] + cnt[r] (spmv.py:83)
 decided  isl            spmv.py:81   scan           distinct instances of off[0] = 0 (spmv.py:81) write distinct cells of off
@@ -336,7 +336,7 @@ And a transformation is a cast, checked before it is applied:
 $ python examples/stencil_skew.py
 ...
 Schedule(jacobi).tile(jacobi.t, jacobi.i, 8, 8) ->
-  IllegalCast: tile(jacobi.t, jacobi.i, 8, 8) illegal: u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2 (stencil_skew.py:63) at t=0, i=8 writes u[1, 8], read by the same statement at t=1, i=7, scheduled earlier (at nt=16, nx=16, as hinted)
+  IllegalCast: tile(jacobi.t, jacobi.i, 8, 8) illegal: u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2 (stencil_skew.py:62) at t=0, i=8 writes u[1, 8], read by the same statement at t=1, i=7, scheduled earlier (at nt=16, nx=16, as hinted)
 ...
 accepted: Schedule(jacobi, target='c').skew(jacobi.i, by=jacobi.t).tile(jacobi.t, jacobi.i, 8, 8)
   loop nest: jacobi.t.outer jacobi.i.outer jacobi.t.inner jacobi.i.inner
@@ -383,7 +383,7 @@ the exact set:
 ```console
 $ lanky check examples/pairs.py
 STATUS   BY           WHERE        OWNER  STATEMENT
--------  -----------  -----------  -----  -------------------------------------------------------
+-------  -----------  -----------  -----  ----------------------------------------------------------------------------------------------------
 decided  isl          pairs.py:78  pairs  f[i, j] is in bounds for every instance of f[i, j] = q[i] * q[j] /
                                             (1.0 + dx * dx + dy * dy) (pairs.py:78)
 ...

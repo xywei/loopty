@@ -25,11 +25,15 @@ its schedule, reads:
 ```console
 $ lanky check examples/stencil_skew.py
 STATUS  BY           WHERE                OWNER   STATEMENT
-------  -----------  -------------------  ------  --------------------------------------------------------------------------------------
-proved  lean         stencil_skew.py:62   jacobi  u[t + 1, i] is in bounds for every instance of S0
-proved  lean         stencil_skew.py:62   jacobi  u[t, i - 1] is in bounds for every instance of S0
-proved  lean         stencil_skew.py:62   jacobi  u[t, i + 1] is in bounds for every instance of S0
-proved  lean         stencil_skew.py:62   jacobi  distinct instances of S0 write distinct cells of u
+------  -----------  -------------------  ------  ----------------------------------------------------------------------------------------------
+proved  lean         stencil_skew.py:62   jacobi  u[t + 1, i] is in bounds for every instance of u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2
+                                                    (stencil_skew.py:62)
+proved  lean         stencil_skew.py:62   jacobi  u[t, i - 1] is in bounds for every instance of u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2
+                                                    (stencil_skew.py:62)
+proved  lean         stencil_skew.py:62   jacobi  u[t, i + 1] is in bounds for every instance of u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2
+                                                    (stencil_skew.py:62)
+proved  lean         stencil_skew.py:62   jacobi  distinct instances of u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2 (stencil_skew.py:62) write
+                                                    distinct cells of u
 proved  lean         stencil_skew.py:54   jacobi  the source order runs every dependence forward in time
 tested  interpreter  stencil_skew.py:54   jacobi  the traced term computes what the body computes
 proved  lean         stencil_skew.py:116  jacobi  skew(jacobi.i, by=jacobi.t) renames the instances of jacobi one for one

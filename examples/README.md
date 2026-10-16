@@ -234,8 +234,8 @@ native, the 16 by 16 array (first six levels around the spike):
  [0.156 0.    0.312 0.    0.312 0.    0.156]]
 
 Schedule(jacobi).tile(jacobi.t, jacobi.i, 8, 8) ->
-  IllegalCast: tile(jacobi.t, jacobi.i, 8, 8) illegal: u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2 (stencil_skew.py:63) at t=0, i=8 writes u[1, 8], read by the same statement at t=1, i=7, scheduled earlier (at nt=16, nx=16, as hinted)
-  witness: u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2 (stencil_skew.py:63) at t=0, i=8 runs before the same statement at t=1, i=7, where nt=16, nx=16
+  IllegalCast: tile(jacobi.t, jacobi.i, 8, 8) illegal: u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2 (stencil_skew.py:62) at t=0, i=8 writes u[1, 8], read by the same statement at t=1, i=7, scheduled earlier (at nt=16, nx=16, as hinted)
+  witness: u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2 (stencil_skew.py:62) at t=0, i=8 runs before the same statement at t=1, i=7, where nt=16, nx=16
 
 accepted: Schedule(jacobi, target='c').skew(jacobi.i, by=jacobi.t).tile(jacobi.t, jacobi.i, 8, 8)
   loop nest: jacobi.t.outer jacobi.i.outer jacobi.t.inner jacobi.i.inner
@@ -258,20 +258,20 @@ the narrowed domain rather than the whole loop nest.
 $ uv run lanky check examples/stencil_skew.py
 STATUS   BY           WHERE                OWNER   STATEMENT
 -------  -----------  -------------------  ------  ----------------------------------------------------------------------------------------------
-decided  isl          stencil_skew.py:63   jacobi  u[t + 1, i] is in bounds for every instance of u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2
-                                                     (stencil_skew.py:63)
-decided  isl          stencil_skew.py:63   jacobi  u[t, i - 1] is in bounds for every instance of u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2
-                                                     (stencil_skew.py:63)
-decided  isl          stencil_skew.py:63   jacobi  u[t, i + 1] is in bounds for every instance of u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2
-                                                     (stencil_skew.py:63)
-decided  isl          stencil_skew.py:63   jacobi  distinct instances of u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2 (stencil_skew.py:63) write
+decided  isl          stencil_skew.py:62   jacobi  u[t + 1, i] is in bounds for every instance of u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2
+                                                     (stencil_skew.py:62)
+decided  isl          stencil_skew.py:62   jacobi  u[t, i - 1] is in bounds for every instance of u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2
+                                                     (stencil_skew.py:62)
+decided  isl          stencil_skew.py:62   jacobi  u[t, i + 1] is in bounds for every instance of u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2
+                                                     (stencil_skew.py:62)
+decided  isl          stencil_skew.py:62   jacobi  distinct instances of u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2 (stencil_skew.py:62) write
                                                      distinct cells of u
-decided  isl          stencil_skew.py:55   jacobi  the source order runs every dependence forward in time
-tested   interpreter  stencil_skew.py:55   jacobi  the traced term computes what the body computes
-decided  isl          stencil_skew.py:118  jacobi  skew(jacobi.i, by=jacobi.t) renames the instances of jacobi one for one
-decided  isl          stencil_skew.py:118  jacobi  the order after skew(jacobi.i, by=jacobi.t) runs every dependence of jacobi forward
-decided  isl          stencil_skew.py:119  jacobi  tile(jacobi.t, jacobi.i, 8, 8) renames the instances of jacobi one for one
-decided  isl          stencil_skew.py:119  jacobi  the order after tile(jacobi.t, jacobi.i, 8, 8) runs every dependence of jacobi forward
+decided  isl          stencil_skew.py:54   jacobi  the source order runs every dependence forward in time
+tested   interpreter  stencil_skew.py:54   jacobi  the traced term computes what the body computes
+decided  isl          stencil_skew.py:116  jacobi  skew(jacobi.i, by=jacobi.t) renames the instances of jacobi one for one
+decided  isl          stencil_skew.py:116  jacobi  the order after skew(jacobi.i, by=jacobi.t) runs every dependence of jacobi forward
+decided  isl          stencil_skew.py:117  jacobi  tile(jacobi.t, jacobi.i, 8, 8) renames the instances of jacobi one for one
+decided  isl          stencil_skew.py:117  jacobi  the order after tile(jacobi.t, jacobi.i, 8, 8) runs every dependence of jacobi forward
 
 10 facts: 9 decided, 1 tested
 
@@ -287,11 +287,11 @@ jacobi: Schedule(jacobi, target='c').skew(jacobi.i, by=jacobi.t).tile(jacobi.t, 
 
 STATUS   BY     WHERE                OWNER   STATEMENT
 -------  -----  -------------------  ------  --------------------------------------------------------------------------------------
-decided  isl    stencil_skew.py:118  jacobi  skew(jacobi.i, by=jacobi.t) renames the instances of jacobi one for one
-decided  isl    stencil_skew.py:118  jacobi  the order after skew(jacobi.i, by=jacobi.t) runs every dependence of jacobi forward
-decided  isl    stencil_skew.py:119  jacobi  tile(jacobi.t, jacobi.i, 8, 8) renames the instances of jacobi one for one
-decided  isl    stencil_skew.py:119  jacobi  the order after tile(jacobi.t, jacobi.i, 8, 8) runs every dependence of jacobi forward
-tested   loopy  stencil_skew.py:119  jacobi  the scheduled run of jacobi agrees with the native run to the accuracy its types state
+decided  isl    stencil_skew.py:116  jacobi  skew(jacobi.i, by=jacobi.t) renames the instances of jacobi one for one
+decided  isl    stencil_skew.py:116  jacobi  the order after skew(jacobi.i, by=jacobi.t) runs every dependence of jacobi forward
+decided  isl    stencil_skew.py:117  jacobi  tile(jacobi.t, jacobi.i, 8, 8) renames the instances of jacobi one for one
+decided  isl    stencil_skew.py:117  jacobi  the order after tile(jacobi.t, jacobi.i, 8, 8) runs every dependence of jacobi forward
+tested   loopy  stencil_skew.py:117  jacobi  the scheduled run of jacobi agrees with the native run to the accuracy its types state
 
 5 facts: 4 decided, 1 tested
 
@@ -361,12 +361,12 @@ native pressure, 16 levels by 32 points (first five levels around the impulse):
  [0.    0.018 0.301 0.362 0.301 0.018 0.   ]
  [0.002 0.049 0.415 0.068 0.415 0.049 0.002]]
 the statements, as a map per statement names them:
-  S0: velocity[t + 1, i] = ... (wavefront_acoustic.py:112)
-  S1: pressure[t + 1, i] = ... (wavefront_acoustic.py:115)
+  S0: velocity[t + 1, i] = ... (wavefront_acoustic.py:111)
+  S1: pressure[t + 1, i] = ... (wavefront_acoustic.py:114)
 
 Schedule(acoustic).tile(acoustic.t, acoustic.i, 4, 8) ->
-  IllegalCast: tile(acoustic.t, acoustic.i, 4, 8) illegal: pressure[t + 1, i] = ... (wavefront_acoustic.py:115) at t=0, i=8 writes pressure[1, 8], read by velocity[t + 1, i] = ... (wavefront_acoustic.py:112) at t=1, i=7, scheduled earlier (at nt=16, nx=32, as hinted)
-  witness: pressure[t + 1, i] = ... (wavefront_acoustic.py:115) at t=0, i=8 runs before velocity[t + 1, i] = ... (wavefront_acoustic.py:112) at t=1, i=7, where nt=16, nx=32
+  IllegalCast: tile(acoustic.t, acoustic.i, 4, 8) illegal: pressure[t + 1, i] = ... (wavefront_acoustic.py:114) at t=0, i=8 writes pressure[1, 8], read by velocity[t + 1, i] = ... (wavefront_acoustic.py:111) at t=1, i=7, scheduled earlier (at nt=16, nx=32, as hinted)
+  witness: pressure[t + 1, i] = ... (wavefront_acoustic.py:114) at t=0, i=8 runs before velocity[t + 1, i] = ... (wavefront_acoustic.py:111) at t=1, i=7, where nt=16, nx=32
 
 accepted: Schedule(acoustic, target='c').skew(acoustic.i, by=acoustic.t).tile(acoustic.t, acoustic.i, 4, 8)
   loop nest: acoustic.t.outer acoustic.i.outer acoustic.t.inner acoustic.i.inner
@@ -380,7 +380,7 @@ accepted: Schedule(acoustic, target='c').skew(acoustic.i, by=acoustic.t).tile(ac
   the native run matches the hand-written recurrence: True
 
 Schedule(acoustic).affine('{ [t, i] -> [a, b] : a = i + t and b = i - t }') ->
-  IllegalCast: affine({ [t, i] -> [a = t + i, b = -t + i] }) illegal: pressure[t + 1, i] = ... (wavefront_acoustic.py:115) at t=0, i=2 writes pressure[1, 2], read by velocity[t + 1, i] = ... (wavefront_acoustic.py:112) at t=1, i=1, scheduled earlier (at nt=16, nx=32, as hinted)
+  IllegalCast: affine({ [t, i] -> [a = t + i, b = -t + i] }) illegal: pressure[t + 1, i] = ... (wavefront_acoustic.py:114) at t=0, i=2 writes pressure[1, 2], read by velocity[t + 1, i] = ... (wavefront_acoustic.py:111) at t=1, i=1, scheduled earlier (at nt=16, nx=32, as hinted)
 
 accepted: Schedule(acoustic, target='c').affine({ [t, i] -> [a = t + i, b = t - i] })
   loop nest: acoustic.loops.a acoustic.loops.b
@@ -392,7 +392,7 @@ accepted: Schedule(acoustic, target='c').affine({ [t, i] -> [a = t + i, b = t - 
   velocity: difference 0 within 1e-06 (approx) -> tested
 
 Schedule(acoustic, target='c').affine({ [t, i] -> [a = t + i, b = t - i] }).tile(acoustic.loops.a, acoustic.loops.b, 4, 4) ->
-  IllegalCast: tile(acoustic.loops.a, acoustic.loops.b, 4, 4) illegal: velocity[t + 1, i] = ... (wavefront_acoustic.py:112) at t=7, i=15 writes velocity[8, 15], read by pressure[t + 1, i] = ... (wavefront_acoustic.py:115) at t=7, i=16, scheduled earlier (at nt=16, nx=32, as hinted)
+  IllegalCast: tile(acoustic.loops.a, acoustic.loops.b, 4, 4) illegal: velocity[t + 1, i] = ... (wavefront_acoustic.py:111) at t=7, i=15 writes velocity[8, 15], read by pressure[t + 1, i] = ... (wavefront_acoustic.py:114) at t=7, i=16, scheduled earlier (at nt=16, nx=32, as hinted)
 
 accepted: Schedule(acoustic, target='c').affine({ S0[t, i] -> [a = t + i, b = t - i]; S1[t, i] -> [a = t + i, b = 1 + t - i] }).tile(acoustic.loops.a, acoustic.loops.b, 4, 4)
   loop nest: acoustic.loops.a.outer acoustic.loops.b.outer acoustic.loops.a.inner acoustic.loops.b.inner
@@ -415,41 +415,41 @@ and both writes at `t + 1` because it keeps `t + 1 < nt`.
 $ uv run lanky check examples/wavefront_acoustic.py
 STATUS   BY           WHERE                      OWNER     STATEMENT
 -------  -----------  -------------------------  --------  ---------------------------------------------------------------------------------------------------
-decided  isl          wavefront_acoustic.py:112  acoustic  velocity[t + 1, i] is in bounds for every instance of velocity[t + 1, i] = ...
-                                                             (wavefront_acoustic.py:112)
-decided  isl          wavefront_acoustic.py:112  acoustic  velocity[t, i] is in bounds for every instance of velocity[t + 1, i] = ...
-                                                             (wavefront_acoustic.py:112)
-decided  isl          wavefront_acoustic.py:112  acoustic  pressure[t, i + 1] is in bounds for every instance of velocity[t + 1, i] = ...
-                                                             (wavefront_acoustic.py:112)
-decided  isl          wavefront_acoustic.py:112  acoustic  pressure[t, i] is in bounds for every instance of velocity[t + 1, i] = ...
-                                                             (wavefront_acoustic.py:112)
-decided  isl          wavefront_acoustic.py:115  acoustic  pressure[t + 1, i] is in bounds for every instance of pressure[t + 1, i] = ...
-                                                             (wavefront_acoustic.py:115)
-decided  isl          wavefront_acoustic.py:115  acoustic  pressure[t, i] is in bounds for every instance of pressure[t + 1, i] = ...
-                                                             (wavefront_acoustic.py:115)
-decided  isl          wavefront_acoustic.py:115  acoustic  velocity[t + 1, i] is in bounds for every instance of pressure[t + 1, i] = ...
-                                                             (wavefront_acoustic.py:115)
-decided  isl          wavefront_acoustic.py:115  acoustic  velocity[t + 1, i - 1] is in bounds for every instance of pressure[t + 1, i] = ...
-                                                             (wavefront_acoustic.py:115)
-decided  isl          wavefront_acoustic.py:112  acoustic  distinct instances of velocity[t + 1, i] = ...
-                                                             (wavefront_acoustic.py:112) write distinct cells of velocity
-decided  isl          wavefront_acoustic.py:115  acoustic  distinct instances of pressure[t + 1, i] = ...
-                                                             (wavefront_acoustic.py:115) write distinct cells of pressure
-decided  isl          wavefront_acoustic.py:100  acoustic  the source order runs every dependence forward in time
-tested   interpreter  wavefront_acoustic.py:100  acoustic  the traced term computes what the body computes
-decided  isl          wavefront_acoustic.py:166  acoustic  skew(acoustic.i, by=acoustic.t) renames the instances of acoustic one for one
-decided  isl          wavefront_acoustic.py:166  acoustic  the order after skew(acoustic.i, by=acoustic.t) runs every dependence of acoustic forward
-decided  isl          wavefront_acoustic.py:167  acoustic  tile(acoustic.t, acoustic.i, 4, 8) renames the instances of acoustic one for one
-decided  isl          wavefront_acoustic.py:167  acoustic  the order after tile(acoustic.t, acoustic.i, 4, 8) runs every dependence of acoustic forward
-decided  isl          wavefront_acoustic.py:192  acoustic  affine({ [t, i] -> [a = t + i, b = t - i] }) renames the instances of acoustic one for one
-decided  isl          wavefront_acoustic.py:192  acoustic  the order after affine({ [t, i] -> [a = t + i, b = t - i] }) runs every dependence of
+decided  isl          wavefront_acoustic.py:111  acoustic  velocity[t + 1, i] is in bounds for every instance of velocity[t + 1, i] = ...
+                                                             (wavefront_acoustic.py:111)
+decided  isl          wavefront_acoustic.py:111  acoustic  velocity[t, i] is in bounds for every instance of velocity[t + 1, i] = ...
+                                                             (wavefront_acoustic.py:111)
+decided  isl          wavefront_acoustic.py:111  acoustic  pressure[t, i + 1] is in bounds for every instance of velocity[t + 1, i] = ...
+                                                             (wavefront_acoustic.py:111)
+decided  isl          wavefront_acoustic.py:111  acoustic  pressure[t, i] is in bounds for every instance of velocity[t + 1, i] = ...
+                                                             (wavefront_acoustic.py:111)
+decided  isl          wavefront_acoustic.py:114  acoustic  pressure[t + 1, i] is in bounds for every instance of pressure[t + 1, i] = ...
+                                                             (wavefront_acoustic.py:114)
+decided  isl          wavefront_acoustic.py:114  acoustic  pressure[t, i] is in bounds for every instance of pressure[t + 1, i] = ...
+                                                             (wavefront_acoustic.py:114)
+decided  isl          wavefront_acoustic.py:114  acoustic  velocity[t + 1, i] is in bounds for every instance of pressure[t + 1, i] = ...
+                                                             (wavefront_acoustic.py:114)
+decided  isl          wavefront_acoustic.py:114  acoustic  velocity[t + 1, i - 1] is in bounds for every instance of pressure[t + 1, i] = ...
+                                                             (wavefront_acoustic.py:114)
+decided  isl          wavefront_acoustic.py:111  acoustic  distinct instances of velocity[t + 1, i] = ...
+                                                             (wavefront_acoustic.py:111) write distinct cells of velocity
+decided  isl          wavefront_acoustic.py:114  acoustic  distinct instances of pressure[t + 1, i] = ...
+                                                             (wavefront_acoustic.py:114) write distinct cells of pressure
+decided  isl          wavefront_acoustic.py:99   acoustic  the source order runs every dependence forward in time
+tested   interpreter  wavefront_acoustic.py:99   acoustic  the traced term computes what the body computes
+decided  isl          wavefront_acoustic.py:165  acoustic  skew(acoustic.i, by=acoustic.t) renames the instances of acoustic one for one
+decided  isl          wavefront_acoustic.py:165  acoustic  the order after skew(acoustic.i, by=acoustic.t) runs every dependence of acoustic forward
+decided  isl          wavefront_acoustic.py:166  acoustic  tile(acoustic.t, acoustic.i, 4, 8) renames the instances of acoustic one for one
+decided  isl          wavefront_acoustic.py:166  acoustic  the order after tile(acoustic.t, acoustic.i, 4, 8) runs every dependence of acoustic forward
+decided  isl          wavefront_acoustic.py:191  acoustic  affine({ [t, i] -> [a = t + i, b = t - i] }) renames the instances of acoustic one for one
+decided  isl          wavefront_acoustic.py:191  acoustic  the order after affine({ [t, i] -> [a = t + i, b = t - i] }) runs every dependence of
                                                              acoustic forward
-decided  isl          wavefront_acoustic.py:225  acoustic  affine({ S0[t, i] -> [a = t + i, b = t - i]; S1[t, i] -> [a = t + i, b = 1 + t - i] }) renames the
+decided  isl          wavefront_acoustic.py:224  acoustic  affine({ S0[t, i] -> [a = t + i, b = t - i]; S1[t, i] -> [a = t + i, b = 1 + t - i] }) renames the
                                                              instances of acoustic one for one
-decided  isl          wavefront_acoustic.py:225  acoustic  the order after affine({ S0[t, i] -> [a = t + i, b = t - i]; S1[t, i] -> [a = t + i, b = 1 + t - i]
+decided  isl          wavefront_acoustic.py:224  acoustic  the order after affine({ S0[t, i] -> [a = t + i, b = t - i]; S1[t, i] -> [a = t + i, b = 1 + t - i]
                                                                  }) runs every dependence of acoustic forward
-decided  isl          wavefront_acoustic.py:228  acoustic  tile(acoustic.loops.a, acoustic.loops.b, 4, 4) renames the instances of acoustic one for one
-decided  isl          wavefront_acoustic.py:228  acoustic  the order after tile(acoustic.loops.a, acoustic.loops.b, 4, 4) runs every dependence of
+decided  isl          wavefront_acoustic.py:227  acoustic  tile(acoustic.loops.a, acoustic.loops.b, 4, 4) renames the instances of acoustic one for one
+decided  isl          wavefront_acoustic.py:227  acoustic  the order after tile(acoustic.loops.a, acoustic.loops.b, 4, 4) runs every dependence of
                                                              acoustic forward
 
 22 facts: 21 decided, 1 tested
@@ -478,23 +478,23 @@ acoustic: Schedule(acoustic, target='c').affine({ S0[t, i] -> [a = t + i, b = t 
 
 STATUS   BY     WHERE                      OWNER     STATEMENT
 -------  -----  -------------------------  --------  ---------------------------------------------------------------------------------------------------
-decided  isl    wavefront_acoustic.py:166  acoustic  skew(acoustic.i, by=acoustic.t) renames the instances of acoustic one for one
-decided  isl    wavefront_acoustic.py:166  acoustic  the order after skew(acoustic.i, by=acoustic.t) runs every dependence of acoustic forward
-decided  isl    wavefront_acoustic.py:167  acoustic  tile(acoustic.t, acoustic.i, 4, 8) renames the instances of acoustic one for one
-decided  isl    wavefront_acoustic.py:167  acoustic  the order after tile(acoustic.t, acoustic.i, 4, 8) runs every dependence of acoustic forward
-tested   loopy  wavefront_acoustic.py:167  acoustic  the scheduled run of acoustic agrees with the native run to the accuracy its types state
-decided  isl    wavefront_acoustic.py:192  acoustic  affine({ [t, i] -> [a = t + i, b = t - i] }) renames the instances of acoustic one for one
-decided  isl    wavefront_acoustic.py:192  acoustic  the order after affine({ [t, i] -> [a = t + i, b = t - i] }) runs every dependence of
+decided  isl    wavefront_acoustic.py:165  acoustic  skew(acoustic.i, by=acoustic.t) renames the instances of acoustic one for one
+decided  isl    wavefront_acoustic.py:165  acoustic  the order after skew(acoustic.i, by=acoustic.t) runs every dependence of acoustic forward
+decided  isl    wavefront_acoustic.py:166  acoustic  tile(acoustic.t, acoustic.i, 4, 8) renames the instances of acoustic one for one
+decided  isl    wavefront_acoustic.py:166  acoustic  the order after tile(acoustic.t, acoustic.i, 4, 8) runs every dependence of acoustic forward
+tested   loopy  wavefront_acoustic.py:166  acoustic  the scheduled run of acoustic agrees with the native run to the accuracy its types state
+decided  isl    wavefront_acoustic.py:191  acoustic  affine({ [t, i] -> [a = t + i, b = t - i] }) renames the instances of acoustic one for one
+decided  isl    wavefront_acoustic.py:191  acoustic  the order after affine({ [t, i] -> [a = t + i, b = t - i] }) runs every dependence of
                                                        acoustic forward
-tested   loopy  wavefront_acoustic.py:192  acoustic  the scheduled run of acoustic agrees with the native run to the accuracy its types state
-decided  isl    wavefront_acoustic.py:225  acoustic  affine({ S0[t, i] -> [a = t + i, b = t - i]; S1[t, i] -> [a = t + i, b = 1 + t - i] }) renames the
+tested   loopy  wavefront_acoustic.py:191  acoustic  the scheduled run of acoustic agrees with the native run to the accuracy its types state
+decided  isl    wavefront_acoustic.py:224  acoustic  affine({ S0[t, i] -> [a = t + i, b = t - i]; S1[t, i] -> [a = t + i, b = 1 + t - i] }) renames the
                                                        instances of acoustic one for one
-decided  isl    wavefront_acoustic.py:225  acoustic  the order after affine({ S0[t, i] -> [a = t + i, b = t - i]; S1[t, i] -> [a = t + i, b = 1 + t - i]
+decided  isl    wavefront_acoustic.py:224  acoustic  the order after affine({ S0[t, i] -> [a = t + i, b = t - i]; S1[t, i] -> [a = t + i, b = 1 + t - i]
                                                            }) runs every dependence of acoustic forward
-decided  isl    wavefront_acoustic.py:228  acoustic  tile(acoustic.loops.a, acoustic.loops.b, 4, 4) renames the instances of acoustic one for one
-decided  isl    wavefront_acoustic.py:228  acoustic  the order after tile(acoustic.loops.a, acoustic.loops.b, 4, 4) runs every dependence of
+decided  isl    wavefront_acoustic.py:227  acoustic  tile(acoustic.loops.a, acoustic.loops.b, 4, 4) renames the instances of acoustic one for one
+decided  isl    wavefront_acoustic.py:227  acoustic  the order after tile(acoustic.loops.a, acoustic.loops.b, 4, 4) runs every dependence of
                                                        acoustic forward
-tested   loopy  wavefront_acoustic.py:228  acoustic  the scheduled run of acoustic agrees with the native run to the accuracy its types state
+tested   loopy  wavefront_acoustic.py:227  acoustic  the scheduled run of acoustic agrees with the native run to the accuracy its types state
 
 13 facts: 10 decided, 3 tested
 
