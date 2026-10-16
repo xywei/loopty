@@ -332,6 +332,29 @@ def test_a_files_device_schedule_is_checked_where_pyopencl_is_not_installed(
     assert "not run here" in capsys.readouterr().out
 
 
+def test_emit_code_prints_a_device_schedules_code_where_pyopencl_is_not_installed(
+    tmp_path, capsys, monkeypatch
+) -> None:
+    """``--emit-code`` prints the OpenCL C of a file's device schedule anywhere (#291).
+
+    The code needs neither pyopencl nor a device; the run does, and is left
+    to a machine with both, as without the flag.
+    """
+    from loopty import lower
+
+    monkeypatch.setattr(lower, "pyopencl_installed", lambda: False)
+    path = write_fixture(tmp_path, DEVICE)
+    code = main(["run", str(path), "--emit-code"])
+    out = capsys.readouterr().out
+    assert code == 0, out
+    header = "scale: Schedule(scale, target='opencl').tag(scale.i, 'g.0')\n"
+    assert header in out
+    printed = out[out.index(header) + len(header) : out.index("  not run here: ")]
+    assert "__kernel void" in printed, out
+    assert "y[gid(0)] = 2.0 * x[gid(0)];" in printed, out
+    assert "difference" not in out
+
+
 def test_without_target_a_schedule_keeps_the_one_it_was_written_for(
     tmp_path, capsys
 ) -> None:

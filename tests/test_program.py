@@ -1608,7 +1608,11 @@ def test_a_map_per_statement_names_a_program_statement_as_isl_spells_it() -> Non
         "[n] -> { flux_S0[j] -> [jj] : jj = n - 1 - j }"
     )
     assert "jj" in schedule.order
-    assert {fact.kind for fact in schedule.facts()} == {"bijective", "monotone"}
+    assert {fact.kind for fact in schedule.facts()} == {
+        "definedness",
+        "bijective",
+        "monotone",
+    }
     assert {fact.status.value for fact in schedule.facts()} == {"decided"}
     fact = LoopyExecutor().differential(burgers, schedule, burgers_inputs())
     assert fact.status.value == "tested", fact.provenance

@@ -185,10 +185,9 @@ def main() -> int:
     print()
 
     print(f"accepted: {fused!r}")
-    v = weak_derivative.v
-    # the loops the program zeroes v in, which no source wrote, are v's
-    passes = [loop for loop in fused.nest if not loop.startswith(f"{v!r}.zeros")]
-    print(f"  the passes' loops, outermost first: {', '.join(passes)}")
+    # no loop zeroes v: no read sees the zeros it is made with, so every
+    # schedule of the program runs without them, the first fact below
+    print(f"  the passes' loops, outermost first: {', '.join(fused.nest)}")
     for fact in fused.facts():
         print(f"  {fact.status.value:8} {fact.decided_by:4} {fact.statement}")
     fact = LoopyExecutor().differential(weak_derivative, fused, inputs())
@@ -203,8 +202,13 @@ def main() -> int:
     window = contracted.windows["v"]
     print(f"accepted: {contracted!r}")
     print(f"  v kept in {window.extents[0]} cells, {window.placement}")
-    for storage in contracted.facts()[-2:]:
-        print(f"  {storage.status.value:8} {storage.decided_by:4} {storage.statement}")
+    # the window's own fact; the definedness it rests on is fused's, above
+    shown = {fact.id for fact in fused.facts()}
+    for storage in contracted.facts():
+        if storage.id not in shown:
+            print(
+                f"  {storage.status.value:8} {storage.decided_by:4} {storage.statement}"
+            )
     kept = LoopyExecutor().differential(weak_derivative, contracted, inputs())
     print(f"  w: agrees with the native run -> {kept.status.value}")
     tested = fact.status.value == "tested" and kept.status.value == "tested"

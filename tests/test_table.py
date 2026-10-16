@@ -402,8 +402,7 @@ def test_a_complex_table_on_opencl_is_the_kernels_own() -> None:
     # pyopencl writes each complex value as a call, cdouble_new(1.0, 2.0),
     # which no __constant array outside the kernel may be initialized by: it
     # did not build ("initializer element is not a compile-time constant").
-    # Generating the code needs pyopencl and no device.
-    pytest.importorskip("pyopencl")
+    # Generating the code needs neither pyopencl nor a device (#291).
     import loopy as lp
 
     from loopty.isl_reading import declining

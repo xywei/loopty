@@ -65,6 +65,14 @@ def three(u, rhs, h):
 
 
 @program
+def from_zeros(u, rhs):
+    """The divergence before the flux: its read sees the zeros ``f`` is made with."""
+    f = Arr.zeros_like(u)
+    divergence(f, rhs)
+    flux(u, f)
+
+
+@program
 def twice(u, g, h):
     """``scale`` called twice: two calls of one kernel."""
     f = Arr.zeros_like(u)
@@ -184,9 +192,13 @@ def test_a_name_after_a_loop_or_an_array_says_what_it_has() -> None:
         "a split of it makes, burgers.flux.j.outer and burgers.flux.j.inner"
     )
     # Schedule.nest prints the loops a program zeroes an array in by the
-    # array, and says so where they are asked for
-    assert Schedule(burgers).nest[0] == "burgers.f.zeros"
-    with pytest.raises(AttributeError, match="no step names them: they take the tag"):
+    # array, where a read sees the zeros, and says so where they are asked
+    # for; burgers runs without its zeros, which no read sees (#290)
+    assert Schedule(from_zeros).nest[0] == "from_zeros.f.zeros"
+    assert "burgers.f.zeros" not in Schedule(burgers).nest
+    with pytest.raises(
+        AttributeError, match="no step names them: a schedule runs without them"
+    ):
         burgers.f.zeros  # noqa: B018
     with pytest.raises(AttributeError, match="burgers.f is an array, which has no j"):
         burgers.f.j  # noqa: B018
@@ -470,7 +482,8 @@ def test_a_fusion_of_three_calls_is_one_step_and_names_them_after() -> None:
     assert fused.history == (
         "fuse(three.flux.j, three.divergence.i, three.scale.k, shift=1)",
     )
-    assert [fact.status.value for fact in fused.facts()] == ["decided"] * 2
+    # the program's f, which no read sees zeroed (#290), and the fusion's two
+    assert [fact.status.value for fact in fused.facts()] == ["decided"] * 3
     # one loop now, by any of the three
     for loop in (three.flux.j, three.divergence.i, three.scale.k):
         assert fused.split(loop, 4).nest[-2:] == (
@@ -645,9 +658,11 @@ def test_the_steps_and_the_facts_name_loops_and_arrays_by_their_paths() -> None:
         "no read of burgers.f sees its slot overwritten after contract(burgers.f, "
         "lambda j: j % 3): burgers.f kept in 3 cells, f[j] in slot j % 3"
     )
-    assert statements[-2] == (
-        "for contract(burgers.f), every cell of burgers.f that burgers reads, "
-        "burgers.flux has stored by the time it is read"
+    # the window rests on the fact the schedule was made with (#290)
+    assert statements[0] == (
+        "every cell of burgers.f that burgers reads, burgers.flux has stored by "
+        "the time it is read, so burgers runs without the zeros burgers.f is "
+        "made with"
     )
     assert schedule.key == (
         "burgers[c].fuse(burgers.flux.j, burgers.divergence.i, shift=1)"

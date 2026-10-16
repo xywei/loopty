@@ -44,6 +44,15 @@ within each. Without the shift,
 ``divergence`` at ``i`` would read ``f[i + 1]`` a step before ``flux`` stores
 it, and the refusal names that pair, and the shift that is accepted.
 
+*No zeros that no read sees.* ``f = Arr.zeros_like(u)`` zeroes every cell
+of ``f``, and ``flux`` stores every cell before ``divergence`` reads it, so
+no read sees those zeros. Every schedule of the program runs without them:
+the ``definedness`` fact, every cell ``divergence`` reads, ``flux`` stored
+before the read, is decided by isl when ``Schedule(burgers_rhs)`` is made,
+at the line that makes ``f``, and the window and the substitution below
+rest on it. A program that reads its zeros, as padding at a boundary, keeps
+them.
+
 *An intermediate is stored only as long as it is live.* Fused one step
 behind, the divergence reads ``f[j]`` and ``f[j - 2]`` at step ``j``, so three
 cells of ``f`` are live at once: ``contract(burgers_rhs.f)`` finds that
@@ -57,7 +66,7 @@ flux that overwrote it.
 
 *Or not at all.* ``substitute(burgers_rhs.f)`` computes ``0.5 * u[j] * u[j]``
 at each read instead (loopy's ``assignment_to_subst``), twice per flux, and the
-temporary goes, with the loop that zeroed it. That is legal because of the same
+temporary goes. That is legal because of the same
 ``definedness`` fact, and because nothing writes ``u`` in between (the
 ``monotone`` fact over the program as it now runs).
 

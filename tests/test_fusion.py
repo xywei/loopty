@@ -720,6 +720,15 @@ def statements(schedule: Schedule) -> list[tuple[str, str]]:
     return [(fact.kind, fact.status.value) for fact in schedule.facts()]
 
 
+#: The fact a program's schedule is made with, before its steps', where no
+#: read sees the zeros of the array the program makes, which the schedule
+#: then runs without (#290).
+MADE = ("definedness", "decided")
+
+#: The two facts of a cast, decided.
+CAST = [("bijective", "decided"), ("monotone", "decided")]
+
+
 # }}}
 
 
@@ -978,7 +987,7 @@ def test_the_fused_loop_is_one_loop_and_agrees_with_the_native_run() -> None:
     assert fused.key == (
         "burgers[c].fuse(burgers.flux.j, burgers.divergence.i, shift=1)"
     )
-    assert statements(fused) == [("bijective", "decided"), ("monotone", "decided")]
+    assert statements(fused) == [MADE, *CAST]
     loop = fused.term.stmt("flux.S0").inames[0]
     assert fused._layout.coords["divergence.S0"] == (loop,)
     entry = fused.kernel.default_entrypoint
@@ -1012,7 +1021,7 @@ def test_a_fusion_is_a_map_per_statement_and_affine_takes_it_as_well() -> None:
     by_hand = Schedule(burgers).affine(
         f"{{ flux_S0[{j}] -> [k] : k = {j}; divergence_S0[{i}] -> [k] : k = {i} + 1 }}"
     )
-    assert statements(by_hand) == [("bijective", "decided"), ("monotone", "decided")]
+    assert statements(by_hand) == [MADE, *CAST]
     assert by_hand.order[-1] == "k"
     agrees(burgers, by_hand, burgers_inputs(9))
     with pytest.raises(ValueError, match="their maps have to make the same new ones"):
@@ -1032,7 +1041,7 @@ def test_a_fusion_in_place_runs_the_writes_after_the_reads() -> None:
     # update writes u[i] in place, which flux reads at j = i: run one step
     # behind, flux has read it by then.
     fused = Schedule(stepped).fuse(stepped.flux.j, stepped.update.i, shift=1)
-    assert statements(fused) == [("bijective", "decided"), ("monotone", "decided")]
+    assert statements(fused) == [MADE, *CAST]
     for size in (1, 3, 8):
         agrees(stepped, fused, {"u": Arr.from_numpy(velocity(size))})
 
@@ -1049,7 +1058,7 @@ def test_two_loops_fuse_with_a_shift_each() -> None:
         "fuse(squares.square2.i, squares.down.p, shift=1)"
     )
     fused = schedule.fuse(squares.square2.j, squares.down.q, shift=(1, 0))
-    assert statements(fused) == [("bijective", "decided"), ("monotone", "decided")]
+    assert statements(fused) == [MADE, *CAST]
     for rows, cols in ((1, 1), (2, 3), (6, 5)):
         a = np.arange(rows * cols, dtype=float).reshape(rows, cols) / 7.0
         agrees(
@@ -1065,7 +1074,7 @@ def test_a_statement_deeper_in_the_producer_moves_with_its_row() -> None:
     # rows_then_cells has a statement in r and one in r and c; the domain of
     # c is nested in r's, and moves along the producer's map with it.
     fused = Schedule(rows).fuse(rows.rows_then_cells.r, rows.row_sum.w)
-    assert statements(fused) == [("bijective", "decided"), ("monotone", "decided")]
+    assert statements(fused) == [MADE, *CAST]
     assert fused.buildable == (True, "")
     for size, width in ((1, 1), (3, 2), (5, 4)):
         a = np.arange(size * width, dtype=float).reshape(size, width) + 1.0
@@ -1088,7 +1097,7 @@ def test_the_outer_loop_of_a_nest_fuses_with_a_loop_of_one_level() -> None:
     fused = Schedule(squared_rows).fuse(
         squared_rows.square2.i, squared_rows.row_total.w
     )
-    assert statements(fused) == [("bijective", "decided"), ("monotone", "decided")]
+    assert statements(fused) == [MADE, *CAST]
     assert fused.buildable == (True, "")
     loop = squared_rows.term.stmt("square2.S0").inames[0]
     entry = fused.kernel.default_entrypoint
@@ -1117,7 +1126,7 @@ def test_the_outer_loop_fuses_after_a_split_or_a_tile() -> None:
         (1, base, i),
     ):
         fused = schedule.fuse(row, squared_rows.row_total.w)
-        expected = [("bijective", "decided"), ("monotone", "decided")] * steps
+        expected = [MADE, *CAST * steps]
         assert statements(fused) == expected
         assert fused.buildable == (True, ""), fused.buildable
         for rows, cols in ((1, 1), (3, 4), (5, 3)):
@@ -1133,7 +1142,7 @@ def test_a_call_between_the_fused_runs_after_their_loop() -> None:
     # order for the three (a CycleError) until those were cut back to the
     # dependences the casts were checked against.
     fused = Schedule(between).fuse(between.flux.j, between.back.i)
-    assert statements(fused) == [("bijective", "decided"), ("monotone", "decided")]
+    assert statements(fused) == [MADE, *CAST]
     entry = fused.kernel.default_entrypoint
     insns = {insn.id: insn for insn in entry.instructions}
     assert "front_S0" not in insns["back_S0"].depends_on
@@ -1347,7 +1356,7 @@ def test_two_passes_fuse_on_the_element_loop_and_no_deeper() -> None:
     assert fused.key == (
         "two_passes[c].fuse(two_passes.along[0].e, two_passes.along[1].e)"
     )
-    assert statements(fused) == [("bijective", "decided"), ("monotone", "decided")]
+    assert statements(fused) == [MADE, *CAST]
     assert fused.buildable == (True, "")
     # One loop over the elements, and the two passes' row loops in it, one
     # after the other (the loops before them zero t).
@@ -1372,7 +1381,7 @@ def test_the_loops_named_are_the_depth_a_fusion_goes_down_to() -> None:
     outer = whole_nest.fuse(squares.square2.i, squares.down.p, shift=1)
     assert outer.history == ("fuse(squares.square2.i, squares.down.p, shift=1)",)
     assert len(outer.order) == loops - 1
-    assert statements(outer) == [("bijective", "decided"), ("monotone", "decided")]
+    assert statements(outer) == [MADE, *CAST]
     for height, width in ((1, 1), (2, 3), (6, 5)):
         a = np.arange(height * width, dtype=float).reshape(height, width) / 7.0
         agrees(

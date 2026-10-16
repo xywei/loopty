@@ -80,8 +80,15 @@ __all__ = [
     "exactness_of_output",
 ]
 
-def _resolve(obj: Any, target: str | None = None) -> tuple[Term, Any, Lowering, str]:
-    """The term, the loopy kernel, the lowering and the target of ``obj``."""
+def _resolve(
+    obj: Any, target: str | None = None, *, running: bool = True
+) -> tuple[Term, Any, Lowering, str]:
+    """The term, the loopy kernel, the lowering and the target of ``obj``.
+
+    ``running`` is false for code that is only printed (:func:`emit_code`),
+    which a device schedule checked where pyopencl is not installed has
+    too; running one is refused (:func:`loopty.lower.require_pyopencl`).
+    """
     from loopty.schedule import Schedule
 
     if isinstance(obj, Schedule):
@@ -95,10 +102,11 @@ def _resolve(obj: Any, target: str | None = None) -> tuple[Term, Any, Lowering, 
         # names the limit it hits instead of throwing from code generation.
         obj.require_buildable()
         # A device schedule built where pyopencl is not installed is checked,
-        # and its code is generated and run where pyopencl is.
-        from loopty.lower import require_pyopencl
+        # and its code generated, there, and run where pyopencl is.
+        if running:
+            from loopty.lower import require_pyopencl
 
-        require_pyopencl(obj.kernel)
+            require_pyopencl(obj.kernel)
         return obj.term, obj.kernel, obj.lowering, obj.target
     term = obj if isinstance(obj, Term) else getattr(obj, "term", None)
     if term is None and hasattr(obj, "trace"):
@@ -109,7 +117,8 @@ def _resolve(obj: Any, target: str | None = None) -> tuple[Term, Any, Lowering, 
     from loopty.lower import lower_generic, require_pyopencl
 
     lowering = lower_generic(term, target or "c")
-    require_pyopencl(lowering.kernel)
+    if running:
+        require_pyopencl(lowering.kernel)
     return term, hoist_invariants(lowering.kernel), lowering, target or "c"
 
 
@@ -989,13 +998,16 @@ def emit_code(obj: Any, target: str | None = None) -> str:
     refusal of loopy's named as a run's is
     (:func:`loopty.refusal.naming_the_fix`), and, on a C target, with a
     program's arrays as the arguments a run allocates
-    (:func:`loopty.lower.heap_temporaries`).
+    (:func:`loopty.lower.heap_temporaries`). A device schedule's code needs
+    no pyopencl and no device: where pyopencl is not installed it is
+    generated on :class:`loopty.lower.CheckedOpenCLTarget`, and is the code
+    the device runs where it is (#291).
     """
     import loopy as lp
 
     from loopty.refusal import naming_the_fix
 
-    term, kernel, lowering, target = _resolve(obj, target)
+    term, kernel, lowering, target = _resolve(obj, target, running=False)
     if target != "opencl":
         kernel, _heap = _off_the_stack(kernel, term)
     with naming_the_fix(lowering):

@@ -88,8 +88,32 @@ the ledger, the refusals and the fixes they suggest, and `loopty run`.
 - **The term records where its names come from** (`loopty.term.Binder`,
   `loopty.term.Callsite`): each binder's name, its line and the calls it is
   in, and each call's labels, kernel, line and arrays.
+- **A device schedule's code where pyopencl is not installed** (#291).
+  `loopty run --emit-code` and `loopty.executor.emit_code` print the OpenCL
+  C of a schedule for `"opencl"` on `CheckedOpenCLTarget`, the code
+  `InKernelOpenCLTarget` generates where pyopencl is, numpy's arithmetic and
+  pyopencl's complex numbers included. Running it still needs pyopencl, and
+  says so.
 
 ### Changed
+
+- **A schedule runs without the zeros no read sees** (#290). Where isl
+  decides that every cell a program's calls read of an array it makes, an
+  earlier call stored, the definedness `substitute` and `contract` ask, the
+  schedule drops the zeros the program makes the array with, on every
+  target and before any step. The fact is the schedule's first, at the line
+  that makes the array (`every cell of burgers_rhs.f that burgers_rhs reads,
+  burgers_rhs.flux has stored by the time it is read, so burgers_rhs runs
+  without the zeros burgers_rhs.f is made with`), and a window or a
+  substitution rests on it instead of a definedness fact of its own. So a
+  split loop that stores such an array is legal on a device (#289):
+  `examples/l2p.py`'s `on_a_gpu` zeroes nothing, and the C target no longer
+  zeroes what the executor allocates as zeros. Zeros a read sees, padding at a
+  boundary, are kept, and a tag refused for them says which read sees them.
+- The definedness of a window or a substitution is refused for a read of
+  the cell its own instance stores, `f[i] = x[i] + f[i // 2]` at `i = 0`,
+  which no dependence pairs with its store, and asks whether a read comes
+  before a later store under what `assume` says of the sizes.
 
 - Every printed loop, array and statement of a schedule is its path. The
   zeros a program makes an array with are `the zeros of l2p.R`, with the

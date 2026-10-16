@@ -2311,7 +2311,8 @@ def _within_parts(origin: Any, steps: Sequence[Any], work: Any) -> list[Any]:
     lanky = _lanky_obligations()
     schedule = _schedule_module()
     term = origin._term
-    gone: set[str] = set()
+    # the zeros no read sees are gone before any step (Schedule._gone)
+    gone: set[str] = set(origin._gone)
     for step in steps:
         gone |= set(step.gone)
     # (statement, the cell its sum reads, its instruction's write)
@@ -2426,7 +2427,8 @@ def _cast_classes(origin: Any, steps: Sequence[Any]) -> list[_Class]:
     """Every dependence class a cast after ``steps`` is checked on.
 
     As :func:`_classes` lists them for the term, without a statement a step
-    took out (:attr:`loopty.schedule.Step.gone`); with the reads a
+    took out (:attr:`loopty.schedule.Step.gone`), or the schedule before
+    any step, the zeros no read sees; with the reads a
     substitution computes again, two classes per write of what its producer
     read (the read before it, and after it); and with the pairs of accesses
     of a window, at least one a write, that touch one slot. isl checks a
@@ -2437,7 +2439,8 @@ def _cast_classes(origin: Any, steps: Sequence[Any]) -> list[_Class]:
 
     schedule = _schedule_module()
     term = origin._term
-    gone: set[str] = set()
+    # the zeros no read sees are gone before any step (Schedule._gone)
+    gone: set[str] = set(origin._gone)
     for step in steps:
         gone |= set(step.gone)
     out: list[_Class] = []
@@ -2548,7 +2551,7 @@ def _bijective_parts(origin: Any, steps: Sequence[Any]) -> list[Any]:
     step = steps[-1]
     earlier = steps[:-1]
     assumed = step.assumptions
-    gone: set[str] = set()
+    gone: set[str] = set(origin._gone)
     for earlier_step in steps:
         gone |= set(earlier_step.gone)
     parts = []

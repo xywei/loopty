@@ -586,7 +586,7 @@ class InKernelOpenCLTarget(_ReadDeclining, lp.PyOpenCLTarget):
 
 
 class CheckedOpenCLTarget(_ReadDeclining, lp.OpenCLTarget):
-    """The ``opencl`` target where pyopencl is not installed: checked, not built.
+    """The ``opencl`` target where pyopencl is not installed: checked, not run.
 
     What a schedule for a device claims (the order of its loops, which work
     item runs each instance, whether loopy can build it) is read off the
@@ -597,9 +597,65 @@ class CheckedOpenCLTarget(_ReadDeclining, lp.OpenCLTarget):
     ``"opencl"`` is built on this one, and its facts are the ones it has
     where pyopencl is: a file keeps its device schedules beside the others,
     ``python file.py`` and ``lanky check file.py`` run anywhere, and the
-    ledger lists their facts. Generating their code and running them are
-    pyopencl's, and are refused here, saying so (:func:`require_pyopencl`).
+    ledger lists their facts.
+
+    Its kernel code is :class:`InKernelOpenCLTarget`'s, numpy's arithmetic
+    and pyopencl's complex numbers included (:class:`_OpenCLCode`), since
+    writing it needs nothing of pyopencl's but the names of its two complex
+    types (:meth:`get_dtype_registry`): ``loopty run --emit-code`` prints the
+    code a device runs on a machine with no device (#291). Running it is
+    pyopencl's, and is refused here, saying so (:func:`require_pyopencl`).
     """
+
+    hash_fields = (*lp.OpenCLTarget.hash_fields, "arithmetic")
+    arithmetic = CODE_DIGEST
+    #: What the kernel's declaration reads off the PyOpenCL target, at the
+    #: values :class:`InKernelOpenCLTarget` has: no argument passed in a
+    #: buffer of overflow arguments, and a host pointer's size.
+    limit_arg_size_nbytes = None
+    pointer_size_nbytes = tuple.__itemsize__
+
+    def get_device_ast_builder(self) -> Any:
+        return _OpenCLCode(self)
+
+    def get_dtype_registry(self) -> Any:
+        """loopy's OpenCL C types, and pyopencl's ``cfloat_t`` and ``cdouble_t``.
+
+        A complex number of the kernel is one of pyopencl's two structs, which
+        its header defines (``pyopencl-complex.h``, which the code includes).
+        The PyOpenCL target names them from pyopencl's registry of types, and
+        importing pyopencl is what registers them there; this one names them
+        itself, so that the code is the same.
+        """
+        return _checked_opencl_types(self.atomics_flavor, self.use_int8_for_bool)
+
+
+@functools.cache
+def _checked_opencl_types(atomics_flavor: str, use_int8_for_bool: bool) -> Any:
+    """The types of :class:`CheckedOpenCLTarget`, wrapped as loopy wraps its own."""
+    from loopy.target.c import CompyteDTypeRegistryWrapper
+    from loopy.target.c.compyte.dtypes import (
+        DTypeRegistry,
+        fill_registry_with_opencl_c_types,
+    )
+    from loopy.target.opencl import (
+        DTypeRegistryWrapperWithCL1Atomics,
+        DTypeRegistryWrapperWithInt8ForBool,
+        _register_vector_types,
+    )
+
+    registry = DTypeRegistry()
+    fill_registry_with_opencl_c_types(registry)
+    registry.get_or_register_dtype("cfloat_t", np.complex64)
+    registry.get_or_register_dtype("cdouble_t", np.complex128)
+    _register_vector_types(registry)
+    result = CompyteDTypeRegistryWrapper(registry)
+    if atomics_flavor != "cl1":
+        raise NotImplementedError(f"atomics flavor: {atomics_flavor}")
+    result = DTypeRegistryWrapperWithCL1Atomics(result)
+    if use_int8_for_bool:
+        result = DTypeRegistryWrapperWithInt8ForBool(result)
+    return result
 
 
 @functools.cache
@@ -611,12 +667,12 @@ def pyopencl_installed() -> bool:
 
 
 def require_pyopencl(kernel: Any) -> None:
-    """Refuse to generate or run code for a :class:`CheckedOpenCLTarget` kernel."""
+    """Refuse to run a :class:`CheckedOpenCLTarget` kernel; its code is printed."""
     if isinstance(kernel.target, CheckedOpenCLTarget):
         raise ImportError(
-            "generating and running OpenCL code needs pyopencl, which is not "
-            "installed here; the schedule's facts are checked without it. "
-            "Install loopty's opencl extra where the device is"
+            "running OpenCL code needs pyopencl, which is not installed here; "
+            "the schedule's facts are checked and its code is generated "
+            "without it. Install loopty's opencl extra where the device is"
         )
 
 
@@ -632,7 +688,8 @@ def target_for(target: str = "c") -> Any:
     here and nowhere else, inside the branch, so that importing loopty on a
     machine without a device costs nothing and can never fail; where
     pyopencl is not installed, it is :class:`CheckedOpenCLTarget`, whose
-    schedules are checked and not built. All of them write ``//``, ``%``,
+    schedules are checked and whose code is printed, and not run. All of
+    them write ``//``, ``%``,
     ``<<`` and ``>>`` as numpy computes them (:mod:`loopty.operations`).
     """
     if target in ("c", None):

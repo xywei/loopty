@@ -920,13 +920,15 @@ def test_the_fusion_demo_decides_the_fusion_the_substitution_and_the_window() ->
         for fact in facts
         if fact["owner"] == "burgers_rhs" and fact["kind"] != "agreement"
     ]
+    # every schedule of the program runs without the zeros of f, which no
+    # read sees, and the substitution and the window rest on that fact
+    # (#290)
     assert casts == [
-        ("bijective", "decided", "isl"),
-        ("monotone", "decided", "isl"),
         ("definedness", "decided", "isl"),
         ("bijective", "decided", "isl"),
         ("monotone", "decided", "isl"),
-        ("definedness", "decided", "isl"),
+        ("bijective", "decided", "isl"),
+        ("monotone", "decided", "isl"),
         ("no-clobber", "decided", "isl"),
     ]
     agreements = [
@@ -940,30 +942,34 @@ def test_the_fusion_demo_decides_the_fusion_the_substitution_and_the_window() ->
 def test_the_fusion_demo_prints_the_refusals_and_three_kernels() -> None:
     result, _ = _invoke("fusion", "python")
     assert result.returncode == 0, result.stdout + result.stderr
+    module = _module("fusion")
+    flux = where(module.flux, "f[j] = 0.5 * u[j] * u[j]")
+    divergence = where(module.divergence, "rhs[i] = -(f[i + 1] - f[i - 1]) / 2")
     assert (
         "refused: fuse(burgers_rhs.flux.j, burgers_rhs.divergence.i) illegal: "
-        "f[j] = 0.5 * u[j] * u[j] (fusion.py:84) at j=2 writes f[2], read by "
-        "rhs[i] = -(f[i + 1] - f[i - 1]) / 2 (fusion.py:92) at i=1, scheduled "
+        f"f[j] = 0.5 * u[j] * u[j] ({flux}) at j=2 writes f[2], read by "
+        f"rhs[i] = -(f[i + 1] - f[i - 1]) / 2 ({divergence}) at i=1, scheduled "
         "earlier (at n=16, as hinted); fuse(burgers_rhs.flux.j, "
         "burgers_rhs.divergence.i, shift=1) runs every dependence between them "
         "forward"
     ) in result.stdout
     assert (
         "refused: contract(burgers_rhs.f, lambda j: j % 2) illegal: rhs[i] = "
-        "-(f[i + 1] - f[i - 1]) / 2 (fusion.py:92) at i=14 reads f[13], which "
-        "f[j] = 0.5 * u[j] * u[j] (fusion.py:84) at j=13 stored in slot 1, after "
+        f"-(f[i + 1] - f[i - 1]) / 2 ({divergence}) at i=14 reads f[13], which "
+        f"f[j] = 0.5 * u[j] * u[j] ({flux}) at j=13 stored in slot 1, after "
         "the same statement at j=15 stored f[15] there (at n=16, as hinted)"
     ) in result.stdout
     fused, substituted, windowed = result.stdout.split("accepted: ")[1:]
-    # Fused, f is stored, and the executor allocates it (#62); substituted,
-    # it is gone; kept in a window, it is three cells on the stack (#132).
+    # Fused, f is stored, and the executor allocates it (#62), with no loop
+    # that zeroes it, since no read sees the zeros (#290); substituted, it
+    # is gone; kept in a window, it is three cells on the stack (#132).
     assert "double *__restrict__ f)" in fused
     assert "__restrict__ f" not in substituted
     assert "double f[" not in substituted
     assert "0.5 * u[j] * u[j]" in substituted
     assert "double f_window[3];" in windowed
     assert "__restrict__ f" not in windowed
-    assert fused.count("for (") == 2
+    assert fused.count("for (") == 1
     assert substituted.count("for (") == 1
     assert windowed.count("for (") == 1
     assert result.stdout.count("-> tested") == 3
@@ -971,12 +977,15 @@ def test_the_fusion_demo_prints_the_refusals_and_three_kernels() -> None:
 
 def test_the_fusion_demo_states_the_definedness_of_its_intermediate() -> None:
     _result, facts = _invoke("fusion", "check")
-    # the substitution's own definedness, a cast of the file's schedule, is
-    # listed too (#191)
+    # the substitution's own definedness, a cast of the file's schedule, was
+    # listed too (#191); it is the one the schedules are made with now, which
+    # they run without the zeros of f on (#290)
     (fact,) = [
         fact
         for fact in facts
-        if fact["kind"] == "definedness" and not fact["id"].startswith("cast:")
+        if fact["kind"] == "definedness"
+        and not fact["id"].startswith("cast:")
+        and not fact["id"].endswith(":zeros:f")
     ]
     assert (fact["status"], fact["decided_by"]) == ("decided", "isl")
     assert fact["owner"] == "burgers_rhs"
@@ -1692,11 +1701,13 @@ def test_the_l2p_demo_applies_its_theorem_to_what_reconstruct_stores() -> None:
     assert defined == [
         "every cell of C that reconstruct reads, unpack stored before it",
         "every cell of R that evaluate reads, reconstruct stored before it",
-        # and what each window keeps, the zeros the program made it with gone
-        "for contract(l2p.R), every cell of l2p.R that l2p reads, "
-        "l2p.reconstruct has stored by the time it is read",
-        "for contract(l2p.C), every cell of l2p.C that l2p reads, l2p.unpack has "
-        "stored by the time it is read",
+        # and that no read of the two arrays the program makes sees the zeros
+        # it makes them with, which every schedule of it runs without, and
+        # each window rests on (#290)
+        "every cell of l2p.C that l2p reads, l2p.unpack has stored by the time "
+        "it is read, so l2p runs without the zeros l2p.C is made with",
+        "every cell of l2p.R that l2p reads, l2p.reconstruct has stored by the "
+        "time it is read, so l2p runs without the zeros l2p.R is made with",
     ]
 
 
@@ -1743,10 +1754,12 @@ def test_the_l2p_demo_refuses_the_interchange_and_fuses_box_by_box() -> None:
     module = _module("l2p")
     steps = [fact.statement for fact in module.fused.facts()]
     fusion = "fuse(l2p.unpack.box, l2p.reconstruct.box, l2p.evaluate.box)"
-    assert steps == [
+    assert steps[2:] == [
         f"{fusion} renames the instances of l2p one for one",
         f"the order after {fusion} runs every dependence of l2p forward",
     ]
+    # made without the zeros of C and R, which no read sees (#290)
+    assert [fact.kind for fact in module.fused.facts()[:2]] == ["definedness"] * 2
     assert {fact.status.value for fact in module.fused.facts()} == {"decided"}
     assert "pot: difference 0 within" in result.stdout
     # sumpy's own GPU schedule, each box a work group, with the file's names:
@@ -1773,14 +1786,19 @@ def test_the_l2p_demo_keeps_one_triangle_per_box_and_refuses_one_row() -> None:
     assert windows["R"].extents == (11, 11) and windows["C"].extents == (2, 11)
     added = module.contracted.facts()[len(module.fused.facts()) :]
     assert [(fact.kind, fact.status.value) for fact in added] == [
-        ("definedness", "decided"),
         ("no-clobber", "decided"),
     ] * 2
-    assert [fact.statement for fact in added][:2] == [
-        "for contract(l2p.R), every cell of l2p.R that l2p reads, "
-        "l2p.reconstruct has stored by the time it is read",
+    assert added[0].statement == (
         "no read of l2p.R sees its slot overwritten after contract(l2p.R, lambda "
-        "box, a, b: (a, b)): l2p.R kept in 121 cells, R[box, a, b] in slot (a, b)",
+        "box, a, b: (a, b)): l2p.R kept in 121 cells, R[box, a, b] in slot (a, b)"
+    )
+    # each window rests on the fact the schedule was made with: no read of
+    # the array sees the zeros it is made with, which a window does not keep
+    # (#290)
+    made = {fact.provenance["array"]: fact for fact in module.fused.facts()[:2]}
+    assert [fact.rests_on for fact in added] == [
+        (made["R"].id,),
+        (made["C"].id,),
     ]
     result, _ = _invoke("l2p", "python")
     assert result.returncode == 0, result.stdout + result.stderr
