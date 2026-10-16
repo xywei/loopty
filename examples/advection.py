@@ -377,17 +377,16 @@ def lift_on_faces(
     """
     for e in flux.dom:
         last = rhs.dom[e].size - 1
-        for a in flux.dom[e, 0]:
-            for b in flux.dom[e, 0, a]:
-                # the faces t = -1 and t = +1, at k = 0 and k = n - 1
-                rhs[e, 0, a, b] -= invJ[e, 0, a, b] * ends[0] * flux[e, 0, a, b]
-                rhs[e, last, a, b] -= invJ[e, last, a, b] * ends[1] * flux[e, 1, a, b]
-                # r = -1 and r = +1, at i = 0 and i = n - 1
-                rhs[e, a, b, 0] -= invJ[e, a, b, 0] * ends[0] * flux[e, 2, a, b]
-                rhs[e, a, b, last] -= invJ[e, a, b, last] * ends[1] * flux[e, 3, a, b]
-                # s = -1 and s = +1, at j = 0 and j = n - 1
-                rhs[e, a, 0, b] -= invJ[e, a, 0, b] * ends[0] * flux[e, 4, a, b]
-                rhs[e, a, last, b] -= invJ[e, a, last, b] * ends[1] * flux[e, 5, a, b]
+        for a, b in flux.dom[e, 0]:
+            # the faces t = -1 and t = +1, at k = 0 and k = n - 1
+            rhs[e, 0, a, b] -= invJ[e, 0, a, b] * ends[0] * flux[e, 0, a, b]
+            rhs[e, last, a, b] -= invJ[e, last, a, b] * ends[1] * flux[e, 1, a, b]
+            # r = -1 and r = +1, at i = 0 and i = n - 1
+            rhs[e, a, b, 0] -= invJ[e, a, b, 0] * ends[0] * flux[e, 2, a, b]
+            rhs[e, a, b, last] -= invJ[e, a, b, last] * ends[1] * flux[e, 3, a, b]
+            # s = -1 and s = +1, at j = 0 and j = n - 1
+            rhs[e, a, 0, b] -= invJ[e, a, 0, b] * ends[0] * flux[e, 4, a, b]
+            rhs[e, a, last, b] -= invJ[e, a, last, b] * ends[1] * flux[e, 5, a, b]
 
 
 @program
