@@ -3676,6 +3676,23 @@ def offset_then_checked(u, v, w, y, z):
 
 
 @kernel
+def shifted_reals(u: Arr[Fin[n], Real], v: Arr[Fin[n], Real]):  # noqa: F821
+    """``u + 1``, a call no checked point comes before."""
+    for i in u.dom:
+        v[i] = u[i] + 1.0
+
+
+@program
+def refused_then_more(u, v, w, y, z):
+    """A call before the checked point, the refused call, and one after it (#176)."""
+    shifted_reals(u, v)
+    c = Arr.zeros_like(u, dtype=np.int64)
+    truncated(u, c)
+    offset_counts(c, w, y)
+    as_reals(c, z)
+
+
+@kernel
 def index_after(
     c: Arr[Fin[n], Nat],  # noqa: F821
     z: Arr[Fin[n], Real],  # noqa: F821
@@ -3854,6 +3871,51 @@ def test_loop_arithmetic_a_numpy_integer_does_not_hold_is_refused_compiled_too()
         stored_once(y=np.zeros(3, np.uint8))
     with pytest.raises(RefusedNatively, match="the store of 300 into y"):
         LoopyExecutor().run(stored_once, y=np.zeros(3, np.uint8))
+
+
+def test_a_refused_call_after_a_checked_point_keeps_what_ran_before_it() -> None:
+    # #176: natively the program stops inside offset_counts, at i = 0, with
+    # v written by the call before and y and z as they were. The compiled
+    # program ran every call, the refused one and the one after it too, and
+    # wrote y (wrapped round) and z back before it raised the refusal.
+    from loopty.refusal import RefusedNatively
+
+    def make(first: float = 1.0) -> dict:
+        return {
+            "u": Arr.from_numpy(np.array([first, 2.0, 3.0])),
+            "v": Arr.zeros(3),
+            "w": Arr.from_numpy(np.full(3, 7, np.uint32)),
+            "y": Arr.from_numpy(np.full(3, -5, np.int64)),
+            "z": Arr.from_numpy(np.full(3, -9.0)),
+        }
+
+    def held(arrays: dict) -> dict:
+        return {name: arrays[name].numpy().tolist() for name in ("v", "y", "z")}
+
+    native = make()
+    with pytest.raises(OverflowError, match="-3 out of bounds for uint32"):
+        refused_then_more(**native)
+    assert held(native) == {
+        "v": [2.0, 3.0, 4.0],
+        "y": [-5, -5, -5],
+        "z": [-9.0, -9.0, -9.0],
+    }
+    for runs in (refused_then_more, Schedule(refused_then_more)):
+        compiled = make()
+        with pytest.raises(RefusedNatively, match="-3 at") as refused:
+            LoopyExecutor().run(runs, **compiled)
+        assert held(compiled) == held(native)
+        assert "keeps what the calls before it wrote" in str(refused.value)
+    # Where the checked point fails, both runs raise its error, and what the
+    # call before it wrote is kept, as before.
+    native, compiled = make(-1.0), make(-1.0)
+    with pytest.raises(ValueError) as failed:
+        refused_then_more(**native)
+    assert not isinstance(failed.value, OverflowError)
+    with pytest.raises(ValueError, match="stops before offset_counts") as failed:
+        LoopyExecutor().run(refused_then_more, **compiled)
+    assert not isinstance(failed.value, OverflowError)
+    assert held(compiled) == held(native)
 
 
 # }}}

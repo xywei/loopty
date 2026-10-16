@@ -19,6 +19,7 @@ import numpy as np
 import pytest
 from lanky.ledger import Status
 from lanky.prelude import Fin, Real
+from lanky.terms import Var
 
 from lines import where
 from loopty import Arr, Schedule, TraceError, kernel, program, reduce_sum, when
@@ -205,6 +206,122 @@ def test_a_declared_length_the_sizes_make_negative_is_refused_both_ways() -> Non
     assert "natively numpy refuses a negative length" in str(caught.value)
     fact = LoopyExecutor().differential(tail, Schedule(tail), inputs(5))
     assert fact.status is Status.TESTED
+
+
+@kernel
+def column_sums(x: Arr[Fin[n], Fin[m], Real], y: Arr[Fin[m], Real]):  # noqa: F821
+    """Each column of ``x`` summed."""
+    for j in y.dom:
+        y[j] = reduce_sum(x[i, j] for i in x.dom)
+
+
+@kernel
+def doubled(y: Arr[Fin[m], Real], e: Arr[Fin[m], Real]):  # noqa: F821
+    """``2 y``."""
+    for j in e.dom:
+        e[j] = 2.0 * y[j]
+
+
+def test_a_fiber_a_size_is_read_off_has_to_exist_as_natively() -> None:
+    # #250: x.dom[2].size is the length of x's second axis where x has a row
+    # 2, and natively x.dom[2] raises IndexError where it has none. The
+    # composer kept the axis and not the index, so the compiled program
+    # ran on two rows.
+    @program
+    def third_row(x, e):
+        y = Arr.zeros((x.dom[2].size,))
+        column_sums(x, y)
+        doubled(y, e)
+
+    def make(rows: int) -> dict:
+        return {"x": Arr.from_numpy(np.ones((rows, 4))), "e": Arr.zeros(4)}
+
+    (fiber,) = third_row.term.fibers
+    assert (fiber.spelled, fiber.made, fiber.index) == ("x.dom[2]", "y", (2,))
+    fact = LoopyExecutor().differential(third_row, Schedule(third_row), make(3))
+    assert fact.status is Status.TESTED
+    with pytest.raises(IndexError, match="index 2 out of range"):
+        third_row(**make(2))
+    for rows in (2, 0):
+        with pytest.raises(IndexError) as caught:
+            LoopyExecutor().run(third_row, **make(rows))
+        message = str(caught.value)
+        assert "with x.dom[2].size, and axis 0 of x has no index 2" in message
+        assert f"which is {rows} at n = {rows}" in message
+        assert "Natively x.dom[2] raises IndexError" in message
+
+    # Out of range at every size, the term is refused.
+    @kernel
+    def three_rows(x: Arr[Fin[3], Fin[m], Real], y: Arr[Fin[m], Real]):  # noqa: F821
+        for j in y.dom:
+            y[j] = x[0, j] + x[2, j]
+
+    @program
+    def fifth_row(x, e):
+        y = Arr.zeros((x.dom[5].size,))
+        three_rows(x, y)
+        doubled(y, e)
+
+    with pytest.raises(TraceError, match=r"axis 0 of x has 3 cells .*no fiber"):
+        fifth_row.term
+
+    @program
+    def last_row(x, e):
+        y = Arr.zeros((x.dom[-1].size,))
+        column_sums(x, y)
+        doubled(y, e)
+
+    with pytest.raises(IndexError):
+        last_row(**make(3))
+    with pytest.raises(TraceError, match="x.dom.-1., a fiber at a negative index"):
+        last_row.term
+
+
+@kernel
+def two_halves(x: Arr[Fin[n], Real], u: Arr[Fin[n] + Fin[n], Real]):  # noqa: F821
+    """``x`` and ``2 x``, the two pieces of a union, each of ``x``'s length."""
+    for i in x.dom:
+        u[0, i] = x[i]
+        u[1, i] = 2.0 * x[i]
+
+
+@kernel
+def both_halves(u: Arr[Fin[m] + Fin[m], Real], e: Arr[Fin[1], Real]):  # noqa: F821
+    """Every cell of both pieces summed: only ``u`` says what ``m`` is."""
+    for k in e.dom:
+        e[k] = reduce_sum(u[0, i] + u[1, i] for i in u.dom[0])
+
+
+def test_a_union_of_other_sizes_names_them_natively_too() -> None:
+    # #249: the program unifies m with n piece by piece, and natively the
+    # second kernel's contract read no size off a union, so it could not tell
+    # what m is and refused the call.
+    @program
+    def halves(x, u, e):
+        two_halves(x, u)
+        both_halves(u, e)
+
+    def make() -> dict:
+        return {
+            "x": Arr.from_numpy(np.arange(1.0, 4.0)),
+            "u": Arr.zeros(two_halves.arg_types["u"].domain, n=3),
+            "e": Arr.zeros(1),
+        }
+
+    alone = make()
+    both_halves(alone["u"], alone["e"])
+    native = make()
+    halves(**native)
+    np.testing.assert_allclose(native["e"].numpy(), [18.0])
+    compiled = make()
+    LoopyExecutor().run(halves, **compiled)
+    np.testing.assert_allclose(compiled["e"].numpy(), [18.0])
+    fact = LoopyExecutor().differential(halves, Schedule(halves), make())
+    assert fact.status is Status.TESTED
+    # Pieces of other lengths are other points, and still refused.
+    other = Arr.zeros(Fin[Var("a")] + Fin[Var("b")], a=3, b=4)
+    with pytest.raises(ValueError, match="the argument u is over"):
+        both_halves(other, Arr.zeros(1))
 
 
 def test_a_declared_shape_names_its_sizes_and_reads_them_off_arrays() -> None:

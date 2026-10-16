@@ -36,6 +36,7 @@ __all__ = [
     "Callsite",
     "Difference",
     "Expression",
+    "Fiber",
     "Hypothesis",
     "Reduction",
     "Requirement",
@@ -547,6 +548,33 @@ class Binder:
     scope: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True, eq=False)
+class Fiber:
+    """A fiber a program's body reads a size off, ``x.dom[0].size``.
+
+    The array the program makes with that size is ``made``, at ``where``,
+    and the fiber is of the program's array ``array`` at the indices
+    ``index``, each of an axis of the length ``extents`` gives, in the
+    program's sizes: ``Arr.zeros((x.dom[0].size,))`` of an ``x`` of
+    ``n`` rows is the fiber at ``(0,)`` of an axis of length ``n``.
+    Natively ``x.dom[0]`` raises ``IndexError`` where the axis has no
+    index 0, ``n = 0``, so the compiled run is refused at such sizes
+    (:func:`loopty.contract.made_fibers`); an index out of range at every
+    size is refused when the term is built.
+    """
+
+    made: str
+    where: str
+    array: str
+    index: tuple[int, ...]
+    extents: tuple[Expression, ...]
+
+    @property
+    def spelled(self) -> str:
+        """The fiber as the body wrote it: ``x.dom[0]``."""
+        return f"{self.array}.dom" + "".join(f"[{k}]" for k in self.index)
+
+
 @dataclass(frozen=True)
 class Callsite:
     """A call a term holds: a kernel's inlined call, or a program's call.
@@ -671,7 +699,7 @@ class Term:
     guessing from the spelling. A term written by hand leaves it empty and is
     read by spelling, which is what :data:`COUNT_PARAM_REFLECTED` is for.
 
-    Four fields are empty for a kernel's term and filled in for a program's
+    Five fields are empty for a kernel's term and filled in for a program's
     (:mod:`loopty.compose`), which is one term made of several kernels':
 
     * ``temporaries`` are the arrays the term writes and reads that are not
@@ -693,6 +721,9 @@ class Term:
       Natively that dtype is whatever ``u`` is called with, so it is checked
       when the compiled term is run
       (:func:`loopty.contract.inherited_storage`).
+    * ``fibers`` are the fibers the body reads sizes off for the arrays it
+      makes (:class:`Fiber`), ``x.dom[0].size``, which natively exist only
+      at some sizes; the compiled program is refused at the others.
 
     Two more are a program's alone, and are how its callees' facts travel
     from one call to the next:
@@ -753,6 +784,7 @@ class Term:
     requirements: tuple[Requirement, ...] = ()
     scopes: tuple[Scope, ...] = ()
     deferred_offsets: tuple[str, ...] = ()
+    fibers: tuple[Fiber, ...] = ()
     tables: tuple[tuple[str, Any], ...] = ()
     calls: tuple[Call, ...] = ()
     result: str | None = None
