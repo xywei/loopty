@@ -1379,6 +1379,17 @@ class ExpressionLowerer(Mapper):
     def map_logical_not(self, expr: Any) -> prim.Expression:
         return prim.LogicalNot(self.rec(expr.child))
 
+    def map_if(self, expr: Any) -> prim.Expression:
+        """A select, ``a if c else b``, which C computes with ``c ? a : b`` (#266).
+
+        A conditional expression of the body on data is one statement whose
+        value two paths choose between (:class:`loopty.trace.Select`); C
+        evaluates only the branch chosen, as the native run does.
+        """
+        return prim.If(
+            self.rec(expr.condition), self.rec(expr.then), self.rec(expr.else_)
+        )
+
     def map_lanky_abs(self, expr: Any) -> prim.Expression:
         """lanky's ``Abs``, as a call of ``abs`` is (:meth:`_absolute`)."""
         return self._absolute(expr, expr.operand)
@@ -3944,14 +3955,16 @@ def _merge_domains(domains: Sequence[isl.Set]) -> list[isl.Set]:
     for the same reason. Identical domains are therefore dropped.
 
     Two domains over the same inames that are genuinely different sets are
-    merged by union, which is what a ``when`` guard produces: the guarded
-    statement's domain is narrower and the loop has to run over the wider of the
+    merged by union, which is what a branch produces: the statement under an
+    ``if`` has a narrower domain and the loop has to run over the wider of the
     two. The narrower statement does not simply inherit the union;
     :func:`_restore_narrower_domains` gives it back its own domain as an
     instruction predicate, so the loop is the union and the statement is not. A
-    union that is not convex is a nest loopy cannot express with one iname, and
-    saying so here names the domains rather than letting loopy fail later about
-    a generated instruction.
+    union that is not convex, ``i == 0`` and ``i == n - 1`` from ``if i == 0 or
+    i == n - 1:``, is no single domain loopy can give an iname, and the loop
+    runs over its convex hull instead, every statement predicated back to its
+    own points the same way. A hull isl cannot give as one piece is refused
+    here, naming the domains, rather than left to loopy to fail on later.
     """
     merged: list[isl.Set] = []
     for domain in domains:
@@ -3969,6 +3982,8 @@ def _merge_domains(domains: Sequence[isl.Set]) -> list[isl.Set]:
                 break
             union = left.union(right).coalesce()
             if union.n_basic_set() != 1:
+                union = isl.Set.from_basic_set(union.convex_hull())
+            if union.n_basic_set() != 1:  # pragma: no cover - a hull is one piece
                 raise LoweringError(
                     f"two domains over {names} that do not merge into one: "
                     f"{seen} and {domain}. loopy gives an iname a single "

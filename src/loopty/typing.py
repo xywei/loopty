@@ -513,7 +513,8 @@ def in_bounds_facts(
                     )
                 )
                 continue
-            wide = any(place[2] is not stmt.loop_domain for place in places)
+            exact = _exact_guard_places(stmt)
+            wide = any(id(place[2]) not in exact for place in places)
             facts.append(
                 Fact(
                     id=identifier,
@@ -923,6 +924,39 @@ def _unnarrowed(stmt: Any) -> dict[str, Any]:
             {"conjunct": conjunct, "why": why} for conjunct, why in stmt.unnarrowed
         ]
     }
+
+
+def _exact_guard_places(stmt: Any) -> set[int]:
+    """The domains a guard of ``stmt`` is read over that hold no masked point, by id.
+
+    A condition of the statement's path is asked where the ones before it
+    held, and read over the loop nest narrowed by those isl states
+    (:attr:`loopty.term.Stmt.path`): that is where it is asked, unless a
+    condition before it has a conjunct the statement lists as unnarrowed.
+    ``if flag[i] > 0.0:`` reads ``flag[i]`` at every point of the loops,
+    which is its domain, whatever the statement's own domain leaves wide.
+    A guard with no path, of a term written by hand, is read over the loop
+    nest, which is where it is asked.
+    """
+    from loopty.trace import _shown
+
+    exact = {id(stmt.loop_domain)} if stmt.loop_domain is not None else set()
+    unstated = {conjunct for conjunct, _why in stmt.unnarrowed}
+    widened = False
+    for condition, domain in stmt.path:
+        if not widened:
+            exact.add(id(domain))
+        widened = widened or any(
+            _shown(part) in unstated for part in _conjuncts_of(condition)
+        )
+    return exact
+
+
+def _conjuncts_of(condition: Any) -> list[Any]:
+    """The conjuncts of a path condition, as the statement lists unnarrowed ones."""
+    if isinstance(condition, prim.LogicalAnd):
+        return [part for child in condition.children for part in _conjuncts_of(child)]
+    return [condition]
 
 
 def _is_widened(relation: isl.Map, indices: Sequence[Any]) -> bool:

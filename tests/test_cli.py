@@ -1241,25 +1241,27 @@ def test_run_reports_an_example_inputs_that_raises(tmp_path, capsys) -> None:
 
 
 FLIPPED = '''
-"""A guard that is an integer natively: ~ on a Python bool is bitwise."""
+"""A truth value that is an integer natively: ~ on a Python bool is bitwise."""
 
 from __future__ import annotations
 
 import numpy as np
-from lanky.prelude import Real
+from lanky.prelude import Bool, Real
 
 from loopty import Arr, Fin, kernel
 
 
 @kernel
-def flipped(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):
+def flipped(x: Arr[Fin[n], Real], y: Arr[Fin[n], Bool]):
     for i in y.dom:
-        if ~(i > 0):
-            y[i] = x[i]
+        y[i] = (x[i] > 0.0) | ~(i > 0)
 
 
 def example_inputs():
-    return {"x": Arr.from_numpy(np.arange(4.0)), "y": Arr.zeros(4)}
+    return {
+        "x": Arr.from_numpy(np.arange(4.0)),
+        "y": Arr.zeros(4, dtype=np.bool_),
+    }
 '''
 
 

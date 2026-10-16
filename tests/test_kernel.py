@@ -127,18 +127,19 @@ def test_every_fact_of_a_kernel_is_keyed_by_its_definition() -> None:
 
 
 def test_a_body_that_cannot_be_traced_is_reported_as_a_fact() -> None:
+    # A while on a traced condition has no bound on its paths.
     @kernel
-    def branchy(u: Arr[Fin[n], Real]):  # noqa: F821
+    def looping(u: Arr[Fin[n], Real]):  # noqa: F821
         for i in u.dom:
-            if i > 0:
-                u[i] = 1.0
+            while u[i] < 1.0:
+                u[i] = u[i] + 1.0
 
-    facts = branchy.facts()
+    facts = looping.facts()
     assert len(facts) == 1
     assert facts[0].status is Status.REFUTED
     assert facts[0].kind == "trace"
-    assert facts[0].id == f"trace:{branchy.definition}"
-    assert "when" in facts[0].provenance["error"]
+    assert facts[0].id == f"trace:{looping.definition}"
+    assert "the while loop at" in facts[0].provenance["error"]
     # lanky prints a refuted fact's reason under its REFUTED line, so the fix
     # reaches the terminal and not only the JSON ledger. The claim is refuted
     # at no assignment in particular, and there is no counterexample: the

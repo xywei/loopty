@@ -930,8 +930,9 @@ def test_a_scalar_sizes_the_callees_arrays() -> None:
 
 
 def test_a_rules_value_is_not_used_after_its_guard() -> None:
-    # A with block is no scope: z is the call's value compiled, and 0
-    # natively where i > 0 is false, where the call is not made.
+    # An if is no scope either: after it, z is bound only where i > 0 held,
+    # so natively the read of z raises at i = 0, and the trace refuses the
+    # branch where it does.
     @kernel
     def unit(s: Real) -> Real:
         return s + 1.0
@@ -956,10 +957,9 @@ def test_a_rules_value_is_not_used_after_its_guard() -> None:
     np.testing.assert_array_equal(native, [0.0, 6.0, 8.0])
     np.testing.assert_array_equal(interpreted, native)
     np.testing.assert_array_equal(compiled, native)
-    native = Arr.zeros(3)
-    after(Arr.from_numpy(x), native)
-    np.testing.assert_array_equal(native.numpy(), [0.0, 3.0, 4.0])
-    with pytest.raises(TraceError, match=r"the value of unit\(x\[i\]\), called "):
+    with pytest.raises(UnboundLocalError):
+        after(Arr.from_numpy(x), Arr.zeros(3))
+    with pytest.raises(TraceError, match="on the branch where i <= 0"):
         after.term
 
 

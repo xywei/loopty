@@ -185,21 +185,24 @@ def test_accesses_are_read_off_the_expression() -> None:
     assert inner == {"val", "x", "col"}
 
 
-def test_a_when_block_narrows_the_domain_and_is_kept() -> None:
+def test_an_if_narrows_the_domain_and_is_kept() -> None:
     stmt = term_of(guarded).stmts[0]
     assert stmt.guard is not None
     # 0 <= i < n and i + 1 < n, so the last point is gone.
     assert stmt.domain.is_equal(type(stmt.domain)("[n] -> { [i] : 0 <= i < n - 1 }"))
 
 
-def test_an_if_on_a_symbolic_value_names_when_as_the_fix() -> None:
+def test_an_if_on_a_loop_variable_is_a_branch_of_the_term() -> None:
+    # The trace runs the body once per branch: the write is recorded on the
+    # one where i > 0, and narrowed to it.
     def branchy(u: Arr[Fin[n], Real]):  # noqa: F821
         for i in u.dom:
             if i > 0:
                 u[i] = 1.0
 
-    with pytest.raises(TraceError, match="when"):
-        term_of(branchy)
+    (stmt,) = term_of(branchy).stmts
+    assert render(stmt.guard) == "i > 0"
+    assert stmt.domain.is_equal(type(stmt.domain)("[n] -> { [i] : 0 < i < n }"))
 
 
 def test_a_break_out_of_a_traced_loop_is_refused() -> None:
@@ -240,13 +243,13 @@ def test_a_break_out_of_an_inner_loop_is_refused_by_name() -> None:
         term_of(nested)
 
 
-def test_the_message_names_when_as_the_fix() -> None:
+def test_the_message_names_an_if_as_the_fix() -> None:
     def early(u: Arr[Fin[n], Real], v: Arr[Fin[n], Real]):  # noqa: F821
         for i in u.dom:
             v[i] = u[i]
             break
 
-    with pytest.raises(TraceError, match="with when"):
+    with pytest.raises(TraceError, match="'if condition:'"):
         term_of(early)
 
 
@@ -279,7 +282,7 @@ def test_statements_are_recorded_in_source_order_with_their_position() -> None:
     assert term.stmts[1].inames == ("r",)
 
 
-def test_when_masks_writes_and_out_of_range_reads_under_plain_python() -> None:
+def test_an_if_skips_the_out_of_range_read_under_plain_python() -> None:
     from loopty.kernel import Kernel
 
     values = Arr.from_numpy([1.0, 2.0, 3.0])
@@ -1323,7 +1326,7 @@ def test_a_reduction_condition_that_reads_data_is_refused() -> None:
         message
     )
     assert "reads an array or is not affine" in message
-    assert "'if condition:'" in message
+    assert "'t[k] = term if condition else 0.0'" in message
 
 
 def test_a_reduction_condition_with_not_equal_is_refused() -> None:
@@ -1731,10 +1734,11 @@ def test_a_data_guard_is_recorded_as_unnarrowed_too() -> None:
     assert stmt.unnarrowed == (("x[i] > 0.0", "reads an array or is not affine"),)
 
 
-def test_a_guard_the_trace_can_evaluate_is_a_constant() -> None:
-    # A condition on values the trace knows, a module constant say, reaches
-    # when as a bool. True leaves every instance writing, which is what the
-    # domain says, so nothing is listed; False leaves none, and is listed.
+def test_a_condition_the_trace_can_evaluate_is_pythons_own() -> None:
+    # A condition on values the trace knows, a module constant say, is a
+    # bool, and the if is Python's: True in a connective with a traced
+    # condition leaves that condition, and an if on False skips its block,
+    # which records nothing.
     order = 2
 
     def higher(y: Arr[Fin[n], Real]):  # noqa: F821
@@ -1752,10 +1756,7 @@ def test_a_guard_the_trace_can_evaluate_is_a_constant() -> None:
     assert stmt.domain.is_equal(
         isl.Set("[n] -> { [i] : 0 <= i < n - 1 }").align_params(stmt.domain.get_space())
     )
-    (stmt,) = term_of(never).stmts
-    assert stmt.unnarrowed == (
-        ("False", "is the constant False, which is not stated to isl"),
-    )
+    assert term_of(never).stmts == ()
 
 
 def test_a_reduction_condition_against_a_real_scalar_is_refused() -> None:
@@ -1787,43 +1788,37 @@ def test_a_reduction_condition_against_an_integral_scalar_is_its_domain() -> Non
 
 
 def flipped(y: Arr[Fin[n], Real]):  # noqa: F821
-    """``~`` on a Python bool is bitwise: the guard is -2 or -1, always true."""
+    """``~`` on a Python bool is bitwise: the condition is -2 or -1, always true."""
     for i in y.dom:
         if ~(i > 0):
             y[i] = 1.0
 
 
-def test_natively_a_guard_that_is_an_integer_is_refused() -> None:
-    # ~False is -1 at i = 0; the trace records not (i > 0) and writes y[0]
-    # only, while the native run used to write every cell. Python warns about
-    # ~ on a bool, which this suite makes an error, and a user's run does not.
-    import warnings
-
-    from loopty.kernel import Kernel
-
-    y = Arr.zeros(3)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
-        with pytest.raises(TraceError) as caught:
-            Kernel(flipped)(y)
+def test_an_if_on_tilde_of_a_python_bool_is_refused_by_the_trace() -> None:
+    # ~False is -1 at i = 0 and ~True is -2, and Python's if takes both as
+    # true: natively every cell is written, while the trace reads not (i > 0)
+    # and writes y[0] only. Nothing refuses an integer in Python's own if, so
+    # the trace refuses the ~, with the comparison and the 'not' to write.
+    with pytest.raises(TraceError) as caught:
+        term_of(flipped)
     message = str(caught.value)
-    assert "is the integer -1, not a truth value" in message
+    assert "is '~' of a truth value the native run computes as a Python bool" in (
+        message
+    )
     assert "test_trace.py:" in message
     assert "'i <= 0' for '~(i > 0)'" in message
-    assert list(y.numpy()) == [0.0, 0.0, 0.0]
+    assert "Python's 'not' for '~'" in message
 
 
-def test_a_numpy_integer_guard_is_refused_natively_as_well() -> None:
-    # & with an integer operand is bitwise too: True & 2 is 0.
+def test_an_if_on_a_connective_with_an_integer_operand_is_refused() -> None:
+    # & with an integer operand is bitwise natively: True & 2 is 0.
     def masked(m: Arr[Fin[n], Nat], y: Arr[Fin[n], Real]):  # noqa: F821
         for i in y.dom:
             if (i >= 0) & m[i]:
                 y[i] = 1.0
 
-    from loopty.kernel import Kernel
-
-    with pytest.raises(TraceError, match="is the integer 0, not a truth value"):
-        Kernel(masked)(Arr.from_numpy(np.array([2, 1])), Arr.zeros(2))
+    with pytest.raises(TraceError, match=r"its operand m\[i\] is not a truth value"):
+        term_of(masked)
 
 
 def test_a_guard_that_is_a_bool_runs_natively() -> None:
@@ -1858,7 +1853,9 @@ def test_a_guard_under_a_false_guard_is_not_asked_natively() -> None:
     assert list(y.numpy()) == [1.0, 0.0, 0.0]
 
 
-def test_a_concrete_integer_guard_is_refused_while_tracing() -> None:
+def test_an_if_on_a_concrete_integer_is_pythons_own() -> None:
+    # A value the trace knows is no branch of the term: Python's if takes 1
+    # as true in both runs, and the write is recorded with no guard.
     flag = 1
 
     def constant(y: Arr[Fin[n], Real]):  # noqa: F821
@@ -1866,8 +1863,8 @@ def test_a_concrete_integer_guard_is_refused_while_tracing() -> None:
             if flag:
                 y[i] = 1.0
 
-    with pytest.raises(TraceError, match="is the integer 1, not a truth value"):
-        term_of(constant)
+    (stmt,) = term_of(constant).stmts
+    assert stmt.guard is None
 
 
 # }}}

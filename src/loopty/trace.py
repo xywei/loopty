@@ -466,9 +466,10 @@ def _loop_domain(loop: _Loop) -> str:
     return _domain_text(dom) if isinstance(dom, SymDom) else "its domain"
 
 
-def _escaped_message(loops: Sequence[_Loop], cell: str, where: str) -> str:
-    """What to say about a statement that mentions loops it is not inside.
+def _escaped_message(loops: Sequence[_Loop], what: str, where: str) -> str:
+    """What to say about a write or a condition that mentions loops it is not in.
 
+    ``what`` names it, ``the write to y[0]`` or ``the condition 'i > 0'``.
     Each loop is named by its ``for`` target and line rather than by its iname
     alone, which differs from the target when the target is reused: after
     ``for i in v.dom: for i in u.dom[i]: ...`` the ``i`` the outer body reads
@@ -486,7 +487,7 @@ def _escaped_message(loops: Sequence[_Loop], cell: str, where: str) -> str:
     )
     variable = _loop_variable(loops[0])
     return (
-        f"the write to {cell} at {where} mentions the loop "
+        f"{what} at {where} mentions the loop "
         f"variable{'s' if many else ''} {listed}, outside "
         f"{'those loops' if many else 'that loop'}. Tracing runs the body once "
         "with every loop taking one generic point, so a value that a Python "
@@ -1274,8 +1275,11 @@ class Tracer:
         asks ``x`` twice when it is false, and ``if a < 2:`` twice in a row
         branches alike.
 
-        The condition is checked as a stored truth value is (``~`` of a
-        Python bool is refused, :func:`_refuse_bitwise`). A ``while`` on it is
+        The condition is checked as any value the body computes is: ``~`` of
+        a Python bool is refused (:func:`_refuse_bitwise`), since natively it
+        is the integer ``-2`` or ``-1``, which Python's ``if`` takes as true,
+        and so is a variable of a loop that has closed, which a Python name
+        carried past it (:func:`_escaped_message`). A ``while`` on it is
         refused: its paths have no bound. So is a run that has asked more
         than :data:`MAX_ASKS` times, which a loop around a branch that never
         leaves it does. Where the answer leaves a path isl shows to be empty
@@ -1285,8 +1289,18 @@ class Tracer:
         where = _location(frame)
         sorts = {**self.params, **self.array_types}
         condition = _exact_guard(condition, self)
-        _refuse_bitwise(condition, sorts, where, truth=True)
+        # Python's own if: nothing refuses the integer ~ makes of a Python
+        # bool natively, so the trace refuses it wherever it is.
+        _refuse_bitwise(condition, sorts, where)
         _refuse_arithmetic(condition, sorts, where)
+        escaped = _loop_variables(
+            condition, self._inames, bound=self.inames, reflections=self.reflections
+        )
+        if escaped:
+            loops = [self._closed[name] for name in sorted(escaped)]
+            raise TraceError(
+                _escaped_message(loops, f"the condition {_shown(condition)!r}", where)
+            )
         asking = (frame.f_code, frame.f_lasti, tuple(id(loop) for loop in self.loops))
         if asking in self._asked_at and loops_back(frame.f_code, frame.f_lasti):
             # The second pass of a while on it: the first may be an if
@@ -1542,7 +1556,7 @@ class Tracer:
                 else assignee.array
             )
             loops = [self._closed[name] for name in sorted(escaped)]
-            raise TraceError(_escaped_message(loops, cell, where))
+            raise TraceError(_escaped_message(loops, f"the write to {cell}", where))
         guard = self.guard()
         stmt = Stmt(
             id=f"S{len(self.stmts)}",
@@ -4569,10 +4583,10 @@ def _python_nots(expr: Any, params: Mapping[str, Any], truth: bool) -> Iterator[
     """Every ``~`` of a Python bool whose integer the native run computes with.
 
     ``~(i > 0)`` of a loop variable is ``~`` of a Python bool natively, which is
-    bitwise: ``-2`` or ``-1``. Where a truth value is asked for, a guard or a
-    cell of an array of truth values, the native run refuses that integer
-    (:class:`when`, :func:`_refuse_integer_truth`). Anywhere else it computes
-    with it: ``x[i] * ~(i > 0)`` is ``-2 * x[i]`` natively and ``0`` compiled.
+    bitwise: ``-2`` or ``-1``. Stored into a cell of an array of truth values,
+    the native run refuses that integer (:func:`_refuse_integer_truth`).
+    Anywhere else it computes with it: ``x[i] * ~(i > 0)`` is ``-2 * x[i]``
+    natively and ``0`` compiled, and ``if ~(i > 0):`` takes either as true.
     ``truth`` says whether ``expr`` is asked as a truth value; a connective
     passes that on to its operands, and anything else asks its operands for a
     number.
@@ -4623,12 +4637,11 @@ def _refuse_bitwise(
 
     ``~`` of a comparison passes, since a comparison is a truth value. On a
     comparison of Python ints, such as ``~(i > 0)`` of a loop variable, it is
-    bitwise natively all the same. Where a truth value is asked for, which
-    ``truth`` says of ``expr`` (a guard, or a value stored into an array of
-    truth values), the native run refuses the integer it makes (:class:`when`,
-    :func:`_refuse_integer_truth`). Anywhere else the native run would compute
-    with that integer, so the trace refuses it (:func:`_python_nots`), naming
-    the complement as a comparison.
+    bitwise natively all the same. Stored into an array of truth values,
+    which ``truth`` says of ``expr``, the native run refuses the integer it
+    makes (:func:`_refuse_integer_truth`). Anywhere else, an ``if`` on it
+    included, the native run would compute with that integer, so the trace
+    refuses it (:func:`_python_nots`), naming the complement as a comparison.
     """
     for node in _connectives(expr):
         operand = _untruthful_operand(node, params)
@@ -4660,7 +4673,8 @@ def _refuse_bitwise(
             "~False is -1, while the trace reads it as 'not' and the compiled "
             "kernel computes 0 or 1, so the two runs would compute different "
             f"things with it. Write the complement as a comparison ({complement}, "
-            "and '(i <= 0) | (i >= n)' for '~((i > 0) & (i < n))')"
+            "and '(i <= 0) | (i >= n)' for '~((i > 0) & (i < n))'), or, in an "
+            "if, Python's 'not' for '~'"
         )
 
 

@@ -1238,6 +1238,12 @@ def _exact(node: Any, promotion: Any, truth: bool) -> Any:
         return type(node)(tuple(_exact(c, promotion, truth) for c in node.children))
     if isinstance(node, prim.LogicalNot):
         return type(node)(_exact(node.child, promotion, truth))
+    if isinstance(node, prim.If):
+        return type(node)(
+            _exact(node.condition, promotion, True),
+            _exact(node.then, promotion, truth),
+            _exact(node.else_, promotion, truth),
+        )
     if hasattr(node, "binders") and isinstance(node, prim.ExpressionNode):
         guard = getattr(node, "guard", None)
         return type(node)(
