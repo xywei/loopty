@@ -4332,13 +4332,22 @@ class Schedule:
             raise ValueError("tag({}) names no loop to tag")
         draft = self._draft()
         inames: dict[str, str] = {}
+        given: dict[str, Any] = {}
         for handle, value in pairs:
             if not isinstance(value, str):
                 raise TypeError(
                     f"{text}: a tag is loopy's text, such as 'g.0', not {value!r}"
                 )
             for name in self._loop_names(handle, text):
+                if name in inames and inames[name] != value:
+                    # two handles of one loop, as after a fusion, given two tags
+                    raise ValueError(
+                        f"{text}: {given[name]!r} and {handle!r} are one loop, "
+                        f"{self._shown(name)}, which takes one tag, not "
+                        f"{inames[name]!r} and {value!r}"
+                    )
                 inames[name] = value
+                given.setdefault(name, handle)
         for name, value in inames.items():
             try:
                 parse_tag(value)
