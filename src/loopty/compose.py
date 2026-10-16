@@ -1916,9 +1916,9 @@ class _Composer:
                 self.read_through.add(name)
         # One array given for two parameters the call only reads (#221) owes
         # its check once: both declare it alike (same_shape, settle_type).
-        once: dict[tuple[str, str], _Want] = {}
+        once: dict[tuple[str, str, str, str], _Want] = {}
         for want in wants:
-            once.setdefault((want.kind, want.array), want)
+            once.setdefault((want.kind, want.array, want.owner, want.counts), want)
         # A layout is checked before an element read through it, which the
         # check of the element reads its cells through.
         return sorted(once.values(), key=lambda want: want.kind != "layout")
