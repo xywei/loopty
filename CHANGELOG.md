@@ -283,6 +283,16 @@ for box, a, b in R.dom:
   lists the ids its map per statement names, each with its statement, and
   `examples/calls.py` and `examples/composition.py` show a statement's text
   where they showed its id.
+- **The coverage report is rerun for 0.4** (`docs/lean-checks.md`), from
+  an empty proof cache with Lean v4.29.1. Of 1579 facts isl decides in 34
+  files, Lean proves 1516. The 25 it does not are claims about reals, and
+  with Mathlib it proves those too, 1541 in all. The 37 refuted facts have
+  their negation proved at isl's counterexample, one more is refused for
+  isl alone, and 524 facts are not isl's to decide. `scripts/lean_coverage.py`
+  counts a file's refused casts again: its wrapper of `IllegalCast` took
+  three arguments, so since `instances` (above) every refusal a file's
+  `rejected*` functions asked for raised a `TypeError` in its place, which
+  the script swallowed, and the report counted 16 refuted facts.
 
 ### Fixed
 
