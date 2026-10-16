@@ -400,7 +400,8 @@ def instances_text(
             continue
         at = _at_coords(stmt, coords) if stmt.text else _at_cell(stmt, coords)
         if stmt_id == previous:
-            out.append(f"the same statement{at}")
+            same = "check" if is_check(stmt_id) else "statement"
+            out.append(f"the same {same}{at}")
             continue
         out.append(f"{named(stmt_id)}{at}")
         previous = stmt_id

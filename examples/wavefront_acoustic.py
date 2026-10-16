@@ -203,7 +203,7 @@ def rejected_diamond_tiling(nt: int = NT, nx: int = NX) -> tuple[str, tuple]:
 
     diamond = diamond_schedule(nt, nx)
     try:
-        diamond.tile(diamond.loops.a, diamond.loops.b, 4, 4)
+        diamond.tile(acoustic.loops.a, acoustic.loops.b, 4, 4)
     except IllegalCast as refused:
         return str(refused), refused.witness
     raise AssertionError("tiling the diamond should be illegal for this pair")
@@ -223,14 +223,14 @@ OFFSET_DIAMOND = (
 def offset_diamond_schedule(nt: int = NT, nx: int = NX) -> Schedule:
     """The diamond tiling: the offset diamond, then rectangles in ``(a, b)``.
 
-    The loops a map names that no loop had been named are the schedule's
-    own, ``diamond.loops.a``: the source wrote ``t`` and ``i``, and the map
-    wrote ``a`` and ``b``.
+    The loops the map makes, which no line of the file binds (it wrote
+    ``t`` and ``i``, and the map ``a`` and ``b``), are named under
+    ``loops``: ``acoustic.loops.a``.
     """
     diamond = Schedule(acoustic, target="c", sizes={"nt": nt, "nx": nx}).affine(
         OFFSET_DIAMOND
     )
-    return diamond.tile(diamond.loops.a, diamond.loops.b, 4, 4)
+    return diamond.tile(acoustic.loops.a, acoustic.loops.b, 4, 4)
 
 
 #: What ``loopty run`` compiles and compares: the wavefront block, the
@@ -372,7 +372,7 @@ def main() -> int:
 
     message, _witness = rejected_diamond_tiling()
     print()
-    print(f"{schedule!r}.tile(diamond.loops.a, diamond.loops.b, 4, 4) ->")
+    print(f"{schedule!r}.tile(acoustic.loops.a, acoustic.loops.b, 4, 4) ->")
     print(f"  IllegalCast: {message}")
 
     schedule = offset_diamond_schedule()

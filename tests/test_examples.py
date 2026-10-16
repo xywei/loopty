@@ -359,7 +359,7 @@ def test_one_row_per_group_is_the_schedule_that_does_build(plain_opencl) -> None
     on_c = module.rows_parallel(target="c")
     ok, reason = on_c.buildable
     assert not ok
-    assert reason.startswith("tag(spmv.r, 'g.0') puts a loop on a hardware axis")
+    assert reason.startswith("the loop spmv.r on g.0 is on a hardware axis")
     assert "Retarget to opencl" in reason
 
 
@@ -1719,9 +1719,9 @@ def test_the_l2p_demo_refuses_the_interchange_and_fuses_box_by_box() -> None:
     # the tag's two facts, the fusions' being fused's, above
     device = result.stdout.split("on a GPU, each box a work group, as sumpy's: ")[1]
     assert device.splitlines()[1:] == [
-        "  decided  isl  tag(l2p.unpack.box, 'g.0') renames the instances of l2p "
+        "  decided  isl  on_groups(l2p.unpack.box) renames the instances of l2p "
         "one for one",
-        "  decided  isl  the order after tag(l2p.unpack.box, 'g.0') runs every "
+        "  decided  isl  the order after on_groups(l2p.unpack.box) runs every "
         "dependence of l2p forward, within one work item",
     ]
 
@@ -1761,7 +1761,7 @@ def test_the_l2p_demo_keeps_one_triangle_per_box_and_refuses_one_row() -> None:
     ) in result.stdout
     assert (
         "on a device, each box a work group keeping its windows: "
-        "tag(l2p.unpack.box, 'g.0'): 2 facts, all decided by isl\n"
+        "on_groups(l2p.unpack.box): 2 facts, all decided by isl\n"
     ) in result.stdout
 
 
@@ -1904,7 +1904,10 @@ def test_sumpys_tile_is_legal_and_c_cannot_build_its_axes() -> None:
     assert all(fact.status.value == "decided" for fact in casts)
     buildable, reason = tile.buildable
     assert not buildable
-    assert "puts a loop on a hardware axis, and the C target has none" in reason
+    assert reason.startswith(
+        "the loops single_layer.t.outer on g.0 and single_layer.t.inner on l.0 are "
+        "on hardware axes, and the C target has none"
+    )
 
 
 def test_the_qbx_demo_prints_the_tile_the_fact_and_the_rows() -> None:

@@ -71,15 +71,15 @@ schedule: Schedule(spmv, target='c').split(spmv.j, 2).realize(spmv.y, tree=True)
   decided  isl  realize(spmv.y, tree=True) renames the instances of spmv one for one
   decided  isl  the order after realize(spmv.y, tree=True) runs every dependence of spmv forward
   decided  isl  the accumulation into spmv.y is reassociated by realize(spmv.y, tree=True), so its result is compared at 'reassoc'
-device schedule: Schedule(spmv, target='c').tag(spmv.r, 'g.0').split(spmv.j, 32).tag(spmv.j.inner, 'l.0').realize(spmv.y, tree=True)
-  decided  isl  tag(spmv.r, 'g.0') renames the instances of spmv one for one
-  decided  isl  the order after tag(spmv.r, 'g.0') runs every dependence of spmv forward, within one work item
+device schedule: Schedule(spmv, target='c').on_groups(spmv.r).split(spmv.j, 32).on_items(spmv.j.inner).realize(spmv.y, tree=True)
+  decided  isl  on_groups(spmv.r) renames the instances of spmv one for one
+  decided  isl  the order after on_groups(spmv.r) runs every dependence of spmv forward, within one work item
   decided  isl  split(spmv.j, 32) renames the instances of spmv one for one
   decided  isl  the order after split(spmv.j, 32) runs every dependence of spmv forward, within one work item
-  decided  isl  tag(spmv.j.inner, 'l.0') renames the instances of spmv one for one
-  decided  isl  the order after tag(spmv.j.inner, 'l.0') runs every dependence of spmv forward, within one work item
-  refuted  loopy-target c code can be generated for spmv after tag(spmv.j.inner, 'l.0')
-  decided  isl  the accumulation into spmv.y is reassociated by tag(spmv.j.inner, 'l.0'), so its result is compared at 'reassoc'
+  decided  isl  on_items(spmv.j.inner) renames the instances of spmv one for one
+  decided  isl  the order after on_items(spmv.j.inner) runs every dependence of spmv forward, within one work item
+  refuted  loopy-target c code can be generated for spmv after on_items(spmv.j.inner)
+  decided  isl  the accumulation into spmv.y is reassociated by on_items(spmv.j.inner), so its result is compared at 'reassoc'
   decided  isl  realize(spmv.y, tree=True) renames the instances of spmv one for one
   decided  isl  the order after realize(spmv.y, tree=True) runs every dependence of spmv forward, within one work item
   reason: the parallel tag on spmv.j.inner sits inside a loop whose bound comes from an array (a ragged fiber), and loopy will not put a hardware axis in a domain with a data-dependent parameter. Parallelize an enclosing loop with a size known at launch instead, such as the rows of a CSR product

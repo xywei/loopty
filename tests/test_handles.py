@@ -176,6 +176,22 @@ def test_a_name_a_scope_does_not_have_is_refused_with_what_it_has() -> None:
     )
 
 
+def test_a_name_after_a_loop_or_an_array_says_what_it_has() -> None:
+    with pytest.raises(AttributeError) as caught:
+        burgers.flux.j.outr  # noqa: B018
+    assert str(caught.value) == (
+        "burgers.flux.j has no outr: the loops a loop's handle reaches are the two "
+        "a split of it makes, burgers.flux.j.outer and burgers.flux.j.inner"
+    )
+    # Schedule.nest prints the loops a program zeroes an array in by the
+    # array, and says so where they are asked for
+    assert Schedule(burgers).nest[0] == "burgers.f.zeros"
+    with pytest.raises(AttributeError, match="no step names them: they take the tag"):
+        burgers.f.zeros  # noqa: B018
+    with pytest.raises(AttributeError, match="burgers.f is an array, which has no j"):
+        burgers.f.j  # noqa: B018
+
+
 def test_the_names_of_a_scope_complete() -> None:
     assert {"flux", "divergence", "f", "u", "rhs"} <= set(dir(burgers))
     assert {"i", "f", "rhs"} <= set(dir(burgers.divergence))
@@ -301,13 +317,13 @@ def _loop_and_array():
         ),
         (
             lambda s: s.on_groups("i"),
-            "tag() takes a loop handle such as burgers.divergence.i, not the string "
-            "'i'",
+            "on_groups() takes a loop handle such as burgers.divergence.i, not the "
+            "string 'i'",
         ),
         (
             lambda s: s.fuse("flux", "divergence"),
-            "fuse() takes a loop handle such as burgers.flux.j, not the string "
-            "'flux'",
+            "fuse() takes a loop handle of each call, the loop it fuses down to, "
+            "not the string 'flux': write fuse(burgers.flux.j, burgers.divergence.i)",
         ),
         (
             lambda s: s.interchange("j"),
@@ -344,6 +360,77 @@ def test_a_string_is_refused_with_the_handle_to_write(step, message: str) -> Non
     with pytest.raises(TypeError) as caught:
         step(Schedule(burgers))
     assert str(caught.value) == message
+
+
+@pytest.mark.parametrize(
+    ("step", "message"),
+    [
+        (
+            lambda s: s.tag(j="g.0"),
+            "tag() takes a loop handle and its tag, not the keyword j='g.0': write "
+            "tag(burgers.flux.j, 'g.0')",
+        ),
+        (
+            lambda s: s.tag("i:l.0"),
+            "tag() takes a loop handle and its tag, not the string 'i:l.0': write "
+            "tag(burgers.divergence.i, 'l.0')",
+        ),
+        (
+            lambda s: s.tag(j="g.0", i="l.0"),
+            "tag() takes a loop handle and its tag, not the keywords j='g.0', "
+            "i='l.0': write tag({burgers.flux.j: 'g.0', burgers.divergence.i: 'l.0'})",
+        ),
+        (
+            lambda s: s.tag(q="g.0"),
+            "tag() takes a loop handle and its tag, such as tag(burgers.flux.j, "
+            "'g.0'), not the keyword q='g.0'",
+        ),
+        (
+            lambda s: s.fuse("flux", "divergence", loops=1),
+            "fuse() takes a loop handle of each call, the loop it fuses down to, "
+            "not the string 'flux': write fuse(burgers.flux.j, burgers.divergence.i)",
+        ),
+        (
+            lambda s: s.fuse(burgers.flux.j, burgers.divergence.i, loops=1),
+            "fuse() takes no loops=: it fuses each call's loops down to the loop "
+            "named of it: write fuse(burgers.flux.j, burgers.divergence.i)",
+        ),
+        (
+            lambda s: s.fuse(burgers.flux, burgers.divergence),
+            "fuse() takes a loop handle of each call, the loop it fuses down to, "
+            "not the call burgers.flux: write fuse(burgers.flux.j, "
+            "burgers.divergence.i)",
+        ),
+        (
+            lambda s: s.split(burgers.flux.j, 4, inner="j_in"),
+            "split() takes no inner=: the loops a split makes are the handle's, "
+            "burgers.flux.j.outer and burgers.flux.j.inner",
+        ),
+    ],
+)
+def test_the_spellings_of_0_3_are_refused_with_the_step_to_write(step, message):
+    # loopty 0.3 wrote tag(i="g.0"), fuse("flux", "divergence", loops=1) and
+    # split("j", 32, inner="j_in"); loopy writes tag_inames("i:g.0")
+    with pytest.raises(TypeError) as caught:
+        step(Schedule(burgers))
+    assert str(caught.value) == message
+
+
+def test_a_string_is_refused_with_each_loop_it_names_once() -> None:
+    # two calls' loops of one name are two loops, and one after a fusion,
+    # which is written as it is printed, by the first handle that reaches it
+    with pytest.raises(TypeError) as caught:
+        Schedule(twice).split("k", 2)
+    assert str(caught.value) == (
+        "split() takes a loop handle such as twice.scale[0].k or twice.scale[1].k, "
+        "not the string 'k'"
+    )
+    fused = Schedule(twice).fuse(twice.flux.j, twice.scale[0].k, twice.scale[1].k)
+    with pytest.raises(TypeError) as caught:
+        fused.split("k", 2)
+    assert str(caught.value) == (
+        "split() takes a loop handle such as twice.flux.j, not the string 'k'"
+    )
 
 
 def test_a_handle_of_another_kernel_is_refused_with_the_path_to_write() -> None:
@@ -404,20 +491,37 @@ def test_tag_and_on_groups_and_on_items_are_one_step() -> None:
     tagged = split.tag({doubled.i.outer: "g.0", doubled.i.inner: "l.0"})
     by_words = split.on_groups(doubled.i.outer).on_items(doubled.i.inner)
     assert tagged.tags == by_words.tags == {"i_outer": "g.0", "i_inner": "l.0"}
+    # each is printed as it was written, as every step is
     assert by_words.history[-2:] == (
-        "tag(doubled.i.outer, 'g.0')",
-        "tag(doubled.i.inner, 'l.0')",
+        "on_groups(doubled.i.outer)",
+        "on_items(doubled.i.inner)",
     )
-    assert (
-        split.on_groups(doubled.i.outer, axis=1).history[-1]
-        == split.tag(doubled.i.outer, "g.1").history[-1]
-    )
+    second = split.on_groups(doubled.i.outer, axis=1)
+    assert second.tags == split.tag(doubled.i.outer, "g.1").tags
+    assert second.history[-1] == "on_groups(doubled.i.outer, axis=1)"
+    # and replayed as written
+    assert by_words.retarget("c").history == by_words.history
     with pytest.raises(ValueError, match="an axis is a whole number from 0"):
         split.on_items(doubled.i.inner, axis=-1)
     # each step's facts are at the line that asked for it, through on_groups too
     line = f"test_handles.py:{sys._getframe().f_lineno + 1}"
     grouped = split.on_groups(doubled.i.outer)
     assert {fact.where for fact in grouped.facts()[-2:]} == {line}
+
+
+def test_two_handles_of_one_fused_loop_take_one_tag() -> None:
+    # after the fusion the two handles are one loop, which a dict of tags
+    # cannot give two
+    fused = Schedule(burgers, target="opencl").fuse(
+        burgers.flux.j, burgers.divergence.i, shift=1
+    )
+    with pytest.raises(ValueError) as caught:
+        fused.tag({burgers.flux.j: "g.0", burgers.divergence.i: "l.0"})
+    assert str(caught.value) == (
+        "tag({burgers.flux.j: 'g.0', burgers.divergence.i: 'l.0'}): burgers.flux.j "
+        "and burgers.divergence.i are one loop, burgers.flux.j, which takes one "
+        "tag, not 'g.0' and 'l.0'"
+    )
 
 
 def test_a_condition_of_sizes_is_written_with_their_handles() -> None:
