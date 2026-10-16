@@ -240,4 +240,51 @@ def test_t4_against_lean(lean: Any) -> None:
     assert "something other than the statement Lean proved" in record["reason"]
 
 
+@pytest.mark.lean
+def test_with_mathlib_the_rewrites_restate_both_theorems_from_proved_text() -> None:
+    """The single layer in sumpy's arithmetic, as the design's 1.5 checks it.
+
+    ``conjugate_form`` is proved by lanky alone, and ``log_of_the_modulus`` by
+    its written proof, a chain citing two facts of ``lanky.known``, which is
+    checked after the kernels' facts were established: their parts restated
+    it by the printer then, and are asked of Lean again from the text its
+    command proved.
+    """
+    if importlib.util.find_spec("lanky.known") is None:
+        pytest.skip("this lanky has no library of known facts")
+    project = os.environ.get("LANKY_LEAN_MATHLIB")
+    if os.environ.get("LANKY_LEAN_DISABLE"):
+        _without_lean("the Lean oracle is disabled by LANKY_LEAN_DISABLE")
+    if not project:
+        if os.environ.get("LANKY_LEAN_MATHLIB_TEST_REQUIRED"):
+            pytest.fail(
+                "LANKY_LEAN_MATHLIB_TEST_REQUIRED is set, but no project is named"
+            )
+        pytest.skip("LANKY_LEAN_MATHLIB names no Lake project with Mathlib")
+    from lanky.check import check_path
+
+    ledger = check_path(ROOT / "examples" / "layer_potential.py")
+    by_owner = {fact.owner: fact for fact in ledger if fact.kind == "theorem"}
+    modulus = by_owner["log_of_the_modulus"]
+    assert modulus.status is Status.PROVED, modulus.provenance
+    assert modulus.provenance["proof"]["closed"] is True
+    assert {"log_of_a_power", "modulus_squared"} <= set(by_owner)
+    rewrites = [
+        fact
+        for fact in ledger
+        if fact.statement.startswith("rewrite(out, by=")
+        and fact.provenance.get("lean_parts")
+    ]
+    assert len(rewrites) == 3
+    for fact in rewrites:
+        assert fact.status is Status.PROVED, fact.statement
+        assert "lean_restated_by_printer" not in fact.provenance, fact.statement
+        notes = [
+            note for record in fact.provenance["lean_parts"] for note in record["cited"]
+        ]
+        assert notes and all(
+            "which its command proved" in note["restated"] for note in notes
+        )
+
+
 # }}}

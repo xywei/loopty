@@ -62,7 +62,25 @@ _MODULES: dict[str, Any] = {}
 
 
 def _path(name: str) -> Path:
+    _needs_this_lanky(name)
     return EXAMPLES / f"{name}.py"
+
+
+#: The demos that cite a fact of ``lanky.known``, which lanky has after 0.4.0.
+CITES_LANKY_KNOWN = frozenset({"layer_potential"})
+
+
+def _needs_this_lanky(name: str) -> None:
+    """Skip a demo that cites ``lanky.known`` where the lanky installed has none.
+
+    CI also tests loopty against the released lanky, which has no library of
+    known facts yet; ``layer_potential.py``'s proof of ``log_of_the_modulus``
+    cites two of them.
+    """
+    import importlib.util
+
+    if name in CITES_LANKY_KNOWN and importlib.util.find_spec("lanky.known") is None:
+        pytest.skip(f"{name}.py cites lanky.known, which this lanky does not have")
 
 
 def _invoke(name: str, verb: str) -> tuple[Any, list[dict]]:
