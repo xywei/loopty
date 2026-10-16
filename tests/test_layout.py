@@ -466,3 +466,34 @@ def test_the_statements_lean_is_given_without_lean() -> None:
     assert {piece.disjunct for piece in part.hints.witness} == {0, 1}
     (same,) = EXAMPLE.as_dim_tags.facts()
     assert [p.name for p in same.term.lean_obligation().parts] == ["same_0_0"]
+
+
+#: A module constant a layout branches on: no term of the cell as a symbol.
+WIDE = 3
+
+
+def test_two_layouts_at_a_number_are_stated_as_written() -> None:
+    # #275: Python folds N**3 * e to 27*e when N = 3, and dim_tags built the
+    # same sum from its strides, so Lean was asked 27 * e + ... = 27 * e + ...
+    # and the arithmetic was Python's. The body is run once more with N a
+    # symbol, and dim_tags' strides are the products of the extents inside.
+    from lanky.lean import statement_of
+
+    (piece,) = EXAMPLE.dof_array.pieces
+    assert str(piece.address) == "27*e + a + 3*b + 9*c"
+    assert str(piece.written) == "3**3*e + a + 3*b + 3**2*c"
+    (same,) = EXAMPLE.as_dim_tags.facts()
+    (part,) = same.term.lean_obligation().parts
+    assert statement_of(part.term, "as_dim_tags", mathlib=False).goal == (
+        "(3 : Int) ^ 3 * e + a + 3 * b + (3 : Int) ^ 2 * c = "
+        "((3 * 3) * 3) * e + a + 3 * b + (3 * 3) * c"
+    )
+    # isl still reads the address Python computed, and decides it
+    assert IslOracle().establish(same).status is Status.DECIDED
+    # a layout at every size, or with no constant, is written as it was read
+    assert all(p.written is None for p in layout(dof_array).pieces)
+
+    def branching(i: Fin[4]) -> Fin[4]:  # noqa: F821
+        return i if WIDE > 2 else 3 - i
+
+    assert layout(branching).pieces[0].written is None

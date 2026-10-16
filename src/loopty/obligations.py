@@ -2818,9 +2818,19 @@ def _piece_place(claim: Claim, piece: Any, tag: str = "") -> list[Any]:
     return coords
 
 
-def _address(piece: Any, coords: Sequence[Any]) -> Any:
-    """The address ``piece`` stores the cell ``coords`` at."""
-    return _renamed(plain(piece.address), piece.names, coords)
+def _address(piece: Any, coords: Sequence[Any], written: bool = False) -> Any:
+    """The address ``piece`` stores the cell ``coords`` at.
+
+    ``written``: as the layout's function writes it, where Python folded the
+    module constants it reads, ``3**3 * e`` for ``27*e``, and the strides of
+    loopy's dim_tags as the products of the extents nested inside, ``3 * 3 *
+    3`` (:attr:`loopty.layout.Piece.written`), so that Lean does the
+    arithmetic (#275).
+    """
+    address = piece.address
+    if written and getattr(piece, "written", None) is not None:
+        address = piece.written
+    return _renamed(plain(address), piece.names, coords)
 
 
 def _in_buffer(layout: Any, address: Any) -> Any:
@@ -3230,7 +3240,11 @@ def layout_same_obligation(first: Any, second: Any, verdict: Any) -> Any:
     cell of each is a cell of the other, a part per piece, when their pieces
     are not the same cells. A refuted one is stated with isl's cell when both
     have one piece. Where a size multiplies an index in either, the first
-    claim is a polynomial identity, which Lean multiplies out.
+    claim is a polynomial identity, which Lean multiplies out. Each address is
+    as the layout writes it, its module constants and dim_tags' strides not
+    folded, so that ``27 * e + a + 3 * b + 9 * c`` on both sides, which
+    Python computed, is ``3 ^ 3 * e + a + 3 * b + 3 ^ 2 * c = 3 * 3 * 3 * e
+    + a + 3 * b + 3 * 3 * c``, which Lean does (#275).
     """
     lanky = _lanky_obligations()
     parts = []
@@ -3243,7 +3257,9 @@ def layout_same_obligation(first: Any, second: Any, verdict: Any) -> Any:
                 cells = _described(other.cells, f"the cells of {other.label}")
                 claim.hypotheses.append(cells.predicate(coords))
                 goal = Comparison(
-                    _address(one, coords), "==", _address(other, coords)
+                    _address(one, coords, written=True),
+                    "==",
+                    _address(other, coords, written=True),
                 )
                 parts.append(
                     lanky.Part(

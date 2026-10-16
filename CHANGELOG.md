@@ -97,6 +97,18 @@ the ledger, the refusals and the fixes they suggest, and `loopty run`.
 - `examples/l2p.py` names its boxes `box` where it named them `i`, and its
   three calls fuse in one step, so `fused` has two cast facts where it had
   four.
+- **Two layouts at a number are stated for Lean as written (#275).** At a
+  module constant, `N = 3`, Python folds `N**3 * e + (a + N * b + N**2 *
+  c)` to `27*e + a + 3*b + 9*c` before loopty reads it, and `dim_tags`
+  built the same sum from its strides, so `--show-lean as_dim_tags` in
+  `examples/storage_layouts.py` read `27 * e + a + 3 * b + 9 * c = 27 * e +
+  a + 3 * b + 9 * c`: true, and the arithmetic Python's. A layout's body is
+  now run once more with each module constant it reads a symbol, and the
+  number put back unfolded, and `dim_tags` gives each stride as the product
+  of the extents nested inside it, so Lean is asked `3 ^ 3 * e + a + 3 * b
+  + 3 ^ 2 * c = ((3 * 3) * 3) * e + a + 3 * b + (3 * 3) * c`, and proves
+  it. isl reads the address Python computed, as before; a body that
+  branches on a constant keeps the folded address alone.
 - **The flagship's agreement with sumpy says how close it is (#278).**
   `sumpy_l2p` is `@upstream(l2p, within=1e-14)`, and its row reads `the
   native run of l2p agrees with sumpy_l2p in pot within 1e-14 of the largest
