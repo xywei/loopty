@@ -162,21 +162,25 @@ kept here ([benchmarks/README.md](https://github.com/xywei/loopty/blob/main/benc
 
 ## Run it
 
-The demos run on the 0.3.0 releases of loopty and lanky on PyPI. The
+The demos run on the 0.4.0 releases of loopty and lanky on PyPI. The
 examples are in the repository and not in the package, so clone the
 release's tag for them. On Python 3.12 or 3.13 with a C compiler:
 
 ```sh
 python3.13 -m venv .venv && . .venv/bin/activate
 pip install loopty "lanky[lean,cas]"
-git clone --branch v0.3.0 https://github.com/xywei/loopty.git && cd loopty
+git clone --branch v0.4.0 https://github.com/xywei/loopty.git && cd loopty
 python examples/l2p.py
 lanky check examples/l2p.py
 loopty run examples/l2p.py
 ```
 
 That much runs without Lean, and the ledger says what is missing, with the
-command for each piece. Lean comes from [elan](https://github.com/leanprover/elan#installation),
+command for each piece. The other demos run the same three ways, and
+[examples/README.md](https://github.com/xywei/loopty/blob/main/examples/README.md)
+has what each prints. Its commands start with `uv run`, which is for a
+checkout with lanky cloned beside it ([Install](#install)); in this clone,
+run them without it. Lean comes from [elan](https://github.com/leanprover/elan#installation),
 at the version the Lean REPL supports, and Mathlib, for the theorems about
 real numbers, is one command that fetches its compiled files:
 
@@ -517,10 +521,17 @@ table of row starts. Both compiled runs agree with the native one.
 
 ## Status
 
-This is 0.3.0. The core works: kernels and programs run natively, trace, state
+This is 0.4.0. The core works: kernels and programs run natively, trace, state
 their facts, lower and run compiled on the C target, and every schedule step
-is checked; the edges are sharp. New in 0.3.0 are the five demos at the top of
-this page, and Lean proves again each fact isl decides. Below is what works,
+is checked; the edges are sharp. New in 0.4.0, a schedule names what it moves
+by where the file defines it, `l2p.unpack.box`, and takes no string any more;
+a kernel body branches with Python's own `if` and `else`, and a loop nest is
+one line, `for box, a, b in R.dom:`; a statement is named by its text and
+line in the ledger and in every refusal; and the code a schedule generates
+computes a sum's operands that read none of its binders once, before the
+sum. The CHANGELOG has the migration from 0.3, step by step. The five demos
+at the top of this page came with 0.3.0, as did Lean's proof of each fact
+isl decides. Below is what works,
 what works in part and what does not work yet. After it, Known limits lists
 the open issues you are most likely to meet, each with what to do about it.
 None of them makes the ledger call a false fact `decided`, but in several the
@@ -1601,13 +1612,13 @@ The Partial and Not yet lists under Status have the rest, and the
 pip install loopty
 ```
 
-That is the 0.3.0 release, which has the five demos at the top of this page
-([Run it](#run-it)). loopty runs on Python 3.12 and 3.13: the islpy it is held
-to has no wheels for 3.14. CI, and every run this README reports, is on Linux.
-In a uv project, `uv add loopty`, and the same for the extra below. The
-install pulls in:
+That is the 0.4.0 release, whose spelling this page uses, with the five
+demos at the top of it ([Run it](#run-it)). loopty runs on Python 3.12 and
+3.13: the islpy it is held to has no wheels for 3.14. CI, and every run this
+README reports, is on Linux. In a uv project, `uv add loopty`, and the same
+for the extra below. The install pulls in:
 
-- [lanky](https://github.com/xywei/lanky) 0.3.0 or later, the proof host:
+- [lanky](https://github.com/xywei/lanky) 0.4.0 or later, the proof host:
   `lanky check` prints the ledger, and loopty plugs into it;
 - [loopy](https://github.com/inducer/loopy) 2025.2, which generates the code.
   loopty builds on loopy's internals, so a release of loopty is held to the
@@ -1653,6 +1664,12 @@ uv sync --group dev
 uv run pytest -q
 uv run ruff check .
 ```
+
+The `dev` group has lanky's `cas` extra, as "Run it" installs it, and not
+its `lean` extra, as CI runs, so the transcripts in the documentation are what
+a reader's install prints before Lean is set up. `uv run` needs the sibling
+checkout: in a clone with none beside it, it stops with `Distribution not
+found at: file:///.../lanky`.
 
 CI clones lanky's branch of the same name as the one under test when there is
 one, and lanky's `main` otherwise, so a change that needs both repositories is

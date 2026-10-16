@@ -94,6 +94,11 @@ dependencies = [
     { name = "pymbolic" },
 ]
 
+[package.optional-dependencies]
+cas = [
+    { name = "sympy" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "lean-interact", marker = "extra == 'lean'", specifier = ">=0.11.5" },
@@ -128,6 +133,7 @@ opencl = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "lanky", extra = ["cas"] },
     { name = "pytest" },
     { name = "ruff" },
 ]
@@ -145,6 +151,7 @@ provides-extras = ["opencl"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "lanky", extras = ["cas"], editable = "../lanky" },
     { name = "pytest" },
     { name = "ruff" },
 ]
@@ -244,6 +251,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/fb/df/5bd7a48c256faecd1d36edc13133e51397e41b73bb77e1a69deab746ebac/markupsafe-3.0.3-cp314-cp314t-win32.whl", hash = "sha256:915c04ba3851909ce68ccc2b8e2cd691618c4dc4c4232fb7982bca3f41fd8c3d", size = 14819, upload-time = "2025-09-27T18:37:26.285Z" },
     { url = "https://files.pythonhosted.org/packages/1a/8a/0402ba61a2f16038b48b39bccca271134be00c5c9f0f623208399333c448/markupsafe-3.0.3-cp314-cp314t-win_amd64.whl", hash = "sha256:4faffd047e07c38848ce017e8725090413cd80cbc23d86e55c587bf979e579c9", size = 15426, upload-time = "2025-09-27T18:37:27.316Z" },
     { url = "https://files.pythonhosted.org/packages/70/bc/6f1c2f612465f5fa89b95bead1f44dcb607670fd42891d8fdcd5d039f4f4/markupsafe-3.0.3-cp314-cp314t-win_arm64.whl", hash = "sha256:32001d6a8fc98c8cb5c947787c5d08b0a50663d139f1305bac5885d98d9b40fa", size = 14146, upload-time = "2025-09-27T18:37:28.327Z" },
+]
+
+[[package]]
+name = "mpmath"
+version = "1.3.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/e0/47/dd32fa426cc72114383ac549964eecb20ecfd886d1e5ccf5340b55b02f57/mpmath-1.3.0.tar.gz", hash = "sha256:7a28eb2a9774d00c7bc92411c19a89209d5da7c4c9a9e227be8330a23a25b91f", size = 508106, upload-time = "2023-03-07T16:47:11.061Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/43/e3/7d92a15f894aa0c9c4b49b8ee9ac9850d6e63b03c9c32c0367a13ae62209/mpmath-1.3.0-py3-none-any.whl", hash = "sha256:a0b2b9fe80bbcd81a6647ff13108738cfb482d481d826cc0e02f5b35e5c88d2c", size = 536198, upload-time = "2023-03-07T16:47:09.197Z" },
 ]
 
 [[package]]
@@ -524,6 +540,18 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/17/53/f42e35f1ebb29e5e897d249830dda2e68ae8606f01cf782b97a441a43d44/siphash24-1.9-cp315-cp315t-win32.whl", hash = "sha256:c6abddfe8c8be25beabfd07728d12fe73855d1596f6aefdf45832f52fba79e41", size = 71222, upload-time = "2026-09-08T21:20:26.657Z" },
     { url = "https://files.pythonhosted.org/packages/6f/5c/465772e1b1ab354a12c0ac37b4e47180f04ab9988f8a8d73d2fdca6dc3da/siphash24-1.9-cp315-cp315t-win_amd64.whl", hash = "sha256:214a91502316c64a3d1ddb36f4417df84fd2db23770a2b7181a689d52ca83145", size = 84538, upload-time = "2026-09-08T21:20:27.85Z" },
     { url = "https://files.pythonhosted.org/packages/1c/5b/0024289cd32acc8b3dc13b20875144146ac6b66d41dd0779b275134026ca/siphash24-1.9-cp315-cp315t-win_arm64.whl", hash = "sha256:75880c20aa0beef87a4648dd35f7d0b5756c6edce9e57e118dfe431bb49f7421", size = 72867, upload-time = "2026-09-08T21:20:29.043Z" },
+]
+
+[[package]]
+name = "sympy"
+version = "1.14.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "mpmath" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/83/d3/803453b36afefb7c2bb238361cd4ae6125a569b4db67cd9e79846ba2d68c/sympy-1.14.0.tar.gz", hash = "sha256:d3d3fe8df1e5a0b42f0e7bdf50541697dbe7d23746e894990c030e2b05e72517", size = 7793921, upload-time = "2025-04-27T18:05:01.611Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a2/09/77d55d46fd61b4a135c444fc97158ef34a095e5681d0a6c10b75bf356191/sympy-1.14.0-py3-none-any.whl", hash = "sha256:e091cc3e99d2141a0ba2847328f5479b05d94a6635cb96148ccb3f34671bd8f5", size = 6299353, upload-time = "2025-04-27T18:04:59.103Z" },
 ]
 
 [[package]]
