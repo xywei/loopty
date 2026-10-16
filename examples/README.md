@@ -2554,7 +2554,7 @@ Without Lean, the two theorems are `assumed` and the application is
 `decided` by `theorem`, worth what the theorem is. With Lean and Mathlib
 (`LANKY_LEAN_MATHLIB`, and lanky's `cas` extra, whose sympy finds the
 induction's steps), every row isl decided is `proved` by Lean, and so are
-both theorems and the application: `58 facts: 3 decided, 48 proved, 7
+both theorems and the application: `56 facts: 3 decided, 46 proved, 7
 tested`, the three left decided being the class of the Taylor sum, by type,
 and the two postconditions restated after their calls, by the call. That
 takes Lean about two minutes from an empty proof cache. `lanky check

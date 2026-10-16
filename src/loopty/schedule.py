@@ -7184,8 +7184,8 @@ class Schedule:
             facts.append(
                 self._fact(
                     "disjoint-writes",
-                    f"two updates of {array} that run at the same time after "
-                    f"{text} update distinct cells",
+                    f"two updates of {self._shown_array(array)} that run at the "
+                    f"same time after {text} update distinct cells",
                     status="refuted",
                     witness=witness,
                     detail=detail,
@@ -7603,7 +7603,7 @@ class Schedule:
             f"updates atomic, with atomic({draft.show_array(dep.array)}) before "
             f"this step{note}"
         )
-        detail = f"two updates of {dep.array} run at the same time"
+        detail = f"two updates of {draft.show_array(dep.array)} run at the same time"
         return message, witness, detail, oracle, dep.array
 
     def _real_pair(

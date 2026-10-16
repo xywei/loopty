@@ -96,12 +96,12 @@ schedule: Schedule(l2p, target='c').fuse(l2p.unpack.box, l2p.reconstruct.box, l2
 ```
 
 `lanky check examples/l2p.py`, on a machine with Lean and Mathlib, says
-how each claim is known and who settled it. Six of its 58 rows:
+how each claim is known and who settled it. Six of its 56 rows:
 
 ```text
 $ lanky check examples/l2p.py
 STATUS   EFFECTIVE  BY           WHERE       OWNER              STATEMENT
--------  ---------  -----------  ----------  -----------------  -------------------------------------------------------------------------------------------------
+-------  ---------  -----------  ----------  -----------------  ----------------------------------------------------------------------------------------------------
 proved   tested     lean         l2p.py:130  compressed_taylor  D : Fn[Nat, Nat, Real], R : Fn[Nat, Nat, Real]
                                                                 | pde: forall a in Nat, b in Nat. D[a + 2, b] + D[a, b + 2] == 0
                                                                 | stored: forall a in Nat, b in Nat where a < 2. R[a, b] == D[a, b]
@@ -113,15 +113,16 @@ proved   proved     lean         l2p.py:199  storage_index      storage_index st
 proved   tested     lean         l2p.py:249  reconstruct        by on_every_triangle, for every D with pde and stored:
                                                                   forall i in Fin(nb), a in Nat, b in Nat where a + b <= 10. R[i, a, b] == D[i, a, b]
 ...
-proved   proved     lean         l2p.py:341  l2p                no read of R sees its slot overwritten after contract('R', lambda i, a, b: (a, b)):
-                                                                  R kept in 121 cells, R[i, a, b] in slot (a, b)
+proved   proved     lean         l2p.py:340  l2p                no read of l2p.R sees its slot overwritten after contract(l2p.R, lambda box, a, b: (a, b)):
+                                                                  l2p.R kept in 121 cells, R[box, a, b] in slot (a, b)
 ...
-proved   proved     lean         l2p.py:348  l2p                the order after tag(i='g.0') runs every dependence of l2p forward, within one work item
-tested   tested     upstream     l2p.py:470  l2p                the native run of l2p agrees with sumpy_l2p in pot, on its example inputs
+proved   proved     lean         l2p.py:347  l2p                the order after tag(l2p.unpack.box, 'g.0') runs every dependence of l2p forward,
+                                                                  within one work item
+tested   tested     upstream     l2p.py:469  l2p                the native run of l2p agrees with sumpy_l2p in pot, on its example inputs
 
-58 facts: 3 decided, 48 proved, 7 tested
+56 facts: 3 decided, 46 proved, 7 tested
 
-LEAN proved all 46 facts isl decided. Lean's statements are loopty's, from its own description, not isl's results, and isl's hints were checked, not trusted. --show-lean prints the Lean.
+LEAN proved all 44 facts isl decided. Lean's statements are loopty's, from its own description, not isl's results, and isl's hints were checked, not trusted. --show-lean prints the Lean.
 ```
 
 `STATUS` is how a claim was settled, and `EFFECTIVE` what it is worth given
