@@ -479,7 +479,9 @@ class _Operands:
             try:
                 domain = as_isl(get_insn_domain(self.insn, self.entry))
                 assumptions = as_isl(self.entry.assumptions)
-                if not assumptions.is_universe():
+                # A set, where loopy 2025.2 kept a basic set: isl asks a
+                # set only whether it is plainly the universe.
+                if not assumptions.plain_is_universe():
                     domain, assumptions = isl.align_two(domain, assumptions)
                     domain = domain & assumptions
                 self._instances = (domain,)
