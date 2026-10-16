@@ -136,7 +136,12 @@ for box, a, b in R.dom:
   branches (write it as one statement, `x[i] = -1.0 if x[i] > 0 else
   1.0`); and a statement that a branch inside a closed loop decides, `a =
   1.0 if i == 0 else 2.0` in the loop and `y[0] = a` after it, which
-  natively is the last iteration's choice.
+  natively is the last iteration's choice. A call that two paths pass
+  different values, `j = i if flag[i] else i + 1` before `small(j)`, is
+  refused with the fix, a call on each branch, since its facts are about
+  one value of each argument; and a call made on paths that do not join
+  into one lists them among its `unnarrowed` conjuncts, its points being
+  wider than where it is made.
 - **One-line loop nests.** `for box, a, b in R.dom:` is the three loops `for
   box in R.dom`, `for a in R.dom[box]` and `for b in R.dom[box, a]`, natively
   and traced, with those binder names and their scoped handles
