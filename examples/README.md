@@ -95,15 +95,15 @@ schedule: Schedule(spmv, target='c').split(spmv.j, 2).realize(spmv.y, tree=True)
   decided  isl  realize(spmv.y, tree=True) renames the instances of spmv one for one
   decided  isl  the order after realize(spmv.y, tree=True) runs every dependence of spmv forward
   decided  isl  the accumulation into spmv.y is reassociated by realize(spmv.y, tree=True), so its result is compared at 'reassoc'
-device schedule: Schedule(spmv, target='c').tag(spmv.r, 'g.0').split(spmv.j, 32).tag(spmv.j.inner, 'l.0').realize(spmv.y, tree=True)
-  decided  isl  tag(spmv.r, 'g.0') renames the instances of spmv one for one
-  decided  isl  the order after tag(spmv.r, 'g.0') runs every dependence of spmv forward, within one work item
+device schedule: Schedule(spmv, target='c').on_groups(spmv.r).split(spmv.j, 32).on_items(spmv.j.inner).realize(spmv.y, tree=True)
+  decided  isl  on_groups(spmv.r) renames the instances of spmv one for one
+  decided  isl  the order after on_groups(spmv.r) runs every dependence of spmv forward, within one work item
   decided  isl  split(spmv.j, 32) renames the instances of spmv one for one
   decided  isl  the order after split(spmv.j, 32) runs every dependence of spmv forward, within one work item
-  decided  isl  tag(spmv.j.inner, 'l.0') renames the instances of spmv one for one
-  decided  isl  the order after tag(spmv.j.inner, 'l.0') runs every dependence of spmv forward, within one work item
-  refuted  loopy-target c code can be generated for spmv after tag(spmv.j.inner, 'l.0')
-  decided  isl  the accumulation into spmv.y is reassociated by tag(spmv.j.inner, 'l.0'), so its result is compared at 'reassoc'
+  decided  isl  on_items(spmv.j.inner) renames the instances of spmv one for one
+  decided  isl  the order after on_items(spmv.j.inner) runs every dependence of spmv forward, within one work item
+  refuted  loopy-target c code can be generated for spmv after on_items(spmv.j.inner)
+  decided  isl  the accumulation into spmv.y is reassociated by on_items(spmv.j.inner), so its result is compared at 'reassoc'
   decided  isl  realize(spmv.y, tree=True) renames the instances of spmv one for one
   decided  isl  the order after realize(spmv.y, tree=True) runs every dependence of spmv forward, within one work item
   reason: the parallel tag on spmv.j.inner sits inside a loop whose bound comes from an array (a ragged fiber), and loopy will not put a hardware axis in a domain with a data-dependent parameter. Parallelize an enclosing loop with a size known at launch instead, such as the rows of a CSR product
@@ -382,7 +382,7 @@ accepted: Schedule(acoustic, target='c').affine({ [t, i] -> [a = t + i, b = t - 
   pressure: difference 0 within 1e-06 (approx) -> tested
   velocity: difference 0 within 1e-06 (approx) -> tested
 
-Schedule(acoustic, target='c').affine({ [t, i] -> [a = t + i, b = t - i] }).tile(diamond.loops.a, diamond.loops.b, 4, 4) ->
+Schedule(acoustic, target='c').affine({ [t, i] -> [a = t + i, b = t - i] }).tile(acoustic.loops.a, acoustic.loops.b, 4, 4) ->
   IllegalCast: tile(acoustic.loops.a, acoustic.loops.b, 4, 4) illegal: velocity[t + 1, i] = ... (wavefront_acoustic.py:111) at t=7, i=15 writes velocity[8, 15], read by pressure[t + 1, i] = ... (wavefront_acoustic.py:114) at t=7, i=16, scheduled earlier (at nt=16, nx=32, as hinted)
 
 accepted: Schedule(acoustic, target='c').affine({ S0[t, i] -> [a = t + i, b = t - i]; S1[t, i] -> [a = t + i, b = 1 + t - i] }).tile(acoustic.loops.a, acoustic.loops.b, 4, 4)
@@ -2287,7 +2287,7 @@ accepted: Schedule(mass_action, target='c').assume(mass_action.nc >= 1).atomic(m
   decided  isl  tag({mass_action.c.outer: 'g.0', mass_action.c.inner: 'l.0'}) renames the instances of mass_action one for one
   decided  isl  the order after tag({mass_action.c.outer: 'g.0', mass_action.c.inner: 'l.0'}) runs every dependence of mass_action forward, within one work item
   decided  isl  atomic updates of mass_action.y run at the same time after tag({mass_action.c.outer: 'g.0', mass_action.c.inner: 'l.0'}), so their sum is reassociated and compared at 'reassoc'
-  buildable on c: False: tag(mass_action.c.outer, 'g.0'), tag(mass_action.c.inner, 'l.0') puts a loop on a hardware axis, and the C target has none
+  buildable on c: False: the loops mass_action.c.outer on g.0 and mass_action.c.inner on l.0 are on hardware axes, and the C target has none
 
 schedule: Schedule(mass_action, target='c').assume(mass_action.nc % 4 == 0).atomic(mass_action.y).split(mass_action.c, 4).tag(mass_action.c.inner, 'ilp')
   Ae: difference 0 within 1e-06 (approx) -> tested
@@ -2541,11 +2541,11 @@ schedule: Schedule(l2p, target='c').fuse(l2p.unpack.box, l2p.reconstruct.box, l2
   decided  isl  no read of l2p.C sees its slot overwritten after contract(l2p.C, lambda box, a, b: (a, b)): l2p.C kept in 22 cells, C[box, a, b] in slot (a, b)
   pot: difference 0 within 1.1e-06 (approx) -> tested
 
-on a device, each box a work group keeping its windows: tag(l2p.unpack.box, 'g.0'): 2 facts, all decided by isl
+on a device, each box a work group keeping its windows: on_groups(l2p.unpack.box): 2 facts, all decided by isl
 
-on a GPU, each box a work group, as sumpy's: Schedule(l2p, target='opencl').fuse(l2p.unpack.box, l2p.reconstruct.box, l2p.evaluate.box).tag(l2p.unpack.box, 'g.0')
-  decided  isl  tag(l2p.unpack.box, 'g.0') renames the instances of l2p one for one
-  decided  isl  the order after tag(l2p.unpack.box, 'g.0') runs every dependence of l2p forward, within one work item
+on a GPU, each box a work group, as sumpy's: Schedule(l2p, target='opencl').fuse(l2p.unpack.box, l2p.reconstruct.box, l2p.evaluate.box).on_groups(l2p.unpack.box)
+  decided  isl  on_groups(l2p.unpack.box) renames the instances of l2p one for one
+  decided  isl  the order after on_groups(l2p.unpack.box) runs every dependence of l2p forward, within one work item
 ```
 
 ### lanky check examples/l2p.py
@@ -2652,9 +2652,8 @@ decided                          decided    isl          l2p.py:340  l2p        
                                                                                           l2p.unpack has stored by the time it is read
 decided                          decided    isl          l2p.py:340  l2p                no read of l2p.C sees its slot overwritten after contract(l2p.C, lambda box, a, b: (a, b)):
                                                                                           l2p.C kept in 22 cells, C[box, a, b] in slot (a, b)
-decided                          decided    isl          l2p.py:347  l2p                tag(l2p.unpack.box, 'g.0') renames the instances of l2p one for one
-decided                          decided    isl          l2p.py:347  l2p                the order after tag(l2p.unpack.box, 'g.0') runs every dependence of l2p forward,
-                                                                                          within one work item
+decided                          decided    isl          l2p.py:347  l2p                on_groups(l2p.unpack.box) renames the instances of l2p one for one
+decided                          decided    isl          l2p.py:347  l2p                the order after on_groups(l2p.unpack.box) runs every dependence of l2p forward, within one work item
 tested                           tested     upstream     l2p.py:469  l2p                the native run of l2p agrees with sumpy_l2p in pot, on its example inputs
 
 56 facts: 2 assumed, 47 decided, 7 tested
@@ -2671,7 +2670,7 @@ l2p: Schedule(l2p, target='c').fuse(l2p.unpack.box, l2p.reconstruct.box, l2p.eva
   pot: difference 0 within 1.1e-06 (approx) -> tested
 l2p: Schedule(l2p, target='c').fuse(l2p.unpack.box, l2p.reconstruct.box, l2p.evaluate.box).contract(l2p.R, lambda box, a, b: (a, b)).contract(l2p.C, lambda box, a, b: (a, b))
   pot: difference 0 within 1.1e-06 (approx) -> tested
-l2p: Schedule(l2p, target='opencl').fuse(l2p.unpack.box, l2p.reconstruct.box, l2p.evaluate.box).tag(l2p.unpack.box, 'g.0')
+l2p: Schedule(l2p, target='opencl').fuse(l2p.unpack.box, l2p.reconstruct.box, l2p.evaluate.box).on_groups(l2p.unpack.box)
   not run here: running on a device needs pyopencl, which is not installed; its facts are checked all the same
 unpack: Schedule(unpack, target='c')
   C: difference 0 within 1e-06 (approx) -> tested
@@ -2695,9 +2694,8 @@ decided  isl    l2p.py:340  l2p          for contract(l2p.C), every cell of l2p.
 decided  isl    l2p.py:340  l2p          no read of l2p.C sees its slot overwritten after contract(l2p.C, lambda box, a, b: (a, b)):
                                            l2p.C kept in 22 cells, C[box, a, b] in slot (a, b)
 tested   loopy  l2p.py:340  l2p          the scheduled run of l2p agrees with the native run to the accuracy its types state
-decided  isl    l2p.py:347  l2p          tag(l2p.unpack.box, 'g.0') renames the instances of l2p one for one
-decided  isl    l2p.py:347  l2p          the order after tag(l2p.unpack.box, 'g.0') runs every dependence of l2p forward,
-                                           within one work item
+decided  isl    l2p.py:347  l2p          on_groups(l2p.unpack.box) renames the instances of l2p one for one
+decided  isl    l2p.py:347  l2p          the order after on_groups(l2p.unpack.box) runs every dependence of l2p forward, within one work item
 tested   loopy  l2p.py:222  unpack       the scheduled run of unpack agrees with the native run to the accuracy its types state
 tested   loopy  l2p.py:249  reconstruct  the scheduled run of reconstruct agrees with the native run to the accuracy its types state
 tested   loopy  l2p.py:288  evaluate     the scheduled run of evaluate agrees with the native run to the accuracy its types state
