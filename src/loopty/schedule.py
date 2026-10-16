@@ -9583,7 +9583,7 @@ def _first(own: Any, others: frozenset[Any]) -> frozenset[Any]:
     """The predicates ``own`` and ``others``, with ``own`` evaluated first.
 
     loopy joins an instruction's predicates with ``&&`` in no particular
-    order, and a ``when`` guard among them may read an array. At a point of
+    order, and a condition of an ``if`` among them may read an array. At a point of
     the shared loops that is another statement's, this instruction's inverse
     names a loop value it does not have, so each other predicate that could
     fault there, by reading an array, calling a function or dividing by
@@ -9647,7 +9647,7 @@ def _shared_image(
     otherwise, which only over-approximates. Each instruction whose image is
     less than that domain gets it back as a predicate, the gist of its image
     in the domain as loopy writes a condition, as the lowering cuts back a
-    statement a ``when`` narrows; a gist loopy cannot write is refused rather
+    statement an ``if`` narrows; a gist loopy cannot write is refused rather
     than dropped, since the instruction would then run at points it does not
     have.
 

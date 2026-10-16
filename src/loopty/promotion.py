@@ -49,7 +49,7 @@ alone, the index arithmetic loopy computes every loop bound in, 32 bits wide;
 a product of them is not, since ``i * i`` leaves 32 bits at ``i = 46341``,
 and nor is a sum whose literals total ``2**30`` or more (``i + 2**31 - 1``).
 The lowering widens an integer in a guard that reads no array as everywhere
-else, with no cast (``when(i * i < m)`` wrapped round at ``i = 46341``), and
+else, with no cast (``if i * i < m:`` wrapped round at ``i = 46341``), and
 in a subscript as everywhere else (``x[(i * i) % n]``, #129), unless loopy
 reads the subscript as affine with no division, which it then computes in
 its 32-bit index type whatever is written, and which wraps round to the cell

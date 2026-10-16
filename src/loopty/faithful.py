@@ -30,7 +30,7 @@ The fact, of kind ``trace-faithful``, is
 * ``refuted`` at the first input that disagrees, with the input and the first
   differing cell, or with the error the term raised where the body ran, or
   with the :class:`~loopty.trace.TraceError` a native run of the body raised
-  (a ``when`` guard whose native value is an integer, say), which refuses the
+  (an integer stored into an array of truth values, say), which refuses the
   body's spelling on every input, whether or not the term ran,
 * ``assumed``, with the reason, when no input ran natively or when the term
   holds something the interpreter has no meaning for.

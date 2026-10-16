@@ -1005,7 +1005,7 @@ def _made_in(value: Any) -> ProgramValue | None:
 _CALLEE = "@"
 
 #: Why a guard conjunct that reads an array leaves a domain as it is, in the
-#: words :mod:`loopty.trace` uses for a ``when`` of the body.
+#: words :mod:`loopty.trace` uses for an ``if`` of the body.
 _NOT_AFFINE = "reads an array or is not affine"
 
 

@@ -267,7 +267,7 @@ def _assemble(
 
     Not every parameter qualifies. A guard brings its own names into a domain,
     and a signed scalar is a perfectly ordinary thing to guard on:
-    ``with when(a < 0)`` with ``a : Int`` would make the domain empty if ``a``
+    ``if a < 0:`` with ``a : Int`` would make the domain empty if ``a``
     were assumed non-negative here, and an empty domain discharges every
     obligation over it vacuously. Which is why the caller says which names are
     sizes rather than this function assuming all of them are.
@@ -295,7 +295,7 @@ def size_names(term: Term) -> frozenset[str]:
     point of ``Fin[nnz + 1]`` for every such size.
 
     A scalar the kernel takes as a parameter is not one of those. ``a : Int`` is
-    signed, and a guard ``with when(a < 0)`` puts it among the parameters of a
+    signed, and a guard ``if a < 0:`` puts it among the parameters of a
     statement's domain; assuming it non-negative would make that domain empty
     and turn every obligation over it into a vacuous truth. Scalar parameters
     are therefore excluded by name, whatever a derived object's parameter list

@@ -912,7 +912,7 @@ def stated_writers(term: Term, writers: Sequence[Stmt]) -> list[Stmt]:
     """Writers whose domain is where they store: none under a guard isl cannot state.
 
     A guard conjunct isl cannot state (:attr:`loopty.term.Stmt.unnarrowed`,
-    ``with when(x[i] > 0)``) leaves a statement's domain wider than the
+    ``if x[i] > 0:``) leaves a statement's domain wider than the
     instances that store, so an instance of it in its domain is no witness
     that a cell was stored. Such a writer counts for nothing towards a cell
     being written, as :func:`loopty.flow.definedness` counts it. The flag of

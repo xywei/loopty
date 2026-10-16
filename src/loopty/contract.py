@@ -760,7 +760,7 @@ def native_storage(sort: Any) -> np.dtype | None:
     * ``Bool`` and ``bool`` are ``bool``. The compiled temporary is a byte,
       which holds a truth value as a bool does; natively ``~``, ``&`` and
       ``|`` are logical only on a bool (bitwise on an integer, refused on a
-      float), and ``when`` refuses an integer that is not one;
+      float), and storing an integer into a bool array is refused;
     * an integral sort, ``Fin[m]``, ``Nat``, ``Int`` or ``int``, is ``int64``.
       The compiled one is 64 bits wide for ``Nat`` and ``Int``, and only
       ``int64`` holds what is written into it (:func:`holds_natively`). It
@@ -1040,9 +1040,9 @@ def native_scalar(sort: Any, value: Any) -> Any:
     breaks no promise about where writes land, and the native run and the
     interpreter compute with it in :func:`native_storage`'s dtype, as the
     compiled run does. A truth value is a numpy bool, Python's ``True``
-    included: ``~`` on a Python bool is the integer ``-2``, which ``when``
-    refuses and a bool array stores as ``True``, where the compiled run
-    computes ``!flag``.
+    included: ``~`` on a Python bool is the integer ``-2``, which Python's
+    ``if`` takes as true and a bool array stores as ``True``, where the
+    compiled run computes ``!flag``.
 
     Every number is converted, a Python one included, into a numpy scalar of
     exactly that dtype, so a scalar has one native meaning however the caller

@@ -382,7 +382,7 @@ class InProcessCTarget(_ReadDeclining, lp.ExecutableCTarget):
 
     loopy hoists a condition shared by every instruction of a kernel as far out
     as the iname it names allows, and one that names no iname, such as a
-    ``when(flag)`` or ``when(a > 0.5)`` guarding the whole body, goes out of the
+    ``if flag:`` or ``if a > 0.5:`` around the whole body, goes out of the
     device function into the host code around its call. ``lp.ExecutableCTarget``
     generates that host code and never runs it: its executor calls the device
     function directly. So the guard was gone and the body ran unconditionally
@@ -771,10 +771,10 @@ class ExpressionLowerer(Mapper):
         alone, and loopy reads such a predicate as an isl set
         (``loopy.symbolic.condition_to_set``) for its bounds check, whose
         evaluator raised on a cast instead of declining it:
-        ``when(i ** 0.5 > 1.5)`` failed there. It declines one now
+        ``if i ** 0.5 > 1.5:`` failed there. It declines one now
         (:mod:`loopty.isl_reading`), but an integer is still widened without
         one, by a product with a 64-bit ``1``, so that loopy reads an affine
-        guard and narrows its bounds check by it: ``when(i * i < m)`` is
+        guard and narrows its bounds check by it: ``if i * i < m:`` is
         ``1l * i * i < m``, which wrapped round at ``i = 46341`` when its
         integers were left in 32 bits, and ``100000l * i < m`` is read. An
         operand numpy computes in double is multiplied by ``1.0``, which C
@@ -2602,7 +2602,7 @@ class _Builder:
 
         See :func:`_without_loops_ignored`; the loops are those of statement
         ``stmt_id``, over its domain, the points its instruction runs at: an
-        affine ``when`` narrows the domain, and the rest of a guard is the
+        affine ``if`` narrows the domain, and the rest of a guard is the
         instruction's predicate. The names a domain may name besides them are
         the ones a call fixes, its sizes and its scalars, and the binders of
         the statement's sums.
@@ -3347,7 +3347,7 @@ def _loops_before_fiber(loops: isl.Set, param: str) -> int:
     in ``for j in val.dom[r]: for k in val.dom[r]:`` the loop over ``k``
     reads the length once per ``j``, and only counting the loop over ``j``
     missed a rewrite inside it (#111). A guard can make that loop's bound
-    follow from another's, ``when(k == j)``, which isl then leaves out of the
+    follow from another's, ``if k == j:``, which isl then leaves out of the
     narrowed domain, and the body still reads it. When ``param`` bounds none
     of the loops, all of them count.
     """

@@ -3040,20 +3040,18 @@ def _outside_changes(outside: _Outside, tracer: Tracer) -> list[_Change]:
     """What the trace changed of the state :func:`_outside` copied.
 
     Values are compared as the loop snapshot compares them
-    (:func:`_same_value`, never ``==``). Two things are left alone, as they are
-    across a loop iteration: a name now bound to a :class:`when`, and a name now
-    bound to a loop's own variable, which is what a ``for`` whose target is a
-    global stores there; anything that reads it is refused as an escaped loop
-    variable. So is an attribute a :class:`functools.cached_property` stored
-    the first time the body read it: the property computes it from the object,
-    once, whoever asks first, and a native call reads the same value. A
-    container whose name was rebound is reported as that rebinding.
+    (:func:`_same_value`, never ``==``). One thing is left alone, as it is
+    across a loop iteration: a name now bound to a loop's own variable, which
+    is what a ``for`` whose target is a global stores there; anything that
+    reads it is refused as an escaped loop variable. So is an attribute a
+    :class:`functools.cached_property` stored the first time the body read
+    it: the property computes it from the object, once, whoever asks first,
+    and a native call reads the same value. A container whose name was
+    rebound is reported as that rebinding.
     """
     loops = tracer._inames
 
     def exempt(after: Any) -> bool:
-        if isinstance(after, when):
-            return True
         return isinstance(after, prim.Variable) and after.name in loops
 
     out: list[_Change] = []
@@ -3348,7 +3346,7 @@ def constraints_of(
     """Render a guard as isl constraints, dropping what isl cannot express.
 
     A guard narrows the statement's domain, which is what makes
-    ``with when(i + 1 < n): u[i + 1] = ...`` provably in bounds. A guard that is
+    ``if i + 1 < n: u[i + 1] = ...`` provably in bounds. A guard that is
     not quasi-affine (a data-dependent test) is dropped, which widens the domain
     and can only make an obligation harder, never falsely discharge one.
 
@@ -4467,8 +4465,8 @@ def _truth_valued(value: Any, params: Mapping[str, Any]) -> bool:
     ``and``, ``or`` and ``not`` in the trace, and natively they are logical
     on a bool and bitwise on an integer, so ``k[i] & 1`` of an integer ``k``
     is not a truth value in the native run, whatever the trace records. An
-    integer is not one either, ``0`` and ``1`` included, as it is not one for
-    :class:`when`; the native run refuses to store one (:class:`_MaskedArr`).
+    integer is not one either, ``0`` and ``1`` included; the native run
+    refuses to store one into an array of truth values (:class:`_MaskedArr`).
     """
     from lanky.terms import PropositionMixin
 
