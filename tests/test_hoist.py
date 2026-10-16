@@ -132,6 +132,17 @@ def spread(
 
 
 @kernel
+def lanes(
+    a: Arr[Fin[8], Fin[8], Real],
+    x: Arr[Fin[8], Real],
+    y: Arr[Fin[8], Real],
+):
+    """Row sums scaled by a value of the row, a few rows to a work item."""
+    for i in y.dom:
+        y[i] = reduce_sum(a[i, j] * (x[i] * 2.0) for j in a.dom[i])
+
+
+@kernel
 def nested(
     a: Arr[Fin[m], Real],  # noqa: F821
     b: Arr[Fin[q], Real],  # noqa: F821
@@ -277,6 +288,30 @@ def test_an_operand_on_a_device_is_each_work_items_own(plain_opencl) -> None:
     assert "double invariant_0;" in kernel_code
     assert "invariant_0 = (t[gid(0)] + -1.0 * centre) / scale;" in kernel_code
     assert "loopy_pow_float64_int32(invariant_0, k)" in kernel_code
+
+
+def test_an_operand_in_an_ilp_loop_is_each_lanes_own() -> None:
+    # loopy gives a temporary written in an ilp loop one copy per iteration,
+    # as it does the sum's accumulator, so each lane reads its own row's.
+    schedule = Schedule(lanes).split(lanes.i, 4).tag(lanes.i.inner, "ilp")
+    assert schedule.buildable == (True, "")
+    code = body(emit_code(schedule), "lanes")
+    assert "double invariant_0[4];" in code
+    for lane in range(4):
+        offset = f"{lane} + " if lane else ""
+        assert f"invariant_0[{lane}] = x[{offset}4 * i_outer] * 2.0;" in code
+        assert f"* invariant_0[{lane}];" in code
+    rng = np.random.default_rng(3)
+    arrays = {
+        "a": rng.standard_normal((8, 8)),
+        "x": rng.standard_normal(8),
+        "y": np.zeros(8),
+    }
+    with declining():
+        _event, (before,) = schedule._code.executor()(**arrays)
+        _event, (after,) = schedule.kernel.executor()(**arrays)
+    assert np.array_equal(after, before)
+    agrees(lanes, schedule, arrays)
 
 
 def test_the_l2p_demo_computes_x_and_y_once_per_target() -> None:
