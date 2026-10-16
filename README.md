@@ -913,6 +913,22 @@ interface can change in a minor release; the CHANGELOG says when one does.
 - `Schedule.assume(k.n % 4 == 0)`, loopy's `assume`, checked: loopy is told,
   every later cast is decided and stated where the condition holds and rests
   on an `assumption` fact, and a call whose sizes break it is refused.
+- Math steps: `Schedule(k).rewrite(k.out, by=theorem)` computes what `out`
+  stores by an identity, the theorem's left side as its right side, before
+  any loop is moved. The kernel's body stays the math as written and the
+  reference; the schedule compiles the rewritten term. Each step is a row,
+  exact over the reals or the complex numbers where the theorem's
+  conditions hold (proved by Lean with Mathlib, tested on drawn inputs
+  without it); each condition is a row, decided by isl on indices and
+  tested on the example inputs for data; and the compiled run is compared
+  with the native one, with a note where inputs of extreme magnitude leave
+  the float range the rewrite keeps. `keep=("r_pass", "s_pass")` stores the
+  sums a theorem's right side nests in arrays of their own, one nest each,
+  whose handles are the schedule's (`factored.r_pass.c`), proved to leave
+  the kernel's statement as a program's postcondition is; `into=passes`
+  compiles a program the file has instead. `examples/layer_potential.py`
+  computes the single layer as sumpy does, and `examples/hexahedra.py`
+  derives grudge's passes from the dense weak gradient.
 - `Schedule`: `tag`, `split`, `interchange`, `prioritize`, `tile`, `skew`,
   `affine`, `fuse`, each checked as a cast, each emitting its fact; `realize`
   and `atomic`, which move no instance and record what they make of a sum;

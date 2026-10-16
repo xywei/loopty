@@ -812,7 +812,7 @@ def test_one_launch_of_the_hexahedra_passes_is_refused_for_its_reads(plain_openc
     # pass along r reads a row the metric stored on other work items. That is
     # the refusal now, where the zeros of w on every work item used to be.
     hexahedra = example("hexahedra")
-    grad = hexahedra.weak_grad
+    grad = hexahedra.passes
     calls = (grad.metric, grad.along_r, grad.along_s, grad.gradient_along_t)
     nodes = {"e": "g.0", "k": "l.2", "j": "l.1", "i": "l.0"}
     every = {
@@ -825,7 +825,7 @@ def test_one_launch_of_the_hexahedra_passes_is_refused_for_its_reads(plain_openc
     assert " writes w[" in message
     assert f" read by v[q, e, k, j, i] = reduce_sum(...) ({along_r}) at q=" in message
     assert (
-        "the loops weak_grad.metric.i and weak_grad.along_r.i on l.0 run them on "
+        "the loops passes.metric.i and passes.along_r.i on l.0 run them on "
         "work items"
     ) in message
     assert "zeros" not in message

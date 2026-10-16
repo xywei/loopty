@@ -177,6 +177,7 @@ KERNELS = {
         "gradient_along_t",
         "divergence_along_t",
         "weak_grad",
+        "passes",
         "weak_div",
         "metric_along_r",
         "contravariant_along_r",
@@ -1053,9 +1054,11 @@ def test_the_hexahedra_demo_decides_its_layouts_and_its_programs() -> None:
         ("as_row_major", "layout-same", "tested"),
     ]
     # every intermediate a program makes is read where its producer stored it
+    # (and the dense kernel's w, and the arrays its schedule keeps)
     defined = [fact for fact in facts if fact["kind"] == "definedness"]
     assert {fact["owner"] for fact in defined} == {
         "weak_grad",
+        "passes",
         "weak_div",
         "metric_along_r",
         "contravariant_along_r",
@@ -1066,13 +1069,13 @@ def test_the_hexahedra_demo_decides_its_layouts_and_its_programs() -> None:
     posts = {
         fact["owner"]: fact for fact in facts if fact["kind"] == "postcondition"
     }
-    assert set(posts) == {"weak_grad", "weak_div"}
+    assert set(posts) == {"passes", "weak_div"}
     for post in posts.values():
         assert (post["status"], post["decided_by"]) in (
             ("tested", "native"),
             ("proved", "lean"),
         ), post
-    assert posts["weak_grad"]["statement"].startswith(
+    assert posts["passes"]["statement"].startswith(
         "forall x in Fin(3), e in Fin(ne), k in Fin(n), j in Fin(n), i in Fin(n). "
         "grad[x, e, k, j, i] == sum(Ft[3*x + d, k, c]*Fs[3*x + d, j, b]"
     )
@@ -1080,10 +1083,10 @@ def test_the_hexahedra_demo_decides_its_layouts_and_its_programs() -> None:
     stored = [
         (fact["owner"], fact["statement"].split(" stores")[0])
         for fact in facts
-        if fact["kind"] == "single-assignment"
+        if fact["kind"] == "single-assignment" and fact["owner"] != "weak_grad"
     ]
     assert stored == [
-        ("weak_grad", call)
+        ("passes", call)
         for call in ("metric", "along_r", "along_s", "gradient_along_t")
     ] + [
         ("weak_div", call)
@@ -1201,23 +1204,64 @@ def test_the_hexahedra_demo_refuses_the_deeper_fusion_and_keeps_the_windows() ->
     result, _ = _invoke("hexahedra", "python")
     assert result.returncode == 0, result.stdout + result.stderr
     out = result.stdout
-    assert "the passes are the dense Kronecker operators: True" in out
+    assert (
+        "the dense kernel and the passes are the dense Kronecker operators: True"
+    ) in out
     # each pass's statement by its text and line, at the names its loops have
     module = _module("hexahedra")
     along_r = where(module.along_r, "v[q, e, k, j, i] = reduce_sum(")
     along_s = where(module.along_s, "vs[q, e, k, j, i] = reduce_sum(")
     assert (
-        "refused: fuse(weak_grad.along_r.i, weak_grad.along_s.i) illegal: "
+        "refused: fuse(passes.along_r.i, passes.along_s.i) illegal: "
         f"v[q, e, k, j, i] = reduce_sum(...) ({along_r}) at q="
     ) in out
     assert f"read by vs[q, e, k, j, i] = reduce_sum(...) ({along_s}) at q=" in out
     assert (
-        "fuse(weak_grad.along_r.k, weak_grad.along_s.k) runs every dependence" in out
+        "fuse(passes.along_r.k, passes.along_s.k) runs every dependence" in out
     )
     assert "w kept in n cells" in out
     assert "v kept in n*n cells" in out
     assert "grad: difference" in out and "-> tested" in out
     assert out.count("all decided by isl") == 3
+
+
+def test_the_hexahedra_demo_derives_the_passes_from_the_dense_kernel() -> None:
+    """``factored``, ``fused`` and ``contracted``: design 1.4, the passes from the math.
+
+    The rewrite by ``sum_factorization`` keeps the pass along r and the pass
+    along s, folded over the three directions into one nest each; the row
+    says what the passes leave in ``grad``, the kept arrays' facts are
+    decided, and the compiled schedule agrees with the native dense kernel.
+    """
+    module = _module("hexahedra")
+    (rewritten,) = module.factored.rewrites
+    assert [(kept.name, kept.spelled) for kept in rewritten.kept] == [
+        ("r_pass", ("x", "d", "e", "c", "b", "i")),
+        ("s_pass", ("x", "d", "e", "c", "j", "i")),
+    ]
+    facts = module.factored.facts()
+    (row,) = [fact for fact in facts if fact.kind == "rewrite"]
+    assert row.statement == (
+        "rewrite(grad, by=sum_factorization, keep=(r_pass, s_pass)): over the "
+        "reals, the passes leave in grad what weak_grad's statement says, unfolded "
+        "through r_pass and s_pass; sum_factorization at Fr := Fr[d], Fs := Fs[d], "
+        "Ft := Ft[d], u := w[x, d, e], for d = 0, 1 and 2"
+    )
+    assert row.status.value in ("tested", "proved"), row.provenance
+    assert not row.term.lean_obligation().declined
+    kept = [fact for fact in facts if fact.id.split(":")[-3:-2] == ["kept"]]
+    assert kept and {fact.status.value for fact in kept} == {"decided"}
+    (compared,) = [fact for fact in facts if fact.kind == "rewrite-compared"]
+    assert compared.status.value == "tested"
+    assert compared.statement.startswith(
+        "the compiled factored agrees with the native weak_grad in grad at approx"
+    )
+    assert repr(module.contracted) == (
+        "Schedule(weak_grad, target='c').rewrite(weak_grad.grad, "
+        "by=sum_factorization, keep=('r_pass', 's_pass'))"
+        ".fuse(weak_grad.r_pass.c, weak_grad.s_pass.c)"
+        ".contract(weak_grad.r_pass, lambda x, d, e, c, b, i: (b, i))"
+    )
 
 
 def test_the_hexahedra_launches_are_legal_and_build_on_opencl(plain_opencl) -> None:
@@ -1891,17 +1935,10 @@ def test_the_line_taylor_theorem_is_in_the_qbx_ledger_and_not_refuted() -> None:
 def test_the_qbx_ledger_says_single_layer_adds_line_taylors_terms() -> None:
     """The theorem and the kernel in one row: its terms are line_taylor's a(n) (#252).
 
-    The kernel's ratio is by the conjugate, and ``by_the_conjugate`` says it
-    is the theorem's ``-beta / alpha``: a theorem of its own, tested by the
-    property tester and, with Mathlib, proved.
+    The kernel says the math as written, ``coefficient(-beta / alpha, k)``, so
+    the theorem applies to it directly, with no identity between them.
     """
     _result, facts = _invoke("layer_potential", "check")
-    (identity,) = [
-        fact
-        for fact in facts
-        if fact["owner"] == "by_the_conjugate" and fact["kind"] == "theorem"
-    ]
-    assert identity["status"] in ("tested", "proved"), identity
     (row,) = [fact for fact in facts if fact["kind"] == "by-theorem"]
     assert row["owner"] == "single_layer"
     assert row["statement"] == (
@@ -1913,11 +1950,9 @@ def test_the_qbx_ledger_says_single_layer_adds_line_taylors_terms() -> None:
     provenance = row["provenance"]
     assert provenance["bindings"] == "alpha = c[t] - y[s], beta = z[t] - c[t]"
     assert provenance["orders"] == [1, 2, 3, 4, 5]
+    assert provenance["identities"] == []
     module = _module("layer_potential")
-    assert set(row["rests_on"]) >= {
-        module.line_taylor.fact_id,
-        module.by_the_conjugate.fact_id,
-    }
+    assert module.line_taylor.fact_id in row["rests_on"]
     # where the statement is that adds them
     line = int(row["where"].rsplit(":", 1)[1])
     source = _path("layer_potential").read_text(encoding="utf-8").splitlines()
@@ -1925,10 +1960,46 @@ def test_the_qbx_ledger_says_single_layer_adds_line_taylors_terms() -> None:
     assert "single(c[t] - y[s], z[t] - c[t])" in source[line]
 
 
-def test_the_kernels_ratio_is_the_theorems() -> None:
-    # The kernels add coefficient(ratio, k) with the ratio multiplied out by
-    # the conjugate; the theorem's is -beta / alpha. They agree to rounding,
-    # and the series is log|alpha + beta| to the order's truncation.
+def test_the_qbx_ledger_has_sumpys_arithmetic_as_math_steps() -> None:
+    """``as_sumpy_computes``: the conjugate form and the log of the modulus, each a row.
+
+    Each step is exact over the complex numbers wherever ``c[t] - y[s] != 0``
+    (proved by Lean with Mathlib, tested on drawn inputs without it), the
+    condition is tested on the example inputs, the class is approx, and the
+    compiled run agrees with the native one on the example inputs, with a
+    note where the float range moved.
+    """
+    _result, facts = _invoke("layer_potential", "check")
+    single = [fact for fact in facts if fact["owner"] == "single_layer"]
+    steps = [fact for fact in single if fact["kind"] == "rewrite"]
+    assert [fact["statement"] for fact in steps] == [
+        "rewrite(out, by=conjugate_form): over the complex numbers, what out "
+        "stores is unchanged wherever c[t] - y[s] != 0: -(z[t] - c[t]) / (c[t] - "
+        "y[s]) becomes its conjugate form, in 5 places",
+        "rewrite(out, by=log_of_the_modulus): over the complex numbers, what out "
+        "stores is unchanged wherever c[t] - y[s] != 0: log(abs(c[t] - y[s])) "
+        "becomes log(real((c[t] - y[s])*conj(c[t] - y[s]))) / 2, in 1 place",
+    ]
+    for fact in steps:
+        assert fact["status"] in ("tested", "proved"), fact
+    (condition,) = [fact for fact in single if fact["kind"] == "rewrite-condition"]
+    assert condition["statement"] == (
+        "c[t] - y[s] != 0 for every t and every s, which conjugate_form and "
+        "log_of_the_modulus need, on the example inputs"
+    )
+    assert (condition["status"], condition["decided_by"]) == ("tested", "run")
+    compared = [fact for fact in single if fact["kind"] == "rewrite-compared"]
+    assert compared and all(fact["status"] == "tested" for fact in compared)
+    assert compared[0]["statement"].startswith(
+        "the compiled as_sumpy_computes agrees with the native single_layer in out "
+        "at approx"
+    )
+    assert "note: with the inputs scaled by 1e-170" in compared[0]["statement"]
+
+
+def test_the_kernels_series_is_the_theorems() -> None:
+    # The kernels add coefficient(-beta / alpha, k), the theorem's own closed
+    # form, and the series is log|alpha + beta| to the order's truncation.
     module = _module("layer_potential")
     rng = np.random.default_rng(5)
     for alpha, beta in zip(
@@ -1936,8 +2007,6 @@ def test_the_kernels_ratio_is_the_theorems() -> None:
         0.3 * (rng.normal(size=20) + 1j * rng.normal(size=20)),
         strict=True,
     ):
-        ratio = module.ratio(alpha, beta)
-        assert abs(ratio - (-beta / alpha)) <= 1e-15 * abs(beta / alpha) * 4
         closed = sum(
             module.coefficient(-beta / alpha, k) for k in range(1, module.ORDER + 1)
         )
@@ -1951,7 +2020,11 @@ def test_the_kernels_ratio_is_the_theorems() -> None:
 def test_sumpys_tile_is_legal_and_c_cannot_build_its_axes() -> None:
     module = _module("layer_potential")
     tile = module.sumpy_tile("c")
-    casts = [fact for fact in tile.facts() if fact.kind != "buildable"]
+    casts = [
+        fact
+        for fact in tile.facts()
+        if fact.kind != "buildable" and not fact.id.startswith("math:")
+    ]
     assert len(casts) == 8
     assert all(fact.status.value == "decided" for fact in casts)
     buildable, reason = tile.buildable
@@ -1996,6 +2069,10 @@ def test_the_qbx_demo_prints_the_tile_the_fact_and_the_rows() -> None:
     assert (
         "  single_layer adds line_taylor's a(n) for n in 1..5, for every a with "
         "nonzero, first_term and ode, read over the complex numbers -> decided"
+    ) in out.splitlines()
+    assert (
+        "as sumpy computes it: rewrite(single_layer.out, by=(conjugate_form, "
+        "log_of_the_modulus))"
     ) in out.splitlines()
     for name in ("green_identity", "jump_S", "jump_D"):
         (line,) = [line for line in out.splitlines() if line.strip().startswith(name)]

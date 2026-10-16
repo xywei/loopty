@@ -925,7 +925,7 @@ class Term:
 #: What to write instead of a builtin type name, by that name.
 _SORT_HINTS = {
     "float": "Real (from lanky.prelude) or a numpy type such as np.float64",
-    "complex": "a numpy type such as np.complex128",
+    "complex": "Complex (from lanky.prelude) or a numpy type such as np.complex128",
     "int": (
         "Nat or Int (from lanky.prelude), Fin[n] for an index, or a numpy "
         "type such as np.int64"
