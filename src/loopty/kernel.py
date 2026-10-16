@@ -36,7 +36,6 @@ from __future__ import annotations
 import functools
 import os
 import sys
-from types import FunctionType, MethodType, ModuleType
 from typing import Any
 
 import numpy as np
@@ -71,10 +70,6 @@ from loopty.trace import (
     result_name,
     returned_sort,
     trace,
-    when,
-)
-from loopty.trace import (
-    _writes_are_masked as writes_are_masked,
 )
 
 __all__ = [
@@ -83,7 +78,6 @@ __all__ = [
     "Program",
     "ensure_registered",
     "kernel",
-    "opens_a_guard",
     "program",
     "schedule_facts",
 ]
@@ -198,122 +192,6 @@ class _Decorated:
         return evaluated
 
 
-def _code_objects(code: Any) -> list[Any]:
-    """``code`` and every code object nested in it.
-
-    A ``with when(...)`` inside a comprehension, a nested ``def`` or a lambda
-    lives in its own code object, and the outer one mentions only the constant
-    that holds it. Guard detection has to look at all of them.
-    """
-    out = [code]
-    seen = {id(code)}
-    index = 0
-    while index < len(out):
-        for const in out[index].co_consts:
-            if isinstance(const, type(code)) and id(const) not in seen:
-                seen.add(id(const))
-                out.append(const)
-        index += 1
-    return out
-
-
-#: How many levels of helper call :func:`opens_a_guard` follows before it gives
-#: up. Deep enough for the helpers a kernel body actually calls, and finite
-#: because the walk is over a graph that may well have a cycle.
-_GUARD_SEARCH_DEPTH = 8
-
-
-def _reachable_functions(fn: Any, names: set[str]) -> list[Any]:
-    """Functions the body could be calling: its globals and its closure cells.
-
-    Only plain functions and bound methods are followed. An arbitrary callable
-    is not: reading attributes off one can run a property, and this is a
-    question about what the body says rather than an invitation to execute part
-    of it.
-    """
-    out: list[Any] = []
-    globals_ = getattr(fn, "__globals__", None) or {}
-    for name in names:
-        value = globals_.get(name)
-        if isinstance(value, FunctionType | MethodType):
-            out.append(value)
-    for cell in getattr(fn, "__closure__", None) or ():
-        try:
-            value = cell.cell_contents
-        except ValueError:  # pragma: no cover - a cell not yet filled in
-            continue
-        if isinstance(value, FunctionType | MethodType):
-            out.append(value)
-    return out
-
-
-def opens_a_guard(fn: Any) -> bool:
-    """Does ``fn``, or a helper it calls, open a :class:`loopty.trace.when` block?
-
-    Reported rather than relied on. The native run wraps its arrays in the
-    masking views unconditionally (see :meth:`Kernel.__call__`), so an answer of
-    ``False`` here no longer means a body's writes go unmasked; this says
-    whether the guard is visible from the source, which is what a reader and a
-    diagnostic want to know.
-
-    It used to be asked as ``"when" in fn.__code__.co_names``, which is a
-    question about spelling rather than about the object. ``from loopty import
-    when as guard`` and ``loopty.when(...)`` both open a guard and neither
-    mentions the bare name in the frame that uses it. So the guard object is
-    looked for *by identity*: in the constants, the globals and the closure of
-    every code object of the body, and as an attribute of any module those
-    reach. The old name test is kept as well, because a body that gets hold of
-    ``when`` in a way no static walk can follow still says ``when`` somewhere.
-
-    The search follows function-valued globals and closure cells, to
-    :data:`_GUARD_SEARCH_DEPTH` levels, because a body that calls a helper which
-    opens the guard opens it too. Bounded and cycle-safe, since two mutually
-    recursive helpers are an ordinary thing to write. Plain functions and bound
-    methods only; anything else reached through a name is left alone.
-    """
-    pending = [(fn, 0)]
-    seen: set[int] = set()
-    while pending:
-        current, depth = pending.pop()
-        code = getattr(current, "__code__", None)
-        if code is None or id(current) in seen:
-            continue
-        seen.add(id(current))
-        names: set[str] = set()
-        for nested in _code_objects(code):
-            names |= set(nested.co_names)
-            for const in nested.co_consts:
-                if const is when:
-                    return True
-        if "when" in names:
-            return True
-        globals_ = getattr(current, "__globals__", None) or {}
-        for name in names:
-            if globals_.get(name) is when:
-                return True
-        for cell in getattr(current, "__closure__", None) or ():
-            try:
-                if cell.cell_contents is when:
-                    return True
-            except ValueError:  # pragma: no cover - a cell not yet filled in
-                continue
-        # ``loopty.when(...)`` reaches the guard through a module. Attributes
-        # are read off modules only: asking an arbitrary object for an
-        # attribute can run a property, and this is a question about the body,
-        # not an invitation to execute part of it.
-        for name in names:
-            value = globals_.get(name)
-            if isinstance(value, ModuleType) and any(
-                getattr(value, attribute, None) is when for attribute in names
-            ):
-                return True
-        if depth < _GUARD_SEARCH_DEPTH:
-            pending.extend(
-                (helper, depth + 1) for helper in _reachable_functions(current, names)
-            )
-    return False
-
-
 class Kernel(_Decorated):
     """A decorated kernel: callable natively, traceable, registered.
 
@@ -331,10 +209,6 @@ class Kernel(_Decorated):
         #: hypotheses where its postcondition is decided, and applied to it
         #: (:mod:`loopty.dataflow`).
         self.uses = _theorems(uses, self.qualname)
-        #: Whether a ``when`` block is visible from the body, following the
-        #: helpers it calls. Reported, not relied on: :meth:`__call__` masks
-        #: every run. See :func:`opens_a_guard`.
-        self.guards_writes = opens_a_guard(fn)
         _warn_shadowed(self)
 
     # {{{ running
@@ -380,17 +254,11 @@ class Kernel(_Decorated):
         native run is a call, so it makes the same promise the compiled run
         does rather than a weaker one.
 
-        Every array argument is then wrapped in the masking view of
+        Every array argument is then wrapped in the native view of
         :func:`loopty.trace.mask_writes`, which shares the caller's buffer, so
-        the writes still land where the caller is looking. Two things follow
-        from doing it unconditionally.
-
-        *A write under a false ``when`` is dropped, whoever opened the block.*
-        It used to be wrapped only when the guard was visible in the body's own
-        code, so a body calling a helper that opens ``with when(cond):``
-        performed the guarded write and ``python file.py`` computed something
-        the lowered kernel does not. No inspection of the body can decide that
-        question in general; wrapping always removes it.
+        the writes still land where the caller is looking. The body's ``if``
+        statements run as Python runs them, so a branch not taken computes
+        nothing, as the compiled kernel computes nothing under a false guard.
 
         *A bare ``ndarray`` has a ``.dom``.* Sizes come from the arrays, so a
         body asks its arguments for their domains, and an ndarray has none; the
@@ -456,13 +324,6 @@ class Kernel(_Decorated):
         call is the value it returns, in the caller's names; see
         :mod:`loopty.calls`.
 
-        *Inside a ``when`` block whose guard is false, nothing runs.* A kernel
-        called there natively writes nothing that is kept, and a rule's value
-        is used by nothing that is, so the call is skipped, its contract
-        included, as the compiled kernel skips the instances the guard masks:
-        ``0`` stands for a rule's value. A call the guard keeps in bounds,
-        ``dot(A[i + 1], x)`` under ``when(i + 1 < n)``, is not refused there.
-
         *A rule fills a result array when it is given one.* Called natively
         it returns its value; given its term's result array by name too
         (:attr:`loopty.term.Term.result`), as a run that compares the compiled
@@ -476,8 +337,6 @@ class Kernel(_Decorated):
             from loopty.calls import inline
 
             return inline(self, tracer, args, kwargs, sys._getframe(1))
-        if writes_are_masked():
-            return 0 if self.returns is not None else None
         filled = None
         if self.returns is not None:
             name = result_name(self.arg_types)
@@ -690,7 +549,7 @@ class Kernel(_Decorated):
         return out
 
     def _prepare(self, value: Any) -> Any:
-        """One argument, as the body needs to see it: a masking view of it."""
+        """One argument, as the body needs to see it: the native view of it."""
         if isinstance(value, np.ndarray) and not isinstance(value, Arr):
             value = Arr(value)
         return mask_writes(value)
@@ -838,37 +697,67 @@ class Kernel(_Decorated):
         the same kind after the others, the terms it adds read as the
         theorem's, with the identities the kernel cites to read them so
         (:mod:`loopty.summands`).
+
+        A theorem that gives nothing, one no fact of the kernel rests on, has
+        a row too, ``assumed``, that says why
+        (:func:`loopty.dataflow.unapplied_facts`): before, it was not in the
+        ledger at all, and a recurrence off by one looked the same as a
+        theorem never cited (#234). So does one whose matching raised, with
+        the exception.
         """
         from lanky.ledger import Status
 
-        from loopty.dataflow import application_facts
+        from loopty.dataflow import application_facts, unapplied_facts
         from loopty.summands import series_facts
 
         if not self.uses:
             return facts
+        key = {"module": self.module, "line": self.line}
+        raised: dict[int, str] = {}
         try:
-            series = series_facts(
-                term, self.uses, self.qualname, module=self.module, line=self.line
-            )
-        except Exception:  # noqa: BLE001 - a theorem that does not apply gives nothing
+            series = series_facts(term, self.uses, self.qualname, **key)
+        except Exception as exc:  # noqa: BLE001 - said in the theorems' rows
             series = []
+            for theorem in self.uses:
+                raised[id(theorem)] = (
+                    f"reading the terms {term.name} adds raised "
+                    f"{type(exc).__name__}: {exc}"
+                )
         at = next(
             (k for k, fact in enumerate(facts) if fact.kind == "postcondition"), None
         )
-        if at is None or facts[at].status is Status.REFUTED:
-            return [*facts, *series]
-        try:
-            applied = application_facts(
-                term,
-                self.uses,
-                facts[at],
-                self.qualname,
-                module=self.module,
-                line=self.line,
-            )
-        except Exception:  # noqa: BLE001 - a theorem that does not apply gives nothing
-            applied = []
-        return [*facts[: at + 1], *applied, *facts[at + 1 :], *series]
+        post = None if at is None else facts[at]
+        applied: list[Fact] = []
+        if post is not None and post.status is not Status.REFUTED:
+            for theorem in self.uses:
+                try:
+                    applied.extend(
+                        application_facts(term, [theorem], post, self.qualname, **key)
+                    )
+                except Exception as exc:  # noqa: BLE001 - said in its row
+                    raised[id(theorem)] = (
+                        f"applying it raised {type(exc).__name__}: {exc}"
+                    )
+        given = {
+            entry for fact in (*facts, *applied, *series) for entry in fact.rests_on
+        }
+        nothing = [
+            theorem
+            for theorem in self.uses
+            if getattr(theorem, "fact_id", None) not in given
+        ]
+        rows = unapplied_facts(
+            term,
+            nothing,
+            post,
+            self.qualname,
+            raised=raised,
+            where=self.where,
+            **key,
+        )
+        if at is None:
+            return [*facts, *series, *rows]
+        return [*facts[: at + 1], *applied, *rows, *facts[at + 1 :], *series]
 
     def _decided(self, term: Term, facts: list[Fact]) -> list[Fact]:
         """``facts`` with the postcondition decided from the term, where it can be.

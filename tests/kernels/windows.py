@@ -37,7 +37,7 @@ from __future__ import annotations
 
 from lanky.prelude import Real
 
-from loopty import Arr, Fin, Schedule, Where, kernel, program, reduce_sum, when
+from loopty import Arr, Fin, Schedule, Where, kernel, program, reduce_sum
 
 
 @kernel
@@ -51,7 +51,7 @@ def flux(u: Arr[Fin[n], Real], f: Arr[Fin[n], Real]):
 def divergence(f: Arr[Fin[n], Real], rhs: Arr[Fin[n], Real]):
     """The centred divergence of the flux, at the interior points."""
     for i in rhs.dom:
-        with when((i > 0) & (i + 1 < rhs.dom.size)):
+        if (i > 0) & (i + 1 < rhs.dom.size):
             rhs[i] = -(f[i + 1] - f[i - 1]) / 2
 
 
@@ -76,9 +76,9 @@ def divergence_and_lag(
 ):
     """The divergence, and a second statement that reads two cells back."""
     for i in rhs.dom:
-        with when((i > 0) & (i + 1 < rhs.dom.size)):
+        if (i > 0) & (i + 1 < rhs.dom.size):
             rhs[i] = -(f[i + 1] - f[i - 1]) / 2
-        with when(i >= 2):
+        if i >= 2:
             z[i] = f[i - 2] + 0.25 * f[i]
 
 
@@ -95,7 +95,7 @@ def row_divergence(f: Arr[Fin[m], Fin[n], Real], rhs: Arr[Fin[m], Fin[n], Real])
     """The divergence of every row, at its interior points."""
     for e in rhs.dom:
         for i in rhs.dom[e]:
-            with when((i > 0) & (i + 1 < rhs.dom[e].size)):
+            if (i > 0) & (i + 1 < rhs.dom[e].size):
                 rhs[e, i] = -(f[e, i + 1] - f[e, i - 1]) / 2
 
 
@@ -105,7 +105,7 @@ def assembled_divergence(
 ):
     """The divergence at the interior points, added into the node each names."""
     for i in f.dom:
-        with when((i > 0) & (i + 1 < f.dom.size)):
+        if (i > 0) & (i + 1 < f.dom.size):
             y[node[i]] += -(f[i + 1] - f[i - 1]) / 2
 
 
@@ -259,9 +259,9 @@ def triangle(
     for i in R.dom:
         for a in R.dom[i]:
             for b in R.dom[i, a]:
-                with when(a < 2):
+                if a < 2:
                     R[i, a, b] = c[i, a, b]
-                with when(a >= 2):
+                if a >= 2:
                     R[i, a, b] = -R[i, a - 2, b + 2]
 
 
@@ -311,9 +311,9 @@ def rejected_row() -> str:
 def running(u: Arr[Fin[n], Real], f: Arr[Fin[n], Real]):  # noqa: F821
     """The running sum of u: its first cell, then each the one before plus u."""
     for j in f.dom:
-        with when(j == 0):
+        if j == 0:
             f[j] = u[j]
-        with when(j >= 1):
+        if j >= 1:
             f[j] = f[j - 1] + u[j]
 
 
@@ -321,7 +321,7 @@ def running(u: Arr[Fin[n], Real], f: Arr[Fin[n], Real]):  # noqa: F821
 def differences(f: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
     """Each cell of f less the one before it."""
     for k in y.dom:
-        with when(k >= 1):
+        if k >= 1:
             y[k] = f[k] - f[k - 1]
 
 

@@ -347,7 +347,9 @@ def test_a_kernels_postcondition_is_tested_against_its_native_runs() -> None:
     assert post.status is Status.DECIDED
     assert post.decided_by == "isl"
     (stmt,) = travel.number.term.stmts
-    assert post.provenance["used"] == [f"what S0 stores in perm at {stmt.where}"]
+    assert post.provenance["used"] == [
+        f"what {stmt.text} ({stmt.where}) stores in perm"
+    ]
 
 
 def test_a_false_postcondition_is_refuted_by_a_native_run() -> None:
@@ -661,7 +663,9 @@ def test_a_flat_access_is_in_bounds_where_the_scan_was_called() -> None:
     assert alone.status is Status.ASSUMED
     # After the scan, off[r] + j < off[r] + cnt[r] == off[r + 1] <= nnz.
     (scoped,) = facts_of("flat", "in-bounds")
-    assert scoped.statement.startswith("val[off[r_0] + j] is in bounds")
+    # spelled as the source spells it, though the program calls the loop r_0
+    assert scoped.statement.startswith("val[off[r] + j] is in bounds")
+    assert "r_0" not in scoped.statement
     assert scoped.status is Status.DECIDED
     used = scoped.provenance["used"]
     assert any(source.startswith("the postcondition of scan_csr") for source in used)

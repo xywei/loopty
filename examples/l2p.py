@@ -68,8 +68,8 @@ contiguous runs of targets, as boxtree's do, so ``box_target_starts`` is the
 scan of the counts. sumpy reconstructs the triangle symbolically, inside the
 straight-line code it generates for each target, and its Taylor sum is
 sympy's; here both are loops. ``sumpy_l2p`` is sumpy's own kernel on this
-file's inputs: the potentials agree to round-off (``benchmarks/l2p.py``
-recorded them, at the commit below, on loopy main).
+file's inputs: the potentials agree within ``1e-14`` of the largest one
+(``benchmarks/l2p.py`` recorded them, at the commit below, on loopy main).
 
 The code it mirrors, at sumpy 13a48a0:
 
@@ -107,7 +107,6 @@ from loopty import (
     reduce_sum,
     table,
     upstream,
-    when,
 )
 from loopty.math import ipow
 
@@ -237,13 +236,11 @@ def unpack(
     The postcondition is sumpy's storage order, ``2 (a + b) - 1 + a`` after
     the value at the centre, decided from what the body stores.
     """
-    for box in C.dom:
-        for a in C.dom[box]:
-            for b in C.dom[box, a]:
-                with when(a + b == 0):
-                    C[box, a, b] = coeffs[box, centre(a, b)]
-                with when(a + b >= 1):
-                    C[box, a, b] = coeffs[box, derivatives((a, b))]
+    for box, a, b in C.dom:
+        if a + b == 0:
+            C[box, a, b] = coeffs[box, centre(a, b)]
+        else:
+            C[box, a, b] = coeffs[box, derivatives((a, b))]
 
 
 @kernel(uses=[on_every_triangle])
@@ -269,13 +266,11 @@ def reconstruct(
     ``G_xx = -G_yy``: a coefficient with two more ``x``'s is minus the one
     with two more ``y``'s, which an earlier row of the triangle stored.
     """
-    for box in R.dom:
-        for a in R.dom[box]:
-            for b in R.dom[box, a]:
-                with when(a < 2):
-                    R[box, a, b] = C[box, a, b]
-                with when(a >= 2):
-                    R[box, a, b] = -R[box, a - 2, b + 2]
+    for box, a, b in R.dom:
+        if a < 2:
+            R[box, a, b] = C[box, a, b]
+        else:
+            R[box, a, b] = -R[box, a - 2, b + 2]
 
 
 #: What sumpy stores for every box, as a table: ``a < 2`` and ``a + b <= P``.
@@ -302,15 +297,14 @@ def evaluate(
     an integer power, in both runs; ``x**a`` would be the C library's ``pow``
     in both, as numpy computes it.
     """
-    for box in pot.dom:
-        for target in pot.dom[box]:
-            x = (tx[box, target] - cx[box]) / rscale
-            y = (ty[box, target] - cy[box]) / rscale
-            pot[box, target] = SCALING * reduce_sum(
-                R[box, a, b] * ipow(x, a) * ipow(y, b) * INV_FACT[a] * INV_FACT[b]
-                for a in R.dom[box]
-                for b in R.dom[box, a]
-            )
+    for box, target in pot.dom:
+        x = (tx[box, target] - cx[box]) / rscale
+        y = (ty[box, target] - cy[box]) / rscale
+        pot[box, target] = SCALING * reduce_sum(
+            R[box, a, b] * ipow(x, a) * ipow(y, b) * INV_FACT[a] * INV_FACT[b]
+            for a in R.dom[box]
+            for b in R.dom[box, a]
+        )
 
 
 @program
@@ -341,8 +335,9 @@ contracted = fused.contract(l2p.R).contract(l2p.C)
 
 #: sumpy's own schedule on a GPU, ``E2PFromSingleBox.get_optimized_kernel``:
 #: each box a work group (its ``itgt_box`` on ``g.0``), whose one work item
-#: runs the box's coefficients, triangle and targets in turn. The cells of C
-#: and R the program makes are zeroed by the work item that stores them.
+#: runs the box's coefficients, triangle and targets in turn. No read sees
+#: the zeros the program makes C and R with, so it runs without them, and
+#: the box's loop is the one loop on an axis.
 #: Checked anywhere; ``loopty run`` runs it where pyopencl and a device are.
 on_a_gpu = fused.retarget("opencl").on_groups(l2p.unpack.box)
 
@@ -466,7 +461,7 @@ def example_inputs() -> dict:
 RECORDED = Path(__file__).with_name("l2p_sumpy.json")
 
 
-@upstream(l2p)
+@upstream(l2p, within=1e-14)
 def sumpy_l2p(coeffs, cx, cy, cnt, tx, ty, pot, rscale):
     """sumpy's own E2PFromSingleBox at 13a48a0, run on these inputs and recorded."""
     recorded = json.loads(RECORDED.read_text())

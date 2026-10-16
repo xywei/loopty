@@ -227,7 +227,7 @@ def test_run_on_a_decorated_kernel_file(tmp_path, capsys) -> None:
 
 
 def test_target_retargets_every_schedule_rather_than_ignoring_the_flag(
-    tmp_path, capsys
+    tmp_path, capsys, without_pyopencl
 ) -> None:
     """``--target opencl`` must not quietly run a C-pinned schedule on C.
 
@@ -236,7 +236,8 @@ def test_target_retargets_every_schedule_rather_than_ignoring_the_flag(
     so the ledger claimed a device run that never happened. Now the schedule is
     rebuilt for the target, which re-checks every cast; on a machine with no
     pyopencl that rebuild fails, and the failure is reported by name and turns
-    into a non-zero exit code.
+    into a non-zero exit code. pyopencl is hidden, so that the machine has
+    none whatever is installed (#179).
     """
     path = write_fixture(tmp_path)
     code = main(["run", str(path), "--target", "opencl"])
@@ -329,6 +330,29 @@ def test_a_files_device_schedule_is_checked_where_pyopencl_is_not_installed(
     # --target opencl keeps it, and says the same
     assert main(["run", str(path), "--target", "opencl"]) == 0
     assert "not run here" in capsys.readouterr().out
+
+
+def test_emit_code_prints_a_device_schedules_code_where_pyopencl_is_not_installed(
+    tmp_path, capsys, monkeypatch
+) -> None:
+    """``--emit-code`` prints the OpenCL C of a file's device schedule anywhere (#291).
+
+    The code needs neither pyopencl nor a device; the run does, and is left
+    to a machine with both, as without the flag.
+    """
+    from loopty import lower
+
+    monkeypatch.setattr(lower, "pyopencl_installed", lambda: False)
+    path = write_fixture(tmp_path, DEVICE)
+    code = main(["run", str(path), "--emit-code"])
+    out = capsys.readouterr().out
+    assert code == 0, out
+    header = "scale: Schedule(scale, target='opencl').tag(scale.i, 'g.0')\n"
+    assert header in out
+    printed = out[out.index(header) + len(header) : out.index("  not run here: ")]
+    assert "__kernel void" in printed, out
+    assert "y[gid(0)] = 2.0 * x[gid(0)];" in printed, out
+    assert "difference" not in out
 
 
 def test_without_target_a_schedule_keeps_the_one_it_was_written_for(
@@ -437,7 +461,9 @@ def test_check_prints_the_witness_of_an_isl_refutation_under_its_line(
     out = capsys.readouterr().out
     assert code == 1
     lines, header = refutation_block(out, "shift at ")
-    assert lines[header].endswith("u[i + 1] is in bounds for every instance of S0")
+    assert lines[header].endswith(
+        "u[i + 1] is in bounds for every instance of v[i] = u[i + 1] (fixture.py:14)"
+    )
     facts = json.loads(out_path.read_text(encoding="utf-8"))
     refuted = {fact["owner"]: fact for fact in facts if fact["status"] == "refuted"}
     assert [f["owner"] for f in facts if f["status"] == "refuted"] == [
@@ -451,9 +477,14 @@ def test_check_prints_the_witness_of_an_isl_refutation_under_its_line(
     assert f"  {reason}" in lines[header + 1 : header + 3]
 
     lines, header = refutation_block(out, "collide at ")
-    assert lines[header].endswith("distinct instances of S0 write distinct cells of y")
+    written = "y[0] = x[i] (fixture.py:20)"
+    assert lines[header].endswith(
+        f"distinct instances of {written} write distinct cells of y"
+    )
     reason = refuted["collide"]["provenance"]["reason"]
-    assert " is one of the pairs of S0 instances writing the same cell" in reason
+    assert f" is one of the pairs of instances of {written} writing the same cell" in (
+        reason
+    )
     assert reason.startswith("[s=0, d0=")
     assert f"  {reason}" in lines[header + 1 : header + 3]
 
@@ -1034,7 +1065,7 @@ from __future__ import annotations
 import numpy as np
 from lanky.prelude import Nat, Real
 
-from loopty import Arr, Fin, Schedule, kernel, reduce_sum, when
+from loopty import Arr, Fin, Schedule, kernel, reduce_sum
 
 
 @kernel
@@ -1045,7 +1076,7 @@ def clear_next(
 ):
     for r in y.dom:
         y[r] = reduce_sum(val[r, j] for j in val.dom[r])
-        with when(r + 1 < y.dom.size):
+        if r + 1 < y.dom.size:
             cnt[r + 1] = 0
 
 
@@ -1136,7 +1167,10 @@ def test_run_lists_the_layout_fact_a_cast_rests_on(tmp_path, capsys) -> None:
     assert monotone["effective"] == "decided"
     assert [fact["kind"] for fact in facts.values()].count("layout") == 1
     out = capsys.readouterr().out
-    assert "stay inside their buffers and apart while S1 write cnt" in out
+    assert (
+        "stay inside their buffers and apart while cnt[r + 1] = 0 (fixture.py:19) "
+        "writes cnt"
+    ) in out
 
 
 MOVES_ROWS = (
@@ -1148,7 +1182,7 @@ MOVES_ROWS = (
         "    val:",
     )
     .replace(
-        "        with when(r + 1 < y.dom.size):\n            cnt[r + 1] = 0\n",
+        "        if r + 1 < y.dom.size:\n            cnt[r + 1] = 0\n",
         "        off[r] = s[r]\n",
     )
     .replace(
@@ -1241,25 +1275,27 @@ def test_run_reports_an_example_inputs_that_raises(tmp_path, capsys) -> None:
 
 
 FLIPPED = '''
-"""A guard that is an integer natively: ~ on a Python bool is bitwise."""
+"""A truth value that is an integer natively: ~ on a Python bool is bitwise."""
 
 from __future__ import annotations
 
 import numpy as np
-from lanky.prelude import Real
+from lanky.prelude import Bool, Real
 
-from loopty import Arr, Fin, kernel, when
+from loopty import Arr, Fin, kernel
 
 
 @kernel
-def flipped(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):
+def flipped(x: Arr[Fin[n], Real], y: Arr[Fin[n], Bool]):
     for i in y.dom:
-        with when(~(i > 0)):
-            y[i] = x[i]
+        y[i] = (x[i] > 0.0) | ~(i > 0)
 
 
 def example_inputs():
-    return {"x": Arr.from_numpy(np.arange(4.0)), "y": Arr.zeros(4)}
+    return {
+        "x": Arr.from_numpy(np.arange(4.0)),
+        "y": Arr.zeros(4, dtype=np.bool_),
+    }
 '''
 
 
@@ -1302,20 +1338,20 @@ from __future__ import annotations
 
 from lanky.prelude import Real
 
-from loopty import Arr, Fin, kernel, when
+from loopty import Arr, Fin, kernel
 
 
 @kernel
 def clipped(a: Real, x: Arr[Fin[m], Real], y: Arr[Fin[n], Real]):
     for i in y.dom:
-        with when((i < a) & (a < x.dom.size)):
+        if (i < a) & (a < x.dom.size):
             y[i] = x[i]
 
 
 @kernel
 def stated(u: Arr[Fin[n], Real], v: Arr[Fin[n], Real]):
     for i in u.dom:
-        with when(i + 1 <= u.dom.size):
+        if i + 1 <= u.dom.size:
             v[i] = u[i + 1]
 '''
 
@@ -1336,7 +1372,9 @@ def test_check_says_a_witness_may_be_one_the_guard_masks(tmp_path, capsys) -> No
     out = capsys.readouterr().out
     assert code == 1
     lines, header = refutation_block(out, "clipped at ")
-    assert lines[header].endswith("x[i] is in bounds for every instance of S0")
+    assert lines[header].endswith(
+        "x[i] is in bounds for every instance of y[i] = x[i] (fixture.py:15)"
+    )
     block = lines[header + 1 : header + 6]
     assert block[0].startswith("  witness: ")
     assert block[1].startswith("  cells x[i] reaches are cells x has, except")
@@ -1349,7 +1387,9 @@ def test_check_says_a_witness_may_be_one_the_guard_masks(tmp_path, capsys) -> No
     assert block[4].startswith("    a < m, which compares with the scalar a")
 
     lines, header = refutation_block(out, "stated at ")
-    assert lines[header].endswith("u[i + 1] is in bounds for every instance of S0")
+    assert lines[header].endswith(
+        "u[i + 1] is in bounds for every instance of v[i] = u[i + 1] (fixture.py:22)"
+    )
     assert lines[header + 2].startswith("  cells u[i + 1] reaches are cells u has")
     assert "the domain is wider" not in "\n".join(lines[header:])
 

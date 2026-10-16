@@ -20,7 +20,8 @@ import pytest
 from lanky.prelude import Nat, Real
 from lanky.terms import evaluate_annotations
 
-from loopty import Arr, Fin, reduce_sum, when
+from lines import named
+from loopty import Arr, Fin, reduce_sum
 from loopty.faithful import KIND, SAMPLES, sample_arguments
 from loopty.handles import scope
 from loopty.interpret import interpret
@@ -49,7 +50,7 @@ def row_sums_then_next_count(
     """Sum row ``r``, then clear the length of row ``r + 1``."""
     for r in y.dom:
         y[r] = reduce_sum(val[r, j] for j in val.dom[r])
-        with when(r + 1 < y.dom.size):
+        if r + 1 < y.dom.size:
             cnt[r + 1] = 0
 
 
@@ -301,7 +302,7 @@ def sums_then_next_count_in_a_loop_of_the_row(
     for r in y.dom:
         for i in x.dom:
             y[r] = y[r] + x[i] + reduce_sum(val[r, j] for j in val.dom[r])
-            with when(r + 1 < y.dom.size):
+            if r + 1 < y.dom.size:
                 cnt[r + 1] = 0
 
 
@@ -351,12 +352,15 @@ def test_a_length_rewritten_in_a_loop_of_its_row_is_not_lowered(
     Kernel(fn)(**arguments)
     assert arguments["y"].numpy().tolist() == native
     assert arguments["cnt"].numpy().tolist() == [1, 1, 1]
+    term = term_of(fn)
     with pytest.raises(LoweringError) as caught:
-        lower_generic(term_of(fn))
+        lower_generic(term)
     message = str(caught.value)
-    assert message.startswith(f"statement {user} is bounded by the row length ")
+    assert message.startswith(
+        f"the statement {named(term, user)} is bounded by the row length "
+    )
     assert "once per row, before the loop over i" in message
-    assert f"{writer} rewrites that row's cnt inside that loop" in message
+    assert f"{named(term, writer)} rewrites that row's cnt inside that loop" in message
 
 
 def test_the_next_row_s_length_rewritten_in_a_loop_of_the_row_is_lowered() -> None:
@@ -562,7 +566,7 @@ def diagonal_recounted(
     for r in y.dom:
         for j in val.dom[r]:
             for k in val.dom[r]:
-                with when(k == j):
+                if k == j:
                     y[r] = y[r] + val[r, k]
             cnt[r] = 1
 
@@ -576,7 +580,7 @@ def lower_triangle_recounted(
     for r in y.dom:
         for j in val.dom[r]:
             for k in val.dom[r]:
-                with when(k <= j):
+                if k <= j:
                     y[r] = y[r] + val[r, k]
             cnt[r] = 1
 
@@ -591,7 +595,7 @@ def next_entry_recounted(
         for j in val.dom[r]:
             cnt[r] = 3
             for k in val.dom[r]:
-                with when(k == j + 1):
+                if k == j + 1:
                     y[r] = y[r] + val[r, k]
 
 
@@ -668,12 +672,15 @@ def test_a_length_rewritten_around_an_inner_loop_it_bounds_is_not_lowered(fn) ->
     pytest.importorskip("loopy")
     from loopty.lower import LoweringError, lower_generic
 
+    term = term_of(fn)
     with pytest.raises(LoweringError) as caught:
-        lower_generic(term_of(fn))
+        lower_generic(term)
     message = str(caught.value)
-    assert message.startswith("statement S0 is bounded by the row length ")
+    assert message.startswith(
+        f"the statement {named(term, 'S0')} is bounded by the row length "
+    )
     assert "once per row, before the loop over j" in message
-    assert "S1 rewrites that row's cnt inside that loop" in message
+    assert f"{named(term, 'S1')} rewrites that row's cnt inside that loop" in message
 
 
 def test_the_faithfulness_fact_of_a_kernel_writing_its_counts_is_tested() -> None:
@@ -777,14 +784,17 @@ def test_rows_moved_onto_each_other_refute_the_layout_fact() -> None:
     assert layout.id == "layout:overlap_then_write:cnt"
     assert layout.status is Status.REFUTED, layout.provenance
     assert layout.decided_by == "isl"
+    moved = named(term, "S0")
     assert layout.statement == (
-        "the rows of val stay inside their buffers and apart while S0 write off"
+        f"the rows of val stay inside their buffers and apart while {moved} "
+        "writes off"
     )
     assert layout.provenance["written"] == ["off"]
+    # the provenance keeps the ids, and the words name the statement
     assert layout.provenance["fixed"] == ["S0"]
     assert layout.provenance["reason"].startswith(
-        "[r=1] is one of the instances of S0 that write into off the start of "
-        "a row which the counts in cnt can put elsewhere"
+        f"[r=1] is one of the instances of {moved} that write into off the "
+        "start of a row which the counts in cnt can put elsewhere"
     )
     assert layout.provenance["reason"].endswith("at [n=2]")
     (disjoint,) = [
@@ -852,12 +862,15 @@ def test_offsets_written_as_the_counts_lay_them_out_decide_the_layout() -> None:
     # and the facts that rest on the layout are worth what they are (#86).
     from lanky.ledger import Status
 
-    _term, ledger, (layout,) = layout_of(rescanned_then_summed)
+    term, ledger, (layout,) = layout_of(rescanned_then_summed)
     assert layout.status is Status.DECIDED, layout.provenance
     assert layout.decided_by == "isl"
     assert layout.provenance["restated"] == ["S1"]
     assert layout.provenance["fixed"] == ["S0"]
-    assert "S1 writes off[q] = off[q - 1] + cnt[q - 1]" in layout.provenance["rule"]
+    assert (
+        f"{named(term, 'S1')} writes off[q] = off[q - 1] + cnt[q - 1]"
+        in layout.provenance["rule"]
+    )
     (read,) = [fact for fact in ledger if fact.id.endswith(":S2:read:val[r, j]")]
     assert read.rests_on == (layout.id,)
     assert ledger.support(read).effective is Status.DECIDED
@@ -890,16 +903,17 @@ def test_a_start_read_from_another_array_is_refuted_by_a_run() -> None:
     # cell, which refutes it (#103).
     from lanky.ledger import Status
 
-    _term, _ledger, (layout,) = layout_of(gather_through_moved_rows)
+    term, _ledger, (layout,) = layout_of(gather_through_moved_rows)
     assert layout.status is Status.ASSUMED
     assert layout.term is None
     reason = layout.provenance["reason"]
+    moved = named(term, "S0")
     assert (
-        "S0 writes off[r] = s[r], which is neither the start the counts give "
-        "the row, off[q - 1] + cnt[q - 1] at q >= 1, nor a value of the loop "
-        "variables and the sizes alone; and by induction over the run, S0 "
-        "writes off[r] = s[r], and the rows in order before it leave room for "
-        "a write out of order: [r="
+        f"{moved} writes off[r] = s[r], which is neither the start the counts "
+        "give the row, off[q - 1] + cnt[q - 1] at q >= 1, nor a value of the "
+        f"loop variables and the sizes alone; and by induction over the run, "
+        f"{moved} writes off[r] = s[r], and the rows in order before it leave "
+        "room for a write out of order: [r="
     ) in reason
     (ran,) = [
         fact
@@ -995,7 +1009,7 @@ def counts_cleared_where_flagged(
 ):
     """A row's length cleared under a guard isl cannot state."""
     for r in y.dom:
-        with when(flag[r] != 0):
+        if flag[r] != 0:
             cnt[r] = 0
         y[r] = reduce_sum(val[r, j] for j in val.dom[r])
 
@@ -1009,7 +1023,7 @@ def start_within_its_slack(
 ):
     """A start moved on by ``s[r]`` where the moved row ends before the next."""
     for r in y.dom:
-        with when(
+        if (
             (r + 1 < y.dom.size) & (off[r] + cnt[r] + s[r] <= off[r + 1] - cnt[r])
         ):
             off[r] = off[r] + s[r]
@@ -1060,7 +1074,7 @@ def start_moved_by_a_bit(
 ):
     """A start moved on by 0 or 1 where its row leaves a cell of room."""
     for r in y.dom:
-        with when((r + 1 < y.dom.size) & (off[r] + cnt[r] + 1 <= off[r + 1])):
+        if (r + 1 < y.dom.size) & (off[r] + cnt[r] + 1 <= off[r + 1]):
             off[r] = off[r] + bit[r]
         y[r] = reduce_sum(val[r, j] for j in val.dom[r])
 
@@ -1088,9 +1102,10 @@ def test_only_a_parameters_type_is_a_hypothesis_of_the_induction() -> None:
     if oracle.can_establish(fact):
         fact = oracle.establish(fact) or fact
     assert fact.status is Status.ASSUMED, fact.provenance
-    assert "by induction over the run, S0 writes off[r] = off[r] + bit[r]" in (
-        fact.provenance["reason"]
-    )
+    assert (
+        f"by induction over the run, {named(term, 'S0')} writes off[r] = off[r] "
+        "+ bit[r]"
+    ) in fact.provenance["reason"]
 
 
 def test_offsets_with_no_counts_are_kept_in_order_by_induction() -> None:
@@ -1167,11 +1182,12 @@ def test_a_row_shortened_in_its_own_loop_leaves_its_reads_assumed() -> None:
     # loop it bounds, and the reads stay worth assumed (#103).
     from lanky.ledger import Status
 
-    _term, ledger, (layout,) = layout_of(shortened_in_its_own_loop)
+    term, ledger, (layout,) = layout_of(shortened_in_its_own_loop)
     assert layout.provenance["written"] == ["cnt"]
     assert layout.status is Status.ASSUMED
     assert layout.provenance["reason"].endswith(
-        "S1 writes cnt inside a loop over a row, which runs to the length it "
+        f"{named(term, 'S1')} writes cnt inside a loop over a row, which runs to "
+        "the length it "
         "read as nl_cnt_r when it started: the in-bounds facts of the row's "
         "entries are stated against that reading, which a write that shortens "
         "the row leaves behind, and which the rows in order do not keep"
@@ -1210,7 +1226,7 @@ def next_row_emptied_in_a_loop_of_the_row(
     for r in y.dom:
         for j in val.dom[r]:
             y[r] = y[r] + val[r, j]
-            with when(r + 1 < y.dom.size):
+            if r + 1 < y.dom.size:
                 cnt[r + 1] = 0
 
 
@@ -1229,15 +1245,16 @@ def test_a_read_against_a_length_its_loop_rewrites_is_assumed() -> None:
         (count_grown_inside_its_own_fiber, "S0:read:val[r, j]", "S1"),
         (first_entry_after_emptied, "S1:read:val[r, 0]", "S0"),
     ):
-        _term, ledger, _layouts = layout_of(fn)
+        term, ledger, _layouts = layout_of(fn)
         (read,) = [fact for fact in ledger if fact.id.endswith(f":{access}")]
         assert read.status is Status.ASSUMED, fn.__name__
         assert read.term is None
         assert read.provenance["reason"] == (
-            f"{writer} writes cnt inside the loop over j, which read the length "
-            f"of the row as nl_cnt_r when it started: from the write on, "
-            f"{access.split(':')[0]} reads the row against the length the write "
-            "left, which isl cannot read, and not against that reading"
+            f"{named(term, writer)} writes cnt inside the loop over j, which read "
+            f"the length of the row as nl_cnt_r when it started: from the write "
+            f"on, {named(term, access.split(':')[0])} reads the row against the "
+            "length the write left, which isl cannot read, and not against that "
+            "reading"
         )
     counts = [2, 1, 3]
     arguments = {
@@ -1271,7 +1288,7 @@ def emptied_then_moved_onto(
         for j in val.dom[r]:
             val[r, j] = val[r, j] + 1.0
         cnt[r] = 0
-        with when(r + 1 < cnt.dom.size):
+        if r + 1 < cnt.dom.size:
             off[r + 1] = off[r] + cnt[r]
 
 
@@ -1284,11 +1301,12 @@ def test_rows_moved_onto_cells_written_before_leave_the_layout_assumed() -> None
     # induction in a kernel that writes the family's arrays (#103).
     from lanky.ledger import Status
 
-    _term, ledger, (layout,) = layout_of(emptied_then_moved_onto)
+    term, ledger, (layout,) = layout_of(emptied_then_moved_onto)
     assert layout.status is Status.ASSUMED
     assert layout.term is None
     assert layout.provenance["reason"].endswith(
-        "S2 writes off, which can move a row of val, and S0 writes val, whose "
+        f"{named(term, 'S2')} writes off, which can move a row of val, and "
+        f"{named(term, 'S0')} writes val, whose "
         "disjoint writes and dependences tell its cells apart as [r, j]: one "
         "cell of the buffer each only while every row keeps its start, which "
         "the rows in order do not say"
@@ -1397,7 +1415,10 @@ def test_check_shows_the_writes_decided_under_the_layout(tmp_path, capsys) -> No
     assert row.split()[3] == "refuted"
     (fact,) = [line for line in rows if line.startswith("refuted ")]
     assert "stay inside their buffers" in fact
-    assert "  [r=1] is one of the instances of S0 that write into off" in out
+    assert (
+        "  [r=1] is one of the instances of off[r] = 0 (overlap.py:16) that write "
+        "into off"
+    ) in out
 
 
 # }}}

@@ -17,7 +17,7 @@ import numpy as np
 import pytest
 from lanky.prelude import Bool, Int, Nat, Real
 
-from loopty import Arr, Fin, Schedule, TraceError, Where, kernel, reduce_sum, when
+from loopty import Arr, Fin, Schedule, TraceError, Where, kernel, reduce_sum
 from loopty.executor import LoopyExecutor, emit_code
 from loopty.interpret import interpret
 
@@ -189,7 +189,7 @@ def keep_unmarked(
 ):
     """Copy the entries ``b`` does not mark."""
     for i in u.dom:
-        with when(~b[i]):
+        if ~b[i]:
             y[i] = u[i]
 
 
@@ -440,7 +440,7 @@ def negated(flag: Bool, b: Arr[Fin[n], Bool]):  # noqa: F821
 def unless(flag: Bool, y: Arr[Fin[n], Real]):  # noqa: F821
     """Ones where a truth value does not hold."""
     for i in y.dom:
-        with when(~flag):
+        if ~flag:
             y[i] = 1.0
 
 

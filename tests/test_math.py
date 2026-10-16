@@ -20,7 +20,7 @@ import pytest
 from lanky.ledger import Status
 from lanky.prelude import Int, Real
 
-from loopty import Arr, Fin, Schedule, TraceError, kernel, reduce_sum, when
+from loopty import Arr, Fin, Schedule, TraceError, kernel, reduce_sum
 from loopty.executor import LoopyExecutor, emit_code
 from loopty.faithful import KIND
 from loopty.math import conj, cos, exp, imag, ipow, log, real, sin, sqrt
@@ -141,7 +141,7 @@ def compared(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
     that call it, and a guard alone is refused when lowered (note 20).
     """
     for i in y.dom:
-        with when(sqrt(x[i]) > 1.5):
+        if sqrt(x[i]) > 1.5:
             y[i] = sqrt(x[i]) + abs(sin(x[i]))
 
 
@@ -312,10 +312,9 @@ def test_opencl_code_converts_an_integer_before_the_call(plain_opencl) -> None:
 
 
 def test_opencl_code_calls_pyopencls_complex_functions() -> None:
-    # loopy's plain OpenCL target has no complex functions; the pyopencl one
-    # calls those of pyopencl's complex header. Generating the code needs
-    # pyopencl and no device.
-    pytest.importorskip("pyopencl")
+    # loopy's plain OpenCL target has no complex functions; loopty's calls
+    # those of pyopencl's complex header, as loopy's pyopencl one does, and
+    # generating the code needs neither pyopencl nor a device (#291).
     import loopy as lp
 
     from loopty.isl_reading import declining
@@ -514,9 +513,9 @@ def powers(x: Arr[Fin[n], Real], y: Arr[Fin[n], Fin[9], Real]):  # noqa: F821
     """``x[i]`` to the powers ``-2`` to ``6`` by loop variable, the last a literal."""
     for i in y.dom:
         for j in y.dom[i]:
-            with when(j < 8):
+            if j < 8:
                 y[i, j] = ipow(x[i], j - 2)
-            with when(j == 8):
+            if j == 8:
                 y[i, j] = ipow(x[i], 11)
 
 

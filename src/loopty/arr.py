@@ -7,7 +7,9 @@ with the same surface, so the body needs no variant: it iterates ``arr.dom``
 rather than a ``range`` of a size name, and a ragged inner loop iterates
 ``arr.dom[r]``. That is the point of ``.dom``: the sizes come from the data, so
 the body is closed and can be executed, while the type says where those sizes
-come from.
+come from. ``for box, a, b in arr.dom:`` is the loop nest ``for box in
+arr.dom``, ``for a in arr.dom[box]``, ``for b in arr.dom[box, a]`` in one
+line, here and in a trace alike (:class:`Dom`).
 
 Ragged storage is a dependent sum stored flat: row ``r`` occupies
 ``offsets[r]:offsets[r+1]`` of a one-dimensional buffer, and the per-row count
@@ -44,6 +46,16 @@ from loopty.idx import axis_size
 from loopty.term import ArrType
 
 __all__ = ["Arr", "ArrSpec", "Dom", "LayoutError"]
+
+
+def _for_names(frame: Any) -> tuple[str, ...] | None:
+    """The names the ``for`` asking ``frame``'s domain for points binds, or ``None``."""
+    from loopty.bytecode import for_targets
+
+    try:
+        return for_targets(frame.f_code, frame.f_lasti)
+    except Exception:  # pragma: no cover - bytecode reading is best effort
+        return None
 
 
 class LayoutError(IndexError):
@@ -90,6 +102,13 @@ class Dom:
     ``arr.dom[i, j]`` is ``arr.dom[i][j]``. Iterating yields
     the concrete indices; under tracing the symbolic counterpart yields a single
     generic point and pushes the bound onto the enclosing isl domain.
+
+    A ``for`` that unpacks each point into several names, ``for box, a, b in
+    R.dom:``, is the loops over the axes from this one on, one per name, each
+    over the fiber of the ones before it: it yields ``(box, a, b)`` in the
+    order the nested loops visit them. The names are read off the ``for``
+    (:func:`loopty.bytecode.for_targets`), so ``for box in R.dom`` still
+    yields one index.
     """
 
     __slots__ = ("array", "prefix")
@@ -116,8 +135,28 @@ class Dom:
     def __len__(self) -> int:
         return len(self.array._fiber(self.prefix))
 
-    def __iter__(self) -> Iterator[int]:
-        return iter(self.array._fiber(self.prefix))
+    def __iter__(self) -> Iterator[Any]:
+        names = _for_names(sys._getframe(1))
+        if names is None or len(names) < 2:
+            return iter(self.array._fiber(self.prefix))
+        left = self.array.ndim - self.axis
+        if not all(names) or len(names) > left:
+            spelled = ", ".join(name or "(...)" for name in names)
+            raise TypeError(
+                f"'for {spelled} in ...dom' binds {len(names)} names, and the "
+                f"domain runs over {left} axis{'' if left == 1 else 'es'}: a loop "
+                "nest in one line binds one plain name per axis, outermost first"
+            )
+        return self._points(len(names))
+
+    def _points(self, depth: int) -> Iterator[tuple[int, ...]]:
+        """The points of the next ``depth`` axes, in the order nested loops visit."""
+        for index in self.array._fiber(self.prefix):
+            if depth == 1:
+                yield (index,)
+                continue
+            for rest in self[index]._points(depth - 1):
+                yield (index, *rest)
 
     def __getitem__(self, index: int | tuple[int, ...]) -> Dom:
         """The fiber over ``index``: the domain of the next axis.
@@ -706,8 +745,7 @@ class Arr:
         ``x[-1]`` as the cell in front of the buffer. A native run that wrapped
         would therefore agree with nothing the ledger says, so the index is
         refused with an ``IndexError``, the same exception numpy raises at the
-        other end, which is also what lets a masked read under a false ``when``
-        answer zero here as it does there.
+        other end.
         """
         parts = key if isinstance(key, tuple) else (key,)
         for part in parts:

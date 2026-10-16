@@ -57,7 +57,7 @@ import math
 from lanky import theorem
 from lanky.prelude import Fn, Nat, Real
 
-from loopty import Arr, Fin, Schedule, Where, kernel, when
+from loopty import Arr, Fin, Schedule, Where, kernel
 
 #: The order. sumpy's 2-D benchmarks use 10 to 20; small here, so that every
 #: command runs in seconds.
@@ -130,12 +130,11 @@ def reconstruct(
     ``G_xx = -G_yy``: a coefficient with two more ``x``'s is minus the one
     with two more ``y``'s, which an earlier row of the triangle stored.
     """
-    for a in R.dom:
-        for b in R.dom[a]:
-            with when(a < 2):
-                R[a, b] = c[a, b]
-            with when(a >= 2):
-                R[a, b] = -R[a - 2, b + 2]
+    for a, b in R.dom:
+        if a < 2:
+            R[a, b] = c[a, b]
+        else:
+            R[a, b] = -R[a - 2, b + 2]
 
 
 #: The domains of the stored coefficients and of the triangle.

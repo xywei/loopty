@@ -20,6 +20,7 @@ from __future__ import annotations
 import importlib.util
 import itertools
 import os
+import re
 import sys
 from collections.abc import Iterator
 from pathlib import Path
@@ -40,6 +41,7 @@ from lanky.ledger import Status  # noqa: E402
 from lanky.prelude import Int, Real  # noqa: E402
 from lanky.terms import Var, evaluate, render  # noqa: E402
 
+from lines import named, said, where  # noqa: E402
 from loopty import Arr, Fin, Schedule, kernel, program, reduce_sum  # noqa: E402
 from loopty.description import (  # noqa: E402
     Unstatable,
@@ -383,13 +385,18 @@ def test_a_size_called_like_a_coordinate_stays_a_size() -> None:
 
 
 def test_a_cast_is_stated_one_part_per_dependence_class() -> None:
-    schedule = stencil().skewed()
+    module = stencil()
+    schedule = module.skewed()
     monotone = schedule.facts()[-1]
     obligation = monotone.term.lean_obligation()
     labels = [part.label for part in obligation.parts]
     # jacobi writes u[t + 1, i] and reads u[t, i - 1] and u[t, i + 1]
     assert len(labels) == 5
-    assert "u[t, i - 1] read by S0 after u[t + 1, i] is written by S0" in labels
+    stmt = named(module.jacobi.term, "S0")
+    assert (
+        f"u[t, i - 1] read by {stmt} after u[t + 1, i] is written by the same "
+        "statement"
+    ) in labels
     bijective = schedule.facts()[-2]
     names = [part.name for part in bijective.term.lean_obligation().parts]
     assert names == ["S0_total", "S0_single_valued", "S0_injective"]
@@ -448,14 +455,83 @@ def test_a_cast_on_a_hardware_axis_keeps_each_class_on_one_work_item() -> None:
     names = [part.name for part in obligation.parts]
     assert names == ["dependence_0", "dependence_0_work_item"]
     together = obligation.parts[1]
+    stmt = named(hexahedra.along_s.term, "S0")
     assert together.label == (
-        "vs[q, e, k, j, i] written again by S0 after vs[q, e, k, j, i] is written "
-        "by S0, on one work item"
+        f"vs[q, e, k, j, i] written again by {stmt} after vs[q, e, k, j, i] is "
+        "written by the same statement, on one work item"
     )
     # each axis's loop, less where loopy starts it, is the work item
     assert render(together.term.body) == (
         "e_a1 == e_b1 and i_a1 == i_b1 and j_a1 == j_b1 and k_a1 == k_b1"
     )
+
+
+def test_a_programs_cast_names_each_cell_by_the_loops_the_source_names() -> None:
+    # A program renames its calls' loops apart (box_0, a_0); a part's label
+    # names each cell with the loops the source writes (#307), as a fact does
+    l2p = load(EXAMPLES / "l2p.py")
+    labels = []
+    for schedule in (l2p.fused, l2p.contracted):
+        for fact in schedule.facts():
+            if fact.kind == "monotone":
+                labels += [part.label for part in cast_obligation(fact.term).parts]
+    assert labels
+    renamed = [label for label in labels if re.search(r"\b[a-z]+_[0-9]+\b", label)]
+    assert not renamed, renamed
+    assert any(label.startswith("R[box, a, b] written again by ") for label in labels)
+    # no read sees the zeros R and C are made with, so the schedules run
+    # without them (#290), and no part names them
+    assert not any("zeros" in label for label in labels), labels
+
+
+@kernel
+def doubled_inner(x: Arr[Fin[n], Real], f: Arr[Fin[n], Real]):  # noqa: F821
+    """Each cell but the first twice ``x``'s; the first keeps its zero."""
+    for i in f.dom:
+        if i > 0:
+            f[i] = 2.0 * x[i]
+
+
+@kernel
+def one_more(f: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+    """Each cell one more than ``f``'s, the zero at ``f[0]`` included."""
+    for i in y.dom:
+        y[i] = f[i] + 1.0
+
+
+@program
+def padded_once_more(x, y):
+    """``f[0]`` is the zero ``f`` is made with, which ``one_more`` reads."""
+    f = Arr.zeros_like(x)
+    doubled_inner(x, f)
+    one_more(f, y)
+
+
+def test_a_cast_names_the_zeros_a_read_sees_by_the_array_they_zero() -> None:
+    # one_more reads the zero at f[0], so the zeros are kept (#290); they run
+    # in loops the program made, and a part names them as what they are, the
+    # cell they write as a cell of f, and the cell the other statement
+    # reaches as the same cell (#307)
+    fused = Schedule(padded_once_more).fuse(
+        padded_once_more.doubled_inner.i, padded_once_more.one_more.i
+    )
+    labels = [
+        part.label
+        for fact in fused.facts()
+        if fact.kind == "monotone"
+        for part in cast_obligation(fact.term).parts
+    ]
+    zeros = (
+        "the zeros of padded_once_more.f "
+        f"({where(padded_once_more, 'f = Arr.zeros_like')})"
+    )
+    stored = said(doubled_inner, "f[i] = 2.0 * x[i]")
+    assert (
+        f"a cell of f written again by {zeros} after f[i] is written by {stored}"
+    ) in labels, labels
+    assert (
+        f"f[i] written again by {stored} after the same cell is written by {zeros}"
+    ) in labels, labels
 
 
 def test_a_refused_cast_is_stated_with_isls_pair() -> None:
@@ -467,7 +543,11 @@ def test_a_refused_cast_is_stated_with_isls_pair() -> None:
     obligation = refused.value.fact.term.lean_obligation()
     counter = obligation.counterexample
     assert counter is not None
-    assert counter.text == "S0[t=0, i=8] and S0[t=1, i=7] at nt=16, nx=16"
+    # the pair as the refusal names it
+    assert counter.text == (
+        f"{named(module.jacobi.term, 'S0')} at t=0, i=8 and the same statement at "
+        "t=1, i=7, where nt=16, nx=16"
+    )
     assert counter.point["t_a"] == 0 and counter.point["i_b"] == 7
     assert counter.point["t_outer_a1"] == 0 and counter.point["i_outer_a1"] == 1
 
@@ -506,18 +586,22 @@ def test_a_cast_after_a_substitution_states_the_reads_it_computes_again() -> Non
     obligation = cast_obligation(monotone.term)
     assert not obligation.declined
     carried = [part for part in obligation.parts if part.name.startswith("carried_")]
+    term = windows.bumped_after.term
+    bump, divergence, flux = (
+        named(term, stmt_id) for stmt_id in ("bump.S0", "divergence.S0", "flux.S0")
+    )
     assert [part.label for part in carried] == [
-        "u[k] overwritten by bump.S0 after u[i + 1] is read by divergence.S0, "
-        "through flux.S0",
-        "u[i + 1] read by divergence.S0 after u[k] is written by bump.S0, "
-        "through flux.S0",
-        "u[k] overwritten by bump.S0 after u[i - 1] is read by divergence.S0, "
-        "through flux.S0",
-        "u[i - 1] read by divergence.S0 after u[k] is written by bump.S0, "
-        "through flux.S0",
+        f"u[k] overwritten by {bump} after u[i + 1] is read by {divergence}, "
+        f"through {flux}",
+        f"u[i + 1] read by {divergence} after u[k] is written by {bump}, "
+        f"through {flux}",
+        f"u[k] overwritten by {bump} after u[i - 1] is read by {divergence}, "
+        f"through {flux}",
+        f"u[i - 1] read by {divergence} after u[k] is written by {bump}, "
+        f"through {flux}",
     ]
     assert not any(
-        "flux.S0" in part.label or "f.zeros" in part.label
+        flux in part.label or "the zeros of" in part.label
         for part in obligation.parts
         if not part.name.startswith("carried_")
     )
@@ -627,9 +711,12 @@ def test_a_mixed_subscript_is_in_bounds_by_type_and_isl() -> None:
     """
     from loopty.oracle import IslOracle
 
-    fact = next(f for f in gather.facts() if "X[cell[c, k], d]" in f.statement)
+    fact = next(
+        f for f in gather.facts() if f.statement.startswith("X[cell[c, k], d]")
+    )
     assert fact.statement == (
-        "X[cell[c, k], d] is in bounds for every instance of S0 "
+        "X[cell[c, k], d] is in bounds for every instance of "
+        f"{said(gather, 'g[c, k, d] = X[cell[c, k], d]')} "
         "(cell[c, k] : Fin(nv), by type)"
     )
     decided = IslOracle().establish(fact)
@@ -664,7 +751,8 @@ def test_a_mixed_subscript_read_twice_in_a_statement_is_one_place() -> None:
 
     (fact,) = [f for f in gather_twice.facts() if f.statement.startswith("u[")]
     assert fact.statement == (
-        "u[e, face[f, k]] is in bounds for every instance of S0 "
+        "u[e, face[f, k]] is in bounds for every instance of "
+        f"{said(gather_twice, 'g[e, f, k] = ...', 'g[e, f, k] =')} "
         "(face[f, k] : Fin(n), by type)"
     )
     decided = IslOracle().establish(fact)
@@ -698,8 +786,8 @@ def test_a_mixed_subscript_a_statement_reads_twice_is_one_place() -> None:
     from loopty.oracle import IslOracle
 
     statement = (
-        "X[cell[c, 0], 0] is in bounds for every instance of S0 "
-        "(cell[c, 0] : Fin(nv), by type)"
+        "X[cell[c, 0], 0] is in bounds for every instance of "
+        f"{said(jacobian, 'J[c] = ...', 'J[c] =')} (cell[c, 0] : Fin(nv), by type)"
     )
     (fact,) = [f for f in jacobian.facts() if f.statement == statement]
     decided = IslOracle().establish(fact)
@@ -713,8 +801,10 @@ def test_a_mixed_subscript_a_statement_reads_twice_is_one_place() -> None:
 def test_an_array_the_kernel_reads_where_it_wrote_it_has_a_definedness_fact() -> None:
     spmv = load(EXAMPLES / "spmv.py")
     facts = [f for f in spmv.scan.facts() if f.kind == "definedness"]
+    term = spmv.scan.term
     assert [f.statement for f in facts] == [
-        "every cell of off that S1 reads, S0 or S1 wrote before the read"
+        f"every cell of off that {named(term, 'S1')} reads was written before the "
+        f"read, by {named(term, 'S0')} or itself"
     ]
     assert decide(facts[0].term).ok
     obligation = facts[0].term.lean_obligation()
@@ -729,13 +819,13 @@ GUARDED = """
 from __future__ import annotations
 
 from lanky.prelude import Real
-from loopty import Arr, Fin, kernel, when
+from loopty import Arr, Fin, kernel
 
 
 @kernel
 def guarded(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real], z: Arr[Fin[n], Real]):
     for i in y.dom:
-        with when(x[i] > 0):
+        if x[i] > 0:
             y[i] = 1.0
     for j in z.dom:
         z[j] = y[j]
@@ -1182,8 +1272,8 @@ def test_run_names_a_cast_lean_was_not_asked_about_when_verbose(
     assert "NOT PROVED scale_rows" in out
     assert (
         "isl decided it; Lean was not asked: tile(scale_rows.i, scale_rows.j, 2, "
-        "2) moves S0 by the part of its map over the loops S0 runs in, which isl "
-        "computed"
+        "2) moves s[i] = 2.0 (tile_part.py:12) by the part of its map over the "
+        "loops it runs in, which isl computed"
     ) in out
 
 
@@ -1216,6 +1306,22 @@ def test_lean_confirms_a_layouts_refutation_at_isls_cell(lean: Any) -> None:
         assert refuted.status is Status.REFUTED, fact.statement
         said = lean.establish(refuted).provenance.get("lean_counterexample", "")
         assert said.startswith("Lean confirmed the counterexample"), said
+
+
+def test_lean_does_the_arithmetic_of_two_layouts_at_a_number(lean: Any) -> None:
+    # #275: grudge's DOFArray at N = 3 and #418's dim_tags, each address as
+    # written, 3 ^ 3 * e and 3 * 3 * 3 * e, where both used to read 27 * e
+    from loopty import IslOracle
+
+    layouts = load(EXAMPLES / "storage_layouts.py")
+    (same,) = layouts.as_dim_tags.facts()
+    proved = lean.establish(IslOracle().establish(same))
+    assert proved.status is Status.PROVED, proved.provenance
+    source = proved.provenance["lean_source"]
+    assert (
+        ": (3 : Int) ^ 3 * e + a + 3 * b + (3 : Int) ^ 2 * c = "
+        "((3 * 3) * 3) * e + a + 3 * b + (3 * 3) * c :="
+    ) in source
 
 
 def test_lean_proves_the_device_launches_of_the_demos(lean: Any) -> None:
@@ -1306,9 +1412,10 @@ def test_a_substituted_sum_reading_its_own_write_is_caught_apart(lean: Any) -> N
         substituted.tag(doubled_then_scaled.scaled_in_place.j, "l.0")
     planted = replace(refused.value.fact.term, refuted=False, refusal=None)
     parts = planted.lean_obligation().parts
+    scaled = named(doubled_then_scaled.term, "scaled_in_place.S0")
     assert parts[-1].label == (
-        "the sum of scaled_in_place.S0 reads x[i_0], which its instruction writes, "
-        "on another work item of l.0"
+        f"the sum of {scaled} reads x[i], which its instruction writes, on "
+        "another work item of l.0"
     )
     result = lean.establish(
         Fact(
@@ -1360,7 +1467,7 @@ VARIANT = """
 from __future__ import annotations
 
 from lanky.prelude import Real
-from loopty import Arr, Fin, kernel, when
+from loopty import Arr, Fin, kernel
 
 
 @kernel
@@ -1369,7 +1476,7 @@ def variant(u: Arr[Fin[nt], Fin[nx], Real]):
     for t in steps:
         row = u.dom[t]
         for i in row:
-            with when({guard}):
+            if {guard}:
                 u[{write}] = (u[{first}] + u[{second}]) / 2
 """
 
@@ -1532,7 +1639,7 @@ MUTANT = """
 from __future__ import annotations
 
 from lanky.prelude import Real
-from loopty import Arr, Fin, kernel, when
+from loopty import Arr, Fin, kernel
 
 
 @kernel
@@ -1549,12 +1656,12 @@ def mutant(u: Arr[Fin[nt], Fin[nx], Real]):
     "body",
     [
         # the stencil as written: every access in bounds
-        "with when((t + 1 < steps.size) & (i > 0) & (i + 1 < row.size)):\n"
+        "if (t + 1 < steps.size) & (i > 0) & (i + 1 < row.size):\n"
         "                u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2",
         # its guard dropped: u[t + 1, i] and u[t, i - 1] leave the array
         "u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2",
         # one subscript moved a cell further than the guard allows
-        "with when((t + 1 < steps.size) & (i > 0) & (i + 1 < row.size)):\n"
+        "if (t + 1 < steps.size) & (i > 0) & (i + 1 < row.size):\n"
         "                u[t + 1, i] = (u[t, i - 1] + u[t, i + 2]) / 2",
     ],
     ids=["as written", "guard dropped", "subscript moved"],

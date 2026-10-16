@@ -17,7 +17,7 @@ import pytest
 from lanky.prelude import Real
 
 from lines import where
-from loopty import Arr, Fin, Schedule, kernel, program, reduce_sum, scope, when
+from loopty import Arr, Fin, Schedule, kernel, program, reduce_sum, scope
 from loopty.executor import LoopyExecutor
 from loopty.handles import Array, Call, Condition, Loop, ShadowedName, Size
 from loopty.schedule import IllegalCast
@@ -36,7 +36,7 @@ def flux(u: Arr[Fin[n], Real], f: Arr[Fin[n], Real]):  # noqa: F821
 def divergence(f: Arr[Fin[n], Real], rhs: Arr[Fin[n], Real]):  # noqa: F821
     """The centred divergence of the flux, at the interior points."""
     for i in rhs.dom:
-        with when((i > 0) & (i + 1 < rhs.dom.size)):
+        if (i > 0) & (i + 1 < rhs.dom.size):
             rhs[i] = -(f[i + 1] - f[i - 1]) / 2
 
 
@@ -62,6 +62,14 @@ def three(u, rhs, h):
     flux(u, f)
     divergence(f, rhs)
     scale(f, h)
+
+
+@program
+def from_zeros(u, rhs):
+    """The divergence before the flux: its read sees the zeros ``f`` is made with."""
+    f = Arr.zeros_like(u)
+    divergence(f, rhs)
+    flux(u, f)
 
 
 @program
@@ -103,7 +111,7 @@ def stencil(u: Arr[Fin[nt], Fin[nx], Real]):  # noqa: F821
     for t in steps:
         row = u.dom[t]
         for i in row:
-            with when((t + 1 < steps.size) & (i > 0) & (i + 1 < row.size)):
+            if (t + 1 < steps.size) & (i > 0) & (i + 1 < row.size):
                 u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2
 
 
@@ -184,9 +192,13 @@ def test_a_name_after_a_loop_or_an_array_says_what_it_has() -> None:
         "a split of it makes, burgers.flux.j.outer and burgers.flux.j.inner"
     )
     # Schedule.nest prints the loops a program zeroes an array in by the
-    # array, and says so where they are asked for
-    assert Schedule(burgers).nest[0] == "burgers.f.zeros"
-    with pytest.raises(AttributeError, match="no step names them: they take the tag"):
+    # array, where a read sees the zeros, and says so where they are asked
+    # for; burgers runs without its zeros, which no read sees (#290)
+    assert Schedule(from_zeros).nest[0] == "from_zeros.f.zeros"
+    assert "burgers.f.zeros" not in Schedule(burgers).nest
+    with pytest.raises(
+        AttributeError, match="no step names them: a schedule runs without them"
+    ):
         burgers.f.zeros  # noqa: B018
     with pytest.raises(AttributeError, match="burgers.f is an array, which has no j"):
         burgers.f.j  # noqa: B018
@@ -470,7 +482,8 @@ def test_a_fusion_of_three_calls_is_one_step_and_names_them_after() -> None:
     assert fused.history == (
         "fuse(three.flux.j, three.divergence.i, three.scale.k, shift=1)",
     )
-    assert [fact.status.value for fact in fused.facts()] == ["decided"] * 2
+    # the program's f, which no read sees zeroed (#290), and the fusion's two
+    assert [fact.status.value for fact in fused.facts()] == ["decided"] * 3
     # one loop now, by any of the three
     for loop in (three.flux.j, three.divergence.i, three.scale.k):
         assert fused.split(loop, 4).nest[-2:] == (
@@ -645,9 +658,11 @@ def test_the_steps_and_the_facts_name_loops_and_arrays_by_their_paths() -> None:
         "no read of burgers.f sees its slot overwritten after contract(burgers.f, "
         "lambda j: j % 3): burgers.f kept in 3 cells, f[j] in slot j % 3"
     )
-    assert statements[-2] == (
-        "for contract(burgers.f), every cell of burgers.f that burgers reads, "
-        "burgers.flux has stored by the time it is read"
+    # the window rests on the fact the schedule was made with (#290)
+    assert statements[0] == (
+        "every cell of burgers.f that burgers reads, burgers.flux has stored by "
+        "the time it is read, so burgers runs without the zeros burgers.f is "
+        "made with"
     )
     assert schedule.key == (
         "burgers[c].fuse(burgers.flux.j, burgers.divergence.i, shift=1)"

@@ -18,7 +18,8 @@ depth are pinned to zero. Statements therefore all live in one isl space, so a
 dependence relation and a schedule are plain :class:`islpy.Map` objects rather
 than union maps, and the oracle's ``is_monotone`` can take them unchanged. The
 price is that a witness is a padded tuple, which
-:func:`loopty.typing.render_instance` turns back into ``S1[r=2, j=0]``.
+:func:`loopty.typing.render_instance` turns back into an instance of a
+statement, ``y[r] += ... (spmv.py:114) at r=2, j=0``.
 
 *Time is the 2d+1 vector.* The source schedule maps an instance to
 ``[p0, d0, p1, d1, ..., pD]``, alternating the position of the enclosing block
@@ -267,7 +268,7 @@ def _assemble(
 
     Not every parameter qualifies. A guard brings its own names into a domain,
     and a signed scalar is a perfectly ordinary thing to guard on:
-    ``with when(a < 0)`` with ``a : Int`` would make the domain empty if ``a``
+    ``if a < 0:`` with ``a : Int`` would make the domain empty if ``a``
     were assumed non-negative here, and an empty domain discharges every
     obligation over it vacuously. Which is why the caller says which names are
     sizes rather than this function assuming all of them are.
@@ -295,7 +296,7 @@ def size_names(term: Term) -> frozenset[str]:
     point of ``Fin[nnz + 1]`` for every such size.
 
     A scalar the kernel takes as a parameter is not one of those. ``a : Int`` is
-    signed, and a guard ``with when(a < 0)`` puts it among the parameters of a
+    signed, and a guard ``if a < 0:`` puts it among the parameters of a
     statement's domain; assuming it non-negative would make that domain empty
     and turn every obligation over it into a vacuous truth. Scalar parameters
     are therefore excluded by name, whatever a derived object's parameter list
@@ -641,18 +642,20 @@ def statement_accesses(stmt: Stmt, term: Term) -> tuple[_Access, ...]:
       obligation, while the write itself is discharged *by type* from ``col``'s
       element sort, so a kernel reading past the end of ``col`` would be
       reported clean.
-    * ``with when(flag[i] != 0)`` reads ``flag[i]`` to decide whether the write
+    * ``if flag[i] != 0:`` reads ``flag[i]`` to decide whether the write
       happens. Recording only the write loses the RAW dependence on an earlier
       statement that writes ``flag``, so a reordering could let the predicate
       observe the old value, and leaves the guard's own access unbounded.
 
-    The guard's reads are stated over the statement's ``loop_domain``, the loop
-    nest before the guard narrowed it, and not over ``domain``. A ``when``
-    evaluates its whole condition at every point and only masks the write, so
-    ``when((i + 1 < n) & (flag[i + 1] != 0))`` reads ``flag[n]`` at
-    ``i = n - 1`` natively even though no write happens there; stating that
-    read over the narrowed domain would prove it in bounds by the very
-    condition that does not protect it.
+    The guard's reads are stated where the body makes them, and not over
+    ``domain``. Each condition of a statement's path is asked where the ones
+    before it held (:attr:`loopty.term.Stmt.path`): ``if i > 0 and x[i - 1] >
+    0:`` reads ``x[i - 1]`` only where ``i > 0``, while ``if (i + 1 < n) &
+    (flag[i + 1] != 0):`` reads ``flag[n]`` at ``i = n - 1``, since ``&`` is
+    eager: stating that read over the narrowed domain would prove it in bounds
+    by the very condition that does not protect it. A guard with no path, of
+    a term written by hand, is read over ``loop_domain``, the loop nest before
+    the guard narrowed it.
 
     Two more reads belong to none of the three expressions: the layout's, which
     is why ``term`` is needed at all. A ragged ``val: Arr[Fin[n], Fin[cnt],
@@ -691,10 +694,13 @@ def source_accesses(stmt: Stmt, term: Term) -> tuple[_Access, ...]:
     # The right-hand side first, so that the order the rules see is the order
     # the source reads in; then the assignee's own subscripts and the guard.
     guard_domain = stmt.loop_domain if stmt.loop_domain is not None else stmt.domain
+    guards = (
+        tuple(stmt.path) if stmt.path else ((stmt.guard, guard_domain),)
+    )
     for source, domain in (
         (stmt.expr, stmt.domain),
         (tuple(written.indices), stmt.domain),
-        (stmt.guard, guard_domain),
+        *guards,
     ):
         if source is None:
             continue
@@ -984,7 +990,7 @@ def _bounded_domains(stmt: Stmt) -> list[tuple[isl.Set, tuple[str | None, ...], 
     Each is ``(domain, names, first)``, and the bounds of a domain are looked
     for from dimension ``first`` on. The statement's loop nest comes first,
     over its loop variables and before a guard narrowed it (``loop_domain``,
-    since a guard masks writes and the loops run whatever it says), from ``0``.
+    since the loops run whatever the guard says), from ``0``.
     Then the domain of every reduction it evaluates, in the right-hand side,
     the assignee's subscripts or the guard, over the loop variables and then
     the reduction's binders, from the first binder, since a bound of a loop
@@ -1271,7 +1277,9 @@ def definedness(
     any of ``writers`` ran. A cell they store counts as stored, and the
     answer is ``True`` where a read reaches one that ``writers`` do not
     store, with the cells in ``zeros`` of the answer and listed in its
-    ``detail`` (``shifted.S0 reads the zeros at f[0] and f[n - 1]``): a
+    ``detail`` (``rhs[i] = ... (composition.py:74) reads the zeros at f[0]
+    and f[n - 1]``, each statement named by its text and line,
+    :class:`loopty.source.Named`): a
     program may mean them, as the boundary of a stencil, and the cells say
     where it reads them. So the read has to be listed exactly, and one
     that is over-approximated still leaves the answer ``None`` there. A
@@ -1292,7 +1300,9 @@ def definedness(
     from lanky.terms import Comparison, Subscript, Var, render
 
     from loopty.domain import dimension_names
+    from loopty.handles import statement_names
 
+    named = statement_names(term)
     arrtype = term.array_types[array]
     # one name per axis, the axes of a domain's points included, none a size
     avoid = _names_in(arrtype.shape_terms)
@@ -1334,8 +1344,8 @@ def definedness(
                 unlisted(
                     stmt,
                     writing,
-                    f"{stmt.id} {'stores' if writing else 'reads'} {array}[{shown}], "
-                    "whose index is not affine",
+                    f"{named(stmt.id)} {'stores' if writing else 'reads'} "
+                    f"{array}[{shown}], whose index is not affine",
                 )
                 if writing:
                     continue
@@ -1344,8 +1354,8 @@ def definedness(
                 unlisted(
                     stmt,
                     writing,
-                    f"{stmt.id} {'stores' if writing else 'reads'} {array} under a "
-                    f"guard isl cannot state ({', '.join(guard)})",
+                    f"{named(stmt.id)} {'stores' if writing else 'reads'} {array} "
+                    f"under a guard isl cannot state ({', '.join(guard)})",
                 )
                 if writing:
                     continue
@@ -1366,13 +1376,13 @@ def definedness(
         return out
 
     stored = stores(writers)
-    who = " and ".join(stmt.id for stmt in writers)
+    who = named.listed(stmt.id for stmt in writers)
     # What the readers' own call stores, which may come before a read: no
     # witness of a cell nothing stored. One of them that cannot be listed
     # leaves every cell outside the stored ones unknown.
     theirs = stores(own)
     zeroed = stores(zeros)
-    mine = " or ".join(other.id for other in own)
+    mine = named.listed((other.id for other in own), "or")
     read = universe.subtract(universe)
     seen: list[tuple[Stmt, isl.Set]] = []
     for stmt in readers:
@@ -1410,8 +1420,8 @@ def definedness(
             return Definedness(
                 None,
                 detail=(
-                    f"{stmt.id} reads cells of {array} that {who} does not store "
-                    f"and that {mine} stores, before the read or after it, which "
+                    f"{named(stmt.id)} reads cells of {array} that {who} does not "
+                    f"store and that {mine} stores, before the read or after it, which "
                     "is not asked"
                 ),
             )
@@ -1424,7 +1434,7 @@ def definedness(
             parameters=parameters,
             reader=stmt.id,
             detail=(
-                f"{stmt.id} reads {array}[{cell}], which {who} does not store"
+                f"{named(stmt.id)} reads {array}[{cell}], which {who} does not store"
                 + (f", nor {mine}" if own else "")
                 + (f", nor the zeros {array} was made with" if zeros else "")
                 + (f" (at {at})" if at else "")
@@ -1437,19 +1447,19 @@ def definedness(
             maybe = outside.intersect(_align(theirs, outside.get_space()))
             if not certain.is_empty():
                 parts.append(
-                    f"{stmt.id} reads the zeros at "
+                    f"{named(stmt.id)} reads the zeros at "
                     f"{cells_text(certain, array, universe)}"
                     + (
-                        f", unless {' or '.join(blind)} stored them, which isl "
+                        f", unless {named.listed(blind, 'or')} stored them, which isl "
                         "cannot list"
                         if blind
                         else ""
                     )
                 )
             if not maybe.is_empty():
-                first = " or ".join(dict.fromkeys([*blind, *(o.id for o in own)]))
+                first = named.listed([*blind, *(o.id for o in own)], "or")
                 parts.append(
-                    f"{stmt.id} reads {cells_text(maybe, array, universe)}, the "
+                    f"{named(stmt.id)} reads {cells_text(maybe, array, universe)}, the "
                     f"zeros there unless {first} stored them before the read, "
                     "which is not asked"
                 )

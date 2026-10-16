@@ -40,7 +40,7 @@ from __future__ import annotations
 import numpy as np
 from lanky.prelude import Real
 
-from loopty import Arr, Fin, Where, kernel, layout, when
+from loopty import Arr, Fin, Where, kernel, layout
 
 #: The order of the expansion: P = 4 keeps 2P + 1 = 9 derivatives.
 P = 4
@@ -76,13 +76,11 @@ def stored_table(
     R: Arr[Fin[nb], Fin[2], Fin[Q], Real],
 ):
     """Each box's stored derivatives as a table R[i, a, b], read through the index."""
-    for i in R.dom:
-        for a in R.dom[i]:
-            for b in R.dom[i, a]:
-                with when(a + b == 0):
-                    R[i, a, b] = coeffs[i, centre(a, b)]
-                with when((a + b >= 1) & (a + b < Q)):
-                    R[i, a, b] = coeffs[i, derivatives((a, b))]
+    for i, a, b in R.dom:
+        if a + b == 0:
+            R[i, a, b] = coeffs[i, centre(a, b)]
+        elif a + b < Q:
+            R[i, a, b] = coeffs[i, derivatives((a, b))]
 
 
 # }}}
@@ -107,11 +105,8 @@ def unflatten(
     u: Arr[Fin[ne], Fin[N], Fin[N], Fin[N], Real],
 ):
     """Each element's nodes as u[e, a, b, c], read through the DOFArray's layout."""
-    for e in u.dom:
-        for a in u.dom[e]:
-            for b in u.dom[e, a]:
-                for c in u.dom[e, a, b]:
-                    u[e, a, b, c] = flat[dof_array(e, a, b, c)]
+    for e, a, b, c in u.dom:
+        u[e, a, b, c] = flat[dof_array(e, a, b, c)]
 
 
 # }}}

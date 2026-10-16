@@ -51,7 +51,10 @@ loosens. The fact reads
   holds.
 
 The comparison is the file's example inputs only: a tested row is evidence
-on those inputs, and its provenance says which they were.
+on those inputs, and its provenance says which they were (``inputs``,
+``example_inputs() of l2p.py``). A comparison declared in a file of its own,
+``l2p_vs_sumpy.py`` importing ``l2p``, runs on that file's
+``example_inputs()``, and on the kernel's file's where it has none.
 """
 
 from __future__ import annotations
@@ -177,9 +180,10 @@ class Upstream:
                 owner=self.kernel.__name__,
             )
 
-        arguments = self._example()
-        if isinstance(arguments, str):
-            return fact(Status.ASSUMED, reason=arguments)
+        example = self._example()
+        if isinstance(example, str):
+            return fact(Status.ASSUMED, reason=example)
+        arguments, base["inputs"] = example
         from loopty.executor import _copy
 
         try:
@@ -220,26 +224,56 @@ class Upstream:
             )
         return self._compared(native, expected, fact)
 
-    def _example(self) -> dict[str, Any] | str:
-        """The kernel's example inputs, or why there are none."""
+    def _inputs_file(self) -> tuple[Any, str] | str:
+        """The ``example_inputs()`` the comparison runs on, and its file, or why none.
+
+        The comparison's own file's first, where it is declared in a file of
+        its own (``l2p_vs_sumpy.py``, importing ``l2p``); then the file that
+        defines the kernel.
+        """
+        from loopty.cli import EXAMPLE_FUNCTION
+
+        files: list[str] = []
+        kernel_code = getattr(self.kernel.fn, "__code__", None)
+        homes = [
+            (self.fn.__globals__, self.path),
+            (
+                getattr(self.kernel.fn, "__globals__", {}),
+                kernel_code.co_filename if kernel_code is not None else self.path,
+            ),
+        ]
+        for namespace, path in homes:
+            name = os.path.basename(path)
+            if name in files:
+                continue
+            files.append(name)
+            factory = namespace.get(EXAMPLE_FUNCTION)
+            if callable(factory):
+                return factory, name
+        said = f"the file has no {EXAMPLE_FUNCTION}()"
+        if len(files) > 1:
+            said = f"neither {files[0]} nor {files[1]} has an {EXAMPLE_FUNCTION}()"
+        return f"{said} to run {self.kernel.__name__} and {self.fn.__name__} on"
+
+    def _example(self) -> tuple[dict[str, Any], str] | str:
+        """The kernel's example inputs and which file's they are, or why none."""
         from loopty.cli import EXAMPLE_FUNCTION, select_inputs
 
-        factory = getattr(self.kernel.fn, "__globals__", {}).get(EXAMPLE_FUNCTION)
-        if not callable(factory):
-            return (
-                f"the file has no {EXAMPLE_FUNCTION}() to run {self.kernel.__name__} "
-                f"and {self.fn.__name__} on"
-            )
+        found = self._inputs_file()
+        if isinstance(found, str):
+            return found
+        factory, name = found
+        made = f"{EXAMPLE_FUNCTION}() of {name}"
         try:
             everything = factory()
         except Exception as exc:  # noqa: BLE001 - the module's code, reported
-            return f"{EXAMPLE_FUNCTION}() raised {type(exc).__name__}: {exc}"
+            return f"{made} raised {type(exc).__name__}: {exc}"
         if not isinstance(everything, dict):
-            return f"{EXAMPLE_FUNCTION}() did not return a dictionary"
+            return f"{made} did not return a dictionary"
         chosen = select_inputs(everything, self.kernel.__name__)
         if chosen is None:
-            return f"{EXAMPLE_FUNCTION}() has no inputs for {self.kernel.__name__}"
-        return dict(chosen)
+            return f"{made} has no inputs for {self.kernel.__name__}"
+        return dict(chosen), made
 
     def _compared(
         self, native: Mapping[str, Any], expected: Mapping[str, Any], fact: Any

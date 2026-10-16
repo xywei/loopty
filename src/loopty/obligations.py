@@ -73,6 +73,7 @@ from loopty.description import (
     disjunction,
 )
 from loopty.hypotheses import _sort_terms, substitute
+from loopty.source import as_spelled, is_check, is_zeros
 from loopty.term import Stmt, Term
 
 __all__ = [
@@ -300,6 +301,37 @@ def _described(domain: Any, what: str) -> Description:
             "state it from"
         )
     return found
+
+
+def _said(term: Term, stmt_id: str) -> str:
+    """A statement of ``term`` as a message names it: ``y[r] = ... (f.py:3)``.
+
+    By its text and line (:class:`loopty.source.Named`), which a part's
+    label and a reason name it by; a part's name keeps its id, which Lean
+    reads.
+    """
+    from loopty.handles import statement_names
+
+    return statement_names(term)(stmt_id)
+
+
+def _added(stmt: Stmt) -> bool:
+    """Whether loopty added ``stmt``: the zeros a program makes an array with,
+    or a check it puts before a call, whose loops no line of the source names."""
+    return not stmt.text and (is_zeros(stmt.id) or is_check(stmt.id))
+
+
+def _cell(term: Term, stmt: Stmt, array: str, indices: Sequence[Any]) -> str:
+    """``R[box, a, b]``: a cell ``stmt`` reaches, with the loops the source names.
+
+    Not ``R[box_0, a_1, b_1]``, as a program renames its calls' loops and
+    sums apart (:func:`loopty.source.as_spelled`); a statement loopty adds
+    reaches ``a cell of R``, by loops a program made for it.
+    """
+    if _added(stmt):
+        return f"a cell of {array}"
+    spelled = as_spelled(stmt, *indices, binders=term.binders)
+    return f"{array}[{', '.join(render(i) for i in spelled)}]"
 
 
 def _renamed(expr: Any, inames: Sequence[str], coords: Sequence[Any]) -> Any:
@@ -596,7 +628,7 @@ def disjoint_writes_obligation(
             "decided the question for every cell of the array, which is not this claim"
         )
     try:
-        domain = _described(stmt.domain, f"the loops of {stmt.id}")
+        domain = _described(stmt.domain, f"the loops of {_said(term, stmt.id)}")
         claim = Claim(term)
         first = claim.coordinates(stmt.inames, "a")
         second = claim.coordinates(stmt.inames, "b")
@@ -611,7 +643,7 @@ def disjoint_writes_obligation(
             )
         else:
             goal = True
-        label = f"two instances of {stmt.id} writing {array}"
+        label = f"two instances of {_said(term, stmt.id)} writing {array}"
         part = _lanky_obligations().Part("disjoint", label, claim.close(goal))
     except Unstatable as exc:
         return _declined(str(exc))
@@ -638,7 +670,7 @@ def element_sort_obligation(
 ) -> Any:
     """The value ``stmt`` writes is a point of ``sort``, at every instance."""
     try:
-        domain = _described(stmt.domain, f"the loops of {stmt.id}")
+        domain = _described(stmt.domain, f"the loops of {_said(term, stmt.id)}")
         points = _described(cells, f"the points of {sort}")
         claim = Claim(term)
         coords = claim.coordinates(stmt.inames)
@@ -646,7 +678,7 @@ def element_sort_obligation(
         value = _renamed(stmt.expr, stmt.inames, coords)
         others = dict(zip(stmt.inames, coords, strict=True))
         goal = points.predicate([value], others=others)
-        label = f"the value {stmt.id} writes"
+        label = f"the value {_said(term, stmt.id)} writes"
         part = _lanky_obligations().Part("element_sort", label, claim.close(goal))
     except Unstatable as exc:
         return _declined(str(exc))
@@ -802,20 +834,27 @@ def _footprint_place(
         place = [*coords, *extra]
     else:
         place = list(coords[: len(inames)])
-    described = _described(domain, f"the loops {', '.join(inames)} of {stmt.id}")
+    described = _described(
+        domain, f"the loops {', '.join(inames)} of {_said(claim.term, stmt.id)}"
+    )
     claim.hypotheses.append(described.predicate(place))
     return place
 
 
-def _access_label(a: Stmt, first: tuple, b: Stmt, second: tuple) -> str:
-    """``S0 writes u[t + 1, i] before S0 reads u[t, i - 1]``: one pair of accesses."""
+def _access_label(
+    term: Term, a: Stmt, first: tuple, b: Stmt, second: tuple
+) -> str:
+    """``u[t + 1, i] = ... (f.py:3) writes u[t + 1, i] before the same statement
+    reads u[t, i - 1]``: one pair of accesses, each statement named as a
+    message names it."""
     verbs = {"write": "writes", "read": "reads", "acc": "updates"}
 
-    def said(stmt: Stmt, access: tuple) -> str:
-        cell = f"{access[0]}[{', '.join(render(i) for i in access[1])}]"
-        return f"{stmt.id} {verbs.get(access[2], access[2])} {cell}"
+    def said(stmt: Stmt, access: tuple, name: str) -> str:
+        cell = _cell(term, stmt, access[0], access[1])
+        return f"{name} {verbs.get(access[2], access[2])} {cell}"
 
-    return f"{said(a, first)} before {said(b, second)}"
+    other = "the same statement" if a.id == b.id else _said(term, b.id)
+    return f"{said(a, first, _said(term, a.id))} before {said(b, second, other)}"
 
 
 def ordering_obligation(term: Term, verdict: Any) -> Any:
@@ -851,7 +890,9 @@ def ordering_obligation(term: Term, verdict: Any) -> Any:
             x = claim.coordinates(a.inames, "a")
             y = claim.coordinates(b.inames, "b")
             for stmt, coords in ((a, x), (b, y)):
-                domain = _described(stmt.domain, f"the loops of {stmt.id}")
+                domain = _described(
+                    stmt.domain, f"the loops of {_said(term, stmt.id)}"
+                )
                 claim.hypotheses.append(domain.predicate(coords))
             at_a = _footprint_place(claim, a, x, first[3], first[4], "c")
             at_b = _footprint_place(claim, b, y, second[3], second[4], "d")
@@ -869,7 +910,7 @@ def ordering_obligation(term: Term, verdict: Any) -> Any:
             parts.append(
                 lanky.Part(
                     f"dependence_{n}",
-                    _access_label(a, first, b, second),
+                    _access_label(term, a, first, b, second),
                     claim.close(before),
                 )
             )
@@ -912,7 +953,7 @@ def stated_writers(term: Term, writers: Sequence[Stmt]) -> list[Stmt]:
     """Writers whose domain is where they store: none under a guard isl cannot state.
 
     A guard conjunct isl cannot state (:attr:`loopty.term.Stmt.unnarrowed`,
-    ``with when(x[i] > 0)``) leaves a statement's domain wider than the
+    ``if x[i] > 0:``) leaves a statement's domain wider than the
     instances that store, so an instance of it in its domain is no witness
     that a cell was stored. Such a writer counts for nothing towards a cell
     being written, as :func:`loopty.flow.definedness` counts it. The flag of
@@ -1028,7 +1069,9 @@ def defined_obligation(
             coords = claim.coordinates(inames)
             at = dict(zip(inames, coords, strict=True))
             loops = ", ".join(inames)
-            described = _described(domain, f"the loops {loops} of {stmt.id}")
+            described = _described(
+                domain, f"the loops {loops} of {_said(term, stmt.id)}"
+            )
             claim.hypotheses.append(described.predicate(coords))
             read = [_renamed(index, inames, coords) for index in indices]
             now = _source_time(stmt, depth, coords[: len(stmt.inames)])
@@ -1036,7 +1079,9 @@ def defined_obligation(
             for writer in writers:
                 ys = claim.fresh_all(writer.inames, "w")
                 values = [ys[name] for name in writer.inames]
-                written = _described(writer.domain, f"the loops of {writer.id}")
+                written = _described(
+                    writer.domain, f"the loops of {_said(term, writer.id)}"
+                )
                 body = conjunction(
                     [
                         written.predicate(values),
@@ -1063,7 +1108,7 @@ def defined_obligation(
                 per_writer, coords, at, reflected, multiple=len(options) > 1
             )
             hints = lanky.Hints(witness=tuple(pieces)) if pieces else lanky.Hints()
-            label = f"{stmt.id} reads {array}[{', '.join(render(i) for i in indices)}]"
+            label = f"{_said(term, stmt.id)} reads {_cell(term, stmt, array, indices)}"
             parts.append(lanky.Part(f"read_{k}", label, claim.close(goal), hints))
     except Unstatable as exc:
         return _declined(str(exc))
@@ -1165,7 +1210,9 @@ def single_assignment_obligation(
                 x = claim.coordinates(first.inames, "a")
                 y = claim.coordinates(second.inames, "b")
                 for stmt, coords in ((first, x), (second, y)):
-                    domain = _described(stmt.domain, f"the loops of {stmt.id}")
+                    domain = _described(
+                        stmt.domain, f"the loops of {_said(term, stmt.id)}"
+                    )
                     claim.hypotheses.append(domain.predicate(coords))
                 if second is first:
                     # a statement without loops runs once: no two of its
@@ -1181,9 +1228,10 @@ def single_assignment_obligation(
                     )
                 )
                 label = (
-                    f"two instances of {first.id} storing into {array}"
+                    f"two instances of {_said(term, first.id)} storing into {array}"
                     if second is first
-                    else f"{first.id} and {second.id} storing into {array}"
+                    else f"{_said(term, first.id)} and {_said(term, second.id)} "
+                    f"storing into {array}"
                 )
                 parts.append(
                     lanky.Part(f"stores_{len(parts)}", label, claim.close(goal))
@@ -1195,9 +1243,13 @@ def single_assignment_obligation(
                 inner = claim.coordinates(stmt.inames[len(inames) :], "i")
                 y = claim.coordinates(writer.inames, "w")
                 loops = ", ".join(inames)
-                described = _described(domain, f"the loops {loops} of {stmt.id}")
+                described = _described(
+                    domain, f"the loops {loops} of {_said(term, stmt.id)}"
+                )
                 claim.hypotheses.append(described.predicate(x))
-                written = _described(writer.domain, f"the loops of {writer.id}")
+                written = _described(
+                    writer.domain, f"the loops of {_said(term, writer.id)}"
+                )
                 claim.hypotheses.append(written.predicate(y))
                 if all(_affine(index) for index in indices):
                     claim.hypotheses.append(
@@ -1217,11 +1269,12 @@ def single_assignment_obligation(
                 goal = lexicographically_before(
                     _source_time(writer, depth, y), _source_time(stmt, depth, at)
                 )
-                cell = f"{array}[{', '.join(render(i) for i in indices)}]"
+                cell = _cell(term, stmt, array, indices)
                 parts.append(
                     lanky.Part(
                         f"read_{len(parts)}",
-                        f"{writer.id} storing the {cell} {stmt.id} reads, before it",
+                        f"{_said(term, writer.id)} storing the {cell} "
+                        f"{_said(term, stmt.id)} reads, before it",
                         claim.close(goal),
                     )
                 )
@@ -1837,12 +1890,17 @@ def _time(
 
 
 def _relation(
-    step: Any, stmt_id: str, before: Mapping[str, Any], after: Mapping[str, Any]
+    step: Any,
+    stmt_id: str,
+    before: Mapping[str, Any],
+    after: Mapping[str, Any],
+    term: Term | None = None,
 ) -> Any:
     """One step's map of one statement, as a proposition between its coordinates.
 
     The statement's map as the step wrote it, and every coordinate the map
     does not take kept as it was, as :func:`loopty.schedule._step_map` keeps it.
+    ``term`` is the statement's, which names it in a reason.
 
     Raises:
         Unstatable: For a map isl computed (the part of a tile over one of its
@@ -1853,9 +1911,10 @@ def _relation(
     if stmt_id in step.isl_maps:
         written = step.maps.get(stmt_id)
         if written is None:
+            said = stmt_id if term is None else _said(term, stmt_id)
             raise Unstatable(
-                f"{step.text} moves {stmt_id} by the part of its map over the loops "
-                f"{stmt_id} runs in, which isl computed"
+                f"{step.text} moves {said} by the part of its map over the loops "
+                "it runs in, which isl computed"
             )
         inputs = written.inputs
         parts.append(written.relation(before, after))
@@ -1881,7 +1940,7 @@ def _chain(
     """
     names = origin._origin_layout.coords[stmt.id]
     coords = claim.coordinates(names, tag)
-    domain = _described(stmt.domain, f"the loops of {stmt.id}")
+    domain = _described(stmt.domain, f"the loops of {_said(origin._term, stmt.id)}")
     claim.hypotheses.append(domain.predicate(coords))
     stages = [dict(zip(names, coords, strict=True))]
     for k, step in enumerate(steps, start=1):
@@ -1892,7 +1951,9 @@ def _chain(
                 strict=True,
             )
         )
-        claim.hypotheses.append(_relation(step, stmt.id, stages[-1], after))
+        claim.hypotheses.append(
+            _relation(step, stmt.id, stages[-1], after, origin._term)
+        )
         stages.append(after)
     return stages
 
@@ -1974,28 +2035,25 @@ def _same_cell(
     return conjunction(parts)
 
 
-_VERBS = {
-    ("write", "read"): "read after",
-    ("read", "write"): "overwritten after",
-    ("write", "write"): "written again after",
-}
-
-
-def _class_label(a: Stmt, b: Stmt, first: tuple, second: tuple) -> str:
-    """``u[t, i - 1] read by S0 after u[t + 1, i] is written by S0``."""
-    from lanky.terms import render
-
-    def cell(access: tuple) -> str:
-        return f"{access[1]}[{', '.join(render(i) for i in access[2])}]"
-
+def _class_label(term: Term, a: Stmt, b: Stmt, first: tuple, second: tuple) -> str:
+    """``u[t, i - 1] read by ... (f.py:3) after u[t + 1, i] is written by the
+    same statement``: each statement named as a message names it, and each
+    cell with the loops the source names (:func:`_cell`), and the one the
+    zeros of an array write, the cell the other statement reaches, as ``the
+    same cell``."""
+    second_cell = _cell(term, b, second[1], second[2])
+    first_cell = (
+        "the same cell" if _added(a) else _cell(term, a, first[1], first[2])
+    )
     verb = {
         ("write", "read"): ("read", "written"),
         ("read", "write"): ("overwritten", "read"),
         ("write", "write"): ("written again", "written"),
     }[first[0], second[0]]
     return (
-        f"{cell(second)} {verb[0]} by {b.id} after {cell(first)} is {verb[1]} "
-        f"by {a.id}"
+        f"{second_cell} {verb[0]} by {_said(term, b.id)} after {first_cell} is "
+        f"{verb[1]} by "
+        + ("the same statement" if a.id == b.id else _said(term, a.id))
     )
 
 
@@ -2080,7 +2138,9 @@ def _monotone_parts(origin: Any, steps: Sequence[Any]) -> list[Any]:
         elif found.kind == "carried":
             producer, at, stored_first = found.through
             p = claim.coordinates(producer.inames, "p")
-            domain = _described(producer.domain, f"the loops of {producer.id}")
+            domain = _described(
+                producer.domain, f"the loops of {_said(term, producer.id)}"
+            )
             claim.hypotheses.append(domain.predicate(p))
             at_p = dict(zip(producer.inames, p, strict=True))
             reader, chain_r = (a, chain_a) if stored_first else (b, chain_b)
@@ -2251,7 +2311,8 @@ def _within_parts(origin: Any, steps: Sequence[Any], work: Any) -> list[Any]:
     lanky = _lanky_obligations()
     schedule = _schedule_module()
     term = origin._term
-    gone: set[str] = set()
+    # the zeros no read sees are gone before any step (Schedule._gone)
+    gone: set[str] = set(origin._gone)
     for step in steps:
         gone |= set(step.gone)
     # (statement, the cell its sum reads, its instruction's write)
@@ -2306,11 +2367,12 @@ def _within_parts(origin: Any, steps: Sequence[Any], work: Any) -> list[Any]:
         chain = _chain(claim, origin, stmt, steps, "a")
         same = _same_cell(origin, stmt, stmt, cell, write[2], chain[0], chain[0])
         claim.hypotheses.append(same)
-        written = f"{write[1]}[{', '.join(render(i) for i in write[2])}]"
+        written = _cell(term, stmt, write[1], write[2])
         parts.append(
             lanky.Part(
                 f"within_{count}",
-                f"the sum of {stmt.id} reads {written}, which its instruction "
+                f"the sum of {_said(term, stmt.id)} reads {written}, which its "
+                "instruction "
                 f"writes, on another work item of {', '.join(apart)}",
                 claim.close(False),
             )
@@ -2365,7 +2427,8 @@ def _cast_classes(origin: Any, steps: Sequence[Any]) -> list[_Class]:
     """Every dependence class a cast after ``steps`` is checked on.
 
     As :func:`_classes` lists them for the term, without a statement a step
-    took out (:attr:`loopty.schedule.Step.gone`); with the reads a
+    took out (:attr:`loopty.schedule.Step.gone`), or the schedule before
+    any step, the zeros no read sees; with the reads a
     substitution computes again, two classes per write of what its producer
     read (the read before it, and after it); and with the pairs of accesses
     of a window, at least one a write, that touch one slot. isl checks a
@@ -2376,7 +2439,8 @@ def _cast_classes(origin: Any, steps: Sequence[Any]) -> list[_Class]:
 
     schedule = _schedule_module()
     term = origin._term
-    gone: set[str] = set()
+    # the zeros no read sees are gone before any step (Schedule._gone)
+    gone: set[str] = set(origin._gone)
     for step in steps:
         gone |= set(step.gone)
     out: list[_Class] = []
@@ -2386,7 +2450,7 @@ def _cast_classes(origin: Any, steps: Sequence[Any]) -> list[_Class]:
         out.append(
             _Class(
                 f"dependence_{n}",
-                _class_label(a, b, first, second),
+                _class_label(origin._term, a, b, first, second),
                 a,
                 b,
                 first,
@@ -2440,8 +2504,8 @@ def _cast_classes(origin: Any, steps: Sequence[Any]) -> list[_Class]:
                             out.append(
                                 _Class(
                                     f"carried_{count}",
-                                    _class_label(a, b, first, second)
-                                    + f", through {producer.id}",
+                                    _class_label(origin._term, a, b, first, second)
+                                    + f", through {_said(origin._term, producer.id)}",
                                     a,
                                     b,
                                     first,
@@ -2466,7 +2530,7 @@ def _cast_classes(origin: Any, steps: Sequence[Any]) -> list[_Class]:
                 out.append(
                     _Class(
                         f"window_{count}",
-                        _class_label(one.stmt, other.stmt, first, second)
+                        _class_label(origin._term, one.stmt, other.stmt, first, second)
                         + f", one slot of {window.placement}",
                         one.stmt,
                         other.stmt,
@@ -2487,7 +2551,7 @@ def _bijective_parts(origin: Any, steps: Sequence[Any]) -> list[Any]:
     step = steps[-1]
     earlier = steps[:-1]
     assumed = step.assumptions
-    gone: set[str] = set()
+    gone: set[str] = set(origin._gone)
     for earlier_step in steps:
         gone |= set(earlier_step.gone)
     parts = []
@@ -2504,7 +2568,7 @@ def _bijective_parts(origin: Any, steps: Sequence[Any]) -> list[Any]:
         claim.hypotheses.extend(assumed)
         before = _chain(claim, origin, stmt, earlier, "a")[-1]
         images = claim.fresh_all(new, "image")
-        relation = _relation(step, stmt.id, before, images)
+        relation = _relation(step, stmt.id, before, images, term)
         params = {name: Var(name) for name in mapping.get_var_names(isl.dim_type.param)}
         form = _functional_form(mapping, [before[name] for name in inputs], params)
         witness = []
@@ -2521,7 +2585,7 @@ def _bijective_parts(origin: Any, steps: Sequence[Any]) -> list[Any]:
         parts.append(
             lanky.Part(
                 f"{stmt.id}_total",
-                f"every instance of {stmt.id} has an image",
+                f"every instance of {_said(term, stmt.id)} has an image",
                 claim.close(goal),
                 hints,
             )
@@ -2533,13 +2597,13 @@ def _bijective_parts(origin: Any, steps: Sequence[Any]) -> list[Any]:
         before = _chain(claim, origin, stmt, earlier, "a")[-1]
         first = dict(zip(new, claim.coordinates(new, "c"), strict=True))
         second = dict(zip(new, claim.coordinates(new, "d"), strict=True))
-        claim.hypotheses.append(_relation(step, stmt.id, before, first))
-        claim.hypotheses.append(_relation(step, stmt.id, before, second))
+        claim.hypotheses.append(_relation(step, stmt.id, before, first, term))
+        claim.hypotheses.append(_relation(step, stmt.id, before, second, term))
         goal = _equal([first[n] for n in new], [second[n] for n in new])
         parts.append(
             lanky.Part(
                 f"{stmt.id}_single_valued",
-                f"no instance of {stmt.id} has two images",
+                f"no instance of {_said(term, stmt.id)} has two images",
                 claim.close(goal),
             )
         )
@@ -2550,13 +2614,13 @@ def _bijective_parts(origin: Any, steps: Sequence[Any]) -> list[Any]:
         one = _chain(claim, origin, stmt, earlier, "a")[-1]
         other = _chain(claim, origin, stmt, earlier, "b")[-1]
         image = dict(zip(new, claim.coordinates(new, "c"), strict=True))
-        claim.hypotheses.append(_relation(step, stmt.id, one, image))
-        claim.hypotheses.append(_relation(step, stmt.id, other, image))
+        claim.hypotheses.append(_relation(step, stmt.id, one, image, term))
+        claim.hypotheses.append(_relation(step, stmt.id, other, image, term))
         goal = _equal([one[n] for n in old], [other[n] for n in old])
         parts.append(
             lanky.Part(
                 f"{stmt.id}_injective",
-                f"no two instances of {stmt.id} share an image",
+                f"no two instances of {_said(term, stmt.id)} share an image",
                 claim.close(goal),
             )
         )
@@ -2618,16 +2682,30 @@ def _refusal(
                 values |= _stages(origin, stmt, steps, coords, params, tag, part)
         except (Unstatable, isl.Error, KeyError, ValueError):
             return None
-        text = (
-            f"{source_id}{_shown(source)} and {sink_id}{_shown(sink)} at "
-            + ", ".join(f"{k}={v}" for k, v in params.items())
-        )
+        text = _pair_text(origin, (source_id, source), (sink_id, sink), params)
         return _counterexample(part, values, text)
     return None
 
 
-def _shown(coords: Mapping[str, int]) -> str:
-    return "[" + ", ".join(f"{k}={v}" for k, v in coords.items()) + "]"
+def _pair_text(
+    origin: Any,
+    source: tuple[str, Mapping[str, int]],
+    sink: tuple[str, Mapping[str, int]],
+    params: Mapping[str, int],
+) -> str:
+    """``u[t + 1, i] = ... (f.py:3) at t=0, i=8 and the same statement at t=1,
+    i=7, where nt=16``: a refused pair, as the refusal names it."""
+    from loopty.source import instances_text
+
+    named = getattr(origin, "_named", None)
+    if callable(named):
+        first, second = named(source, sink)
+    else:
+        first, second = instances_text(
+            {stmt.id: stmt for stmt in origin._term.stmts}, source, sink
+        )
+    sizes = ", ".join(f"{k}={v}" for k, v in params.items())
+    return f"{first} and {second}" + (f", where {sizes}" if sizes else "")
 
 
 def _stages(
@@ -2734,7 +2812,7 @@ def row_starts_obligation(
         for stmt in stmts:
             claim = Claim(term)
             coords = claim.coordinates(stmt.inames)
-            domain = _described(stmt.domain, f"the loops of {stmt.id}")
+            domain = _described(stmt.domain, f"the loops of {_said(term, stmt.id)}")
             claim.hypotheses.append(domain.predicate(coords))
             q = claim.fresh("q")
             off, cnt = Var(offsets), Var(counts)
@@ -2759,7 +2837,8 @@ def row_starts_obligation(
                 instances=(lanky.Instance(guard.index(render(step)), (at,)),)
             )
             label = (
-                f"{stmt.id} stores into {offsets}[{render(cell)}] the value it "
+                f"{_said(term, stmt.id)} stores into {offsets}[{render(cell)}] the "
+                "value it "
                 f"holds, where {offsets} starts at 0 and steps by {counts}"
             )
             parts.append(
@@ -2818,9 +2897,19 @@ def _piece_place(claim: Claim, piece: Any, tag: str = "") -> list[Any]:
     return coords
 
 
-def _address(piece: Any, coords: Sequence[Any]) -> Any:
-    """The address ``piece`` stores the cell ``coords`` at."""
-    return _renamed(plain(piece.address), piece.names, coords)
+def _address(piece: Any, coords: Sequence[Any], written: bool = False) -> Any:
+    """The address ``piece`` stores the cell ``coords`` at.
+
+    ``written``: as the layout's function writes it, where Python folded the
+    module constants it reads, ``3**3 * e`` for ``27*e``, and the strides of
+    loopy's dim_tags as the products of the extents nested inside, ``3 * 3 *
+    3`` (:attr:`loopty.layout.Piece.written`), so that Lean does the
+    arithmetic (#275).
+    """
+    address = piece.address
+    if written and getattr(piece, "written", None) is not None:
+        address = piece.written
+    return _renamed(plain(address), piece.names, coords)
 
 
 def _in_buffer(layout: Any, address: Any) -> Any:
@@ -3230,7 +3319,11 @@ def layout_same_obligation(first: Any, second: Any, verdict: Any) -> Any:
     cell of each is a cell of the other, a part per piece, when their pieces
     are not the same cells. A refuted one is stated with isl's cell when both
     have one piece. Where a size multiplies an index in either, the first
-    claim is a polynomial identity, which Lean multiplies out.
+    claim is a polynomial identity, which Lean multiplies out. Each address is
+    as the layout writes it, its module constants and dim_tags' strides not
+    folded, so that ``27 * e + a + 3 * b + 9 * c`` on both sides, which
+    Python computed, is ``3 ^ 3 * e + a + 3 * b + 3 ^ 2 * c = 3 * 3 * 3 * e
+    + a + 3 * b + 3 * 3 * c``, which Lean does (#275).
     """
     lanky = _lanky_obligations()
     parts = []
@@ -3243,7 +3336,9 @@ def layout_same_obligation(first: Any, second: Any, verdict: Any) -> Any:
                 cells = _described(other.cells, f"the cells of {other.label}")
                 claim.hypotheses.append(cells.predicate(coords))
                 goal = Comparison(
-                    _address(one, coords), "==", _address(other, coords)
+                    _address(one, coords, written=True),
+                    "==",
+                    _address(other, coords, written=True),
                 )
                 parts.append(
                     lanky.Part(
@@ -3373,18 +3468,19 @@ def window_obligation(window: Any) -> Any:
                         if isinstance(overwritten, bool)
                         else LogicalNot(overwritten)
                     )
-                    cell = (
-                        f"{window.array}"
-                        f"[{', '.join(render(i) for i in access.indices)}]"
-                    )
+                    cell = _cell(term, access.stmt, window.array, access.indices)
                     label = (
-                        f"{access.stmt.id} reads {cell} before another cell is "
+                        f"{_said(term, access.stmt.id)} reads {cell} before "
+                        "another cell is "
                         f"stored in its slot, {placement}"
                     )
                     name = f"read_{k}"
                     if len(producers) > 1:
                         name = f"read_{k}_{p}_{q}"
-                        label += f", stored by {first.id}, then by {second.id}"
+                        label += (
+                            f", stored by {_said(term, first.id)}, then by "
+                            f"{_said(term, second.id)}"
+                        )
                     parts.append(lanky.Part(name, label, claim.close(goal)))
     except Unstatable as exc:
         return _declined(str(exc))
@@ -3431,10 +3527,19 @@ def _window_refusal(
             values |= _stages(origin, stmt, steps, coords, params, tag, part)
     except (Unstatable, isl.Error, KeyError, ValueError):
         return None
-    text = (
-        f"{reader}{_shown(at)}, {stored_by}{_shown(stored)} and "
-        f"{written_by}{_shown(other)} at "
-        + ", ".join(f"{k}={v}" for k, v in params.items())
+    from loopty.source import instances_text
+
+    named = getattr(origin, "_named", None)
+    instances = ((reader, at), (stored_by, stored), (written_by, other))
+    if callable(named):
+        said = named(*instances)
+    else:
+        said = instances_text(
+            {stmt.id: stmt for stmt in origin._term.stmts}, *instances
+        )
+    sizes = ", ".join(f"{k}={v}" for k, v in params.items())
+    text = f"{said[0]}, {said[1]} and {said[2]}" + (
+        f", where {sizes}" if sizes else ""
     )
     return _counterexample(part, values, text)
 

@@ -22,7 +22,7 @@ from lanky.ledger import Status
 from lanky.prelude import Real
 
 from lines import where
-from loopty import Arr, Fin, Schedule, kernel, program, reduce_sum, when
+from loopty import Arr, Fin, Schedule, kernel, program, reduce_sum
 from loopty.executor import LoopyExecutor, emit_code
 from loopty.schedule import IllegalCast
 from loopty.window import Placement, WindowError
@@ -53,7 +53,7 @@ WINDOWS = load(ROOT / "tests" / "kernels" / "windows.py")
 def interior_flux(u: Arr[Fin[n], Real], f: Arr[Fin[n], Real]):  # noqa: F821
     """The flux at the interior points only."""
     for j in u.dom:
-        with when((j > 0) & (j + 1 < u.dom.size)):
+        if (j > 0) & (j + 1 < u.dom.size):
             f[j] = 0.5 * u[j] * u[j]
 
 
@@ -106,10 +106,10 @@ def test_the_window_after_the_fusion_is_three_cells_found_along_the_loop() -> No
     assert repr(window.placement) == "lambda j: j % 3"
     assert window.extents == (3,)
     assert windowed.history[-1] == "contract(burgers.f, lambda j: j % 3)"
-    assert facts(windowed)[-2:] == [
-        ("definedness", "decided"),
-        ("no-clobber", "decided"),
-    ]
+    # the definedness the window needs is the fact the schedule is made with,
+    # without the zeros of f (#290)
+    assert facts(windowed)[0] == ("definedness", "decided")
+    assert facts(windowed)[-1:] == [("no-clobber", "decided")]
     (no_clobber,) = [f for f in windowed.facts() if f.kind == "no-clobber"]
     assert no_clobber.statement == (
         "no read of burgers.f sees its slot overwritten after contract(burgers.f, "
@@ -298,7 +298,9 @@ def test_a_tag_before_the_window_is_refused_and_one_after_is_checked() -> None:
 def test_a_window_of_a_size_on_opencl_is_shared_and_a_group_axis_refused() -> None:
     # A row of n cells is kept in global memory on OpenCL, one for every work
     # item, so two elements on two work groups store into one slot of it.
-    pytest.importorskip("pyopencl")
+    # Where pyopencl is not installed, the schedule is checked on loopy's
+    # plain OpenCL target, which refuses the tag alike, so CI asks it too
+    # (#299).
     example = load(ROOT / "examples" / "sum_factorization.py")
     program = example.weak_derivative
     on_device = example.fused.retarget("opencl").contract(program.v)
@@ -308,12 +310,13 @@ def test_a_window_of_a_size_on_opencl_is_shared_and_a_group_axis_refused() -> No
     message = str(caught.value)
     assert (
         "stores v[0, 0, 0] in slot 0 of the window lambda e, a, b: b, which "
-        "along_r.S0[e=1, a=0, b=0]"
+        "the same statement at e=1, a=0, b=0 would now overwrite with "
+        "v[1, 0, 0] first"
     ) in message
     assert message.endswith(
-        "; v is kept in a window over the order this tag drops, one for every "
-        "work item since its size is not a number (in global memory on "
-        "OpenCL); a window of a number of cells is each work item's own"
+        "; weak_derivative.v is kept in a window over the order this tag drops, "
+        "one for every work item since its size is not a number (in global "
+        "memory on OpenCL); a window of a number of cells is each work item's own"
     )
 
 
@@ -394,6 +397,151 @@ def test_a_shift_register_inside_an_outer_loop_shifts_in_each_of_its_steps() -> 
     assert "f_window[0] = f_window[1];" in code
     assert code.count("for (") == 2
     agrees(WINDOWS.rows, schedule, row_inputs())
+
+
+# }}}
+
+
+# {{{ the zeros no read sees (#290)
+
+
+@kernel
+def halving(x: Arr[Fin[n], Real], f: Arr[Fin[n], Real]):  # noqa: F821
+    """``f[i]`` from ``f[i // 2]``, which at ``i = 0`` is ``f[0]`` itself."""
+    for i in f.dom:
+        f[i] = x[i] + f[i // 2]
+
+
+@kernel
+def copied(f: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+    """Every cell as it is."""
+    for i in y.dom:
+        y[i] = f[i]
+
+
+@program
+def halved(x, y):
+    """``halving`` reads ``f[0]`` before it stores it: the zero ``f`` is made with."""
+    f = Arr.zeros_like(x)
+    halving(x, f)
+    copied(f, y)
+
+
+@kernel
+def lagging(
+    x: Arr[Fin[n], Real],  # noqa: F821
+    w: Arr[Fin[k], Real],  # noqa: F821
+    f: Arr[Fin[n], Real],  # noqa: F821
+):
+    """The first ``k`` cells of ``x``, then each cell twice the one ``k`` before."""
+    for i in f.dom:
+        if i < w.dom.size:
+            f[i] = x[i] + 0.0 * w[i]
+        else:
+            f[i] = 2.0 * f[i - w.dom.size]
+
+
+@program
+def lag(x, w, y):
+    """``f[i - k]`` was stored before ``f[i]`` is, where ``k`` is at least one."""
+    f = Arr.zeros_like(x)
+    lagging(x, w, f)
+    copied(f, y)
+
+
+def zeroed(schedule: Schedule, array: str) -> bool:
+    """Whether the schedule's kernel zeroes the array where the program makes it."""
+    insn = schedule.lowering.insn_ids[f"{array}.zeros"]
+    return insn in {i.id for i in schedule.kernel.default_entrypoint.instructions}
+
+
+def test_a_schedule_runs_without_the_zeros_no_read_sees() -> None:
+    # Every cell divergence reads, flux stored before it, so the zeros burgers
+    # makes f with are work and nothing else: a schedule drops them before
+    # any step, on the fact a window and a substitution ask, which is its
+    # first, at the line that makes f.
+    schedule = Schedule(WINDOWS.burgers, sizes={"n": 16})
+    assert not zeroed(schedule, "f")
+    (made,) = schedule.facts()
+    assert (made.kind, made.status, made.decided_by) == (
+        "definedness",
+        Status.DECIDED,
+        "isl",
+    )
+    assert made.statement == (
+        "every cell of burgers.f that burgers reads, burgers.flux has stored by "
+        "the time it is read, so burgers runs without the zeros burgers.f is "
+        "made with"
+    )
+    assert made.where == where(WINDOWS.burgers, "f = Arr.zeros_like(u)")
+    assert made.id.endswith(":zeros:f") and made.provenance["array"] == "f"
+    # the same on every target, and after every step
+    device = Schedule(WINDOWS.burgers, target="opencl")
+    assert [fact.id for fact in device.facts()] == [made.id]
+    assert WINDOWS.fused.facts()[0].id == made.id
+    agrees(WINDOWS.burgers, schedule, burgers_inputs())
+    agrees(WINDOWS.burgers, WINDOWS.fused, burgers_inputs())
+
+
+def test_a_window_and_a_substitution_rest_on_the_fact_the_schedule_is_made_with():
+    made = WINDOWS.fused.facts()[0]
+    for schedule in (WINDOWS.windowed, WINDOWS.fused.substitute(WINDOWS.burgers.f)):
+        defined = [fact for fact in schedule.facts() if fact.kind == "definedness"]
+        assert defined == [made]
+    (no_clobber,) = [f for f in WINDOWS.windowed.facts() if f.kind == "no-clobber"]
+    assert no_clobber.rests_on == (made.id,)
+
+
+def test_the_zeros_a_read_sees_are_kept() -> None:
+    # shifted reads f[0] and f[n - 1], which interior_flux leaves as made: the
+    # zeros are the program's boundary, and every schedule keeps them.
+    schedule = Schedule(padded, sizes={"n": 8})
+    assert zeroed(schedule, "f")
+    assert schedule.facts() == ()
+    fused = schedule.fuse(padded.interior_flux.j, padded.shifted.i)
+    assert zeroed(fused, "f")
+    agrees(padded, fused, {"u": Arr.from_numpy(velocity(8)), "y": Arr.zeros(8)})
+
+
+def test_a_read_of_the_cell_its_own_instance_stores_sees_the_zeros() -> None:
+    # halving reads f[i // 2], which an earlier instance stored, except at
+    # i = 0, where it reads f[0] before it stores it: the zero. No dependence
+    # pairs an instance with itself, and a window that dropped the zeros was
+    # taken (and the definedness fact decided) all the same.
+    assert zeroed(Schedule(halved), "f")
+    halving_line = where(halving, "f[i] = x[i] + f[i // 2]")
+    with pytest.raises(IllegalCast) as caught:
+        Schedule(halved).contract(halved.f, lambda i: i)
+    assert str(caught.value) == (
+        f"contract(halved.f, lambda i: i) illegal: f[i] = x[i] + f[i // 2] "
+        f"({halving_line}) at i=0 reads f[0], the cell it stores, before it "
+        "stores it (at n=1, isl's choice), so the read sees the zeros the array "
+        "was made with, and a window would not"
+    )
+    fact = caught.value.fact
+    assert (fact.kind, fact.status) == ("definedness", Status.REFUTED)
+
+
+def test_a_read_before_a_later_store_is_asked_where_the_sizes_are_as_assumed():
+    # f[i - k] for i >= k reads a cell stored k steps before, where k >= 1;
+    # where k < 0 it reads one stored after it. Assumed k >= 1, the window
+    # is taken; the read after the store used to be looked for outside the
+    # assumption, and its witness was empty (a ValueError).
+    assumed = Schedule(lag).assume(lag.k >= 1)
+    windowed = assumed.contract(lag.f, lambda i: i)
+    defined = [fact for fact in windowed.facts() if fact.kind == "definedness"]
+    assert [fact.status for fact in defined] == [Status.DECIDED]
+    x = np.arange(1.0, 9.0)
+    agrees(lag, windowed, {"x": x, "w": np.zeros(3), "y": np.zeros(8)})
+    # assumed k >= 0 only, f[i - 0] is f[i] itself, at k = 0
+    lagged_line = where(lagging, "f[i] = 2.0 * f[i - w.dom.size]")
+    with pytest.raises(IllegalCast) as caught:
+        Schedule(lag).assume(lag.k >= 0).contract(lag.f, lambda i: i)
+    assert str(caught.value).startswith(
+        "contract(lag.f, lambda i: i) illegal: f[i] = 2.0 * f[i - w.dom.size] "
+        f"({lagged_line}) at i=0 reads f[0], the cell it stores, before it "
+        "stores it (at k=0, "
+    ), str(caught.value)
 
 
 # }}}
@@ -587,7 +735,8 @@ def test_a_loop_run_backwards_takes_its_window_and_a_window_refuses_it() -> None
         "statement at j=3 would now overwrite with f[3] first"
     )
     # a shift register shifts along a loop over increasing cells
-    with pytest.raises(ValueError, match="flux.S0 stores f at no index"):
+    flux = rf"f\[j\] = 0\.5 \* u\[j\] \* u\[j\] \({where(WINDOWS.flux, 'f[j] =')}\)"
+    with pytest.raises(ValueError, match=f"{flux} stores f at no index"):
         WINDOWS.fused.affine(WINDOWS.REVERSED).contract(
             WINDOWS.burgers.f, registers=True
         )
@@ -639,7 +788,7 @@ def stored_and_shifted(
 def lagged(g: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
     """g three cells back."""
     for k in y.dom:
-        with when(k >= 3):
+        if k >= 3:
             y[k] = g[k - 3]
 
 
@@ -705,13 +854,16 @@ def test_a_window_of_a_triangle_its_recurrence_reads_keeps_one_box() -> None:
     assert window.extents == (5, 5) and window.private
     assert [stmt.id for stmt in window.producers] == ["triangle.S0", "triangle.S1"]
     assert [stmt.id for stmt in window.readers] == ["triangle.S1", "triangle_sums.S0"]
-    assert [(f.kind, f.status, f.statement) for f in windowed.facts()[-2:]] == [
+    assert [(f.kind, f.status, f.statement) for f in windowed.facts()[:1]] == [
         (
             "definedness",
             Status.DECIDED,
-            "for contract(triangles.R), every cell of triangles.R that triangles "
-            "reads, triangles.triangle has stored by the time it is read",
+            "every cell of triangles.R that triangles reads, triangles.triangle "
+            "has stored by the time it is read, so triangles runs without the "
+            "zeros triangles.R is made with",
         ),
+    ]
+    assert [(f.kind, f.status, f.statement) for f in windowed.facts()[-1:]] == [
         (
             "no-clobber",
             Status.DECIDED,
@@ -826,7 +978,8 @@ def test_a_window_of_an_array_that_is_updated_is_refused_with_the_fix() -> None:
         with pytest.raises(WindowError) as caught:
             fused.contract(added.f, placement)
         assert str(caught.value).endswith(
-            "added.added_flux updates f[j] in place, starting from the zeros f was "
+            f"f[j] += 0.5 * u[j] * u[j] ({where(added_flux, 'f[j] +=')}) updates "
+            "f[j] in place, starting from the zeros f was "
             "made with, and a window keeps a value stored once, without them; "
             "store each cell once, f[j] = ... (a reduce_sum where the updates run "
             "over a loop), or keep f whole"
@@ -835,7 +988,8 @@ def test_a_window_of_an_array_that_is_updated_is_refused_with_the_fix() -> None:
     with pytest.raises(WindowError) as caught:
         Schedule(scattered, sizes={"n": 16}).contract(scattered.f)
     assert str(caught.value) == (
-        "contract(scattered.f): scattered.scattered_flux updates f[node[j]] in "
+        "contract(scattered.f): f[node[j]] += 0.5 * u[j] * u[j] "
+        f"({where(scattered_flux, 'f[node[j]] +=')}) updates f[node[j]] in "
         "place, starting from the zeros f was made with, and a window keeps a "
         "value stored once, without them; keep f whole"
     )
@@ -932,7 +1086,7 @@ def test_the_casts_after_a_window_state_its_slots() -> None:
     names = [part.name for part in cast_obligation(monotone.term).parts]
     assert any(name.startswith("window_") for name in names)
     assert not any(
-        part.name.startswith("dependence_") and "f.zeros" in part.label
+        part.name.startswith("dependence_") and "the zeros of" in part.label
         for part in cast_obligation(monotone.term).parts
     )
 
@@ -944,8 +1098,9 @@ def test_the_casts_after_a_window_read_by_updates_order_no_two_updates() -> None
     assert monotone.kind == "monotone"
     parts = cast_obligation(monotone.term).parts
     assert any(part.name.startswith("window_") for part in parts)
-    # two updates of a node need no order, and are no class
-    assert not any("y[" in part.label for part in parts)
+    # two updates of a node need no order, and are no class; a class's
+    # label starts with its cell
+    assert not any(part.label.startswith("y[") for part in parts)
 
 
 # }}}

@@ -68,8 +68,8 @@ cannot be retargeted, a run raises, or two kernels claim one fact id (below).
 A run that raises, whatever it raises, is reported by the exception's type and
 message, the kernel counts as failed, and the file's other kernels are still
 run; so is a file's ``example_inputs()`` that raises, and code generation that
-fails under ``--emit-code``. A body that tracing refuses natively (a ``when``
-guard whose native value is an integer) is a refuted agreement fact instead,
+fails under ``--emit-code``. A body that tracing refuses natively (an integer
+stored into an array of truth values) is a refuted agreement fact instead,
 with the refusal as its reason; see
 :meth:`loopty.executor.LoopyExecutor.differential`.
 
@@ -671,7 +671,15 @@ class RunVerb:
             if schedule.target == "opencl" and not pyopencl_installed():
                 # The file's own device schedule, where pyopencl is not
                 # installed: its facts are checked all the same, and are in
-                # the ledger below; the run is made where pyopencl is.
+                # the ledger below, and its code is the device's (#291); the
+                # run is made where pyopencl is.
+                if args.emit_code:
+                    try:
+                        print(emit_code(schedule))
+                    except Exception as exc:  # noqa: BLE001 - reported, as below
+                        print(f"  {type(exc).__name__}: {exc}")
+                        failures += 1
+                        continue
                 print(
                     "  not run here: running on a device needs pyopencl, which "
                     "is not installed; its facts are checked all the same"

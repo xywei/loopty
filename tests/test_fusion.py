@@ -25,8 +25,8 @@ import pytest
 from lanky.ledger import Status
 from lanky.prelude import Int, Nat, Real
 
-from lines import where
-from loopty import Arr, Fin, Schedule, kernel, program, reduce_sum, when
+from lines import named, where
+from loopty import Arr, Fin, Schedule, kernel, program, reduce_sum
 from loopty.executor import LoopyExecutor, emit_code
 from loopty.oracle import IslOracle
 from loopty.schedule import IllegalCast
@@ -45,7 +45,7 @@ def flux(u: Arr[Fin[n], Real], f: Arr[Fin[n], Real]):  # noqa: F821
 def divergence(f: Arr[Fin[n], Real], rhs: Arr[Fin[n], Real]):  # noqa: F821
     """Centred divergence of the flux, inside the boundary."""
     for i in rhs.dom:
-        with when((i > 0) & (i + 1 < rhs.dom.size)):
+        if (i > 0) & (i + 1 < rhs.dom.size):
             rhs[i] = -(f[i + 1] - f[i - 1]) / 2
 
 
@@ -53,7 +53,7 @@ def divergence(f: Arr[Fin[n], Real], rhs: Arr[Fin[n], Real]):  # noqa: F821
 def interior_flux(u: Arr[Fin[n], Real], f: Arr[Fin[n], Real]):  # noqa: F821
     """The flux at the interior points only."""
     for j in u.dom:
-        with when((j > 0) & (j + 1 < u.dom.size)):
+        if (j > 0) & (j + 1 < u.dom.size):
             f[j] = 0.5 * u[j] * u[j]
 
 
@@ -75,7 +75,7 @@ def doubled(f: Arr[Fin[n], Real], g: Arr[Fin[n], Real]):  # noqa: F821
 def front(f: Arr[Fin[n], Real], h: Arr[Fin[n], Real]):  # noqa: F821
     """The front half of ``f``."""
     for x in h.dom:
-        with when(2 * x < h.dom.size):
+        if 2 * x < h.dom.size:
             h[x] = f[x]
 
 
@@ -83,7 +83,7 @@ def front(f: Arr[Fin[n], Real], h: Arr[Fin[n], Real]):  # noqa: F821
 def back(h: Arr[Fin[n], Real], rhs: Arr[Fin[n], Real]):  # noqa: F821
     """The back half of ``h``, plus one."""
     for i in rhs.dom:
-        with when(2 * i >= rhs.dom.size):
+        if 2 * i >= rhs.dom.size:
             rhs[i] = h[i] + 1.0
 
 
@@ -98,7 +98,7 @@ def bump(u: Arr[Fin[n], Real]):  # noqa: F821
 def update(f: Arr[Fin[n], Real], u: Arr[Fin[n], Real]):  # noqa: F821
     """One explicit step of Burgers' equation, in place."""
     for i in u.dom:
-        with when((i > 0) & (i + 1 < u.dom.size)):
+        if (i > 0) & (i + 1 < u.dom.size):
             u[i] = u[i] - (f[i + 1] - f[i - 1]) / 2
 
 
@@ -146,7 +146,7 @@ def down(
     """Each cell less the one below it."""
     for p in b.dom:
         for q in b.dom[p]:
-            with when(p + 1 < b.dom.size):
+            if p + 1 < b.dom.size:
                 b[p, q] = g[p + 1, q] - g[p, q]
 
 
@@ -345,7 +345,7 @@ def rows(a, z, g):
 def mark(u: Arr[Fin[n], Real], m: Arr[Fin[n], Real]):  # noqa: F821
     """One at the interior points."""
     for j in u.dom:
-        with when((j > 0) & (j + 1 < u.dom.size)):
+        if (j > 0) & (j + 1 < u.dom.size):
             m[j] = 1.0
 
 
@@ -357,7 +357,7 @@ def masked(
 ):
     """``f`` where ``m`` is set, a guard isl cannot state."""
     for i in y.dom:
-        with when(m[i] > 0.5):
+        if m[i] > 0.5:
             y[i] = f[i]
 
 
@@ -375,10 +375,10 @@ def marked(u, y):
 def bounded(f: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
     """Store the first and last cells of ``f``, then read every cell."""
     for k in f.dom:
-        with when(k == 0):
+        if k == 0:
             f[k] = 1.0
     for e in f.dom:
-        with when(e + 1 == f.dom.size):
+        if e + 1 == f.dom.size:
             f[e] = 2.0
     for i in y.dom:
         y[i] = f[i] + 1.0
@@ -388,7 +388,7 @@ def bounded(f: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
 def first_edge(f: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
     """Store the first cell of ``f``, then read every cell."""
     for k in f.dom:
-        with when(k == 0):
+        if k == 0:
             f[k] = 1.0
     for i in y.dom:
         y[i] = f[i] + 1.0
@@ -437,7 +437,7 @@ def triple(u: Arr[Fin[n], Int], f: Arr[Fin[n], Int]):  # noqa: F821
 def forward(f: Arr[Fin[n], Int], y: Arr[Fin[n], Int]):  # noqa: F821
     """Each cell less the one before it, but the last."""
     for i in y.dom:
-        with when(i + 1 < y.dom.size):
+        if i + 1 < y.dom.size:
             y[i] = f[i + 1] - f[i]
 
 
@@ -720,6 +720,15 @@ def statements(schedule: Schedule) -> list[tuple[str, str]]:
     return [(fact.kind, fact.status.value) for fact in schedule.facts()]
 
 
+#: The fact a program's schedule is made with, before its steps', where no
+#: read sees the zeros of the array the program makes, which the schedule
+#: then runs without (#290).
+MADE = ("definedness", "decided")
+
+#: The two facts of a cast, decided.
+CAST = [("bijective", "decided"), ("monotone", "decided")]
+
+
 # }}}
 
 
@@ -753,7 +762,9 @@ def test_a_consumer_that_reads_the_zeros_is_decided_with_the_cells() -> None:
         "every cell of f that shifted reads is one interior_flux stored before "
         "it or one of the zeros f was made with"
     )
-    reason = "shifted.S0 reads the zeros at f[0] and f[n - 1]"
+    reading = named(padded.term, "shifted.S0")
+    assert reading == f"y[i] = f[i] + 1.0 ({where(shifted, 'y[i] =')})"
+    reason = f"{reading} reads the zeros at f[0] and f[n - 1]"
     assert fact.provenance["reason"] == reason
     decided = IslOracle().establish(fact)
     assert decided.status is Status.DECIDED
@@ -767,12 +778,14 @@ def test_a_consumer_that_reads_the_zeros_is_decided_with_the_cells() -> None:
     )
     assert "reason" not in front_half.provenance
     assert back_half.provenance["reason"] == (
-        "back.S0 reads the zeros at h[a0] for a0 <= n - 1, 2*a0 >= n"
+        f"{named(between.term, 'back.S0')} reads the zeros at h[a0] for "
+        "a0 <= n - 1, 2*a0 >= n"
     )
     # halved_flux stores the first half of f, and divergence reads the rest.
     (top,) = definedness(halved)
     assert top.provenance["reason"] == (
-        "divergence.S0 reads the zeros at f[a0] for 2 <= a0 <= n - 1, 2*a0 >= n"
+        f"{named(halved.term, 'divergence.S0')} reads the zeros at f[a0] for "
+        "2 <= a0 <= n - 1, 2*a0 >= n"
     )
     for fact in (front_half, back_half, top):
         assert IslOracle().establish(fact).status is Status.DECIDED
@@ -783,13 +796,13 @@ from __future__ import annotations
 
 from lanky.prelude import Real
 
-from loopty import Arr, Fin, kernel, program, when
+from loopty import Arr, Fin, kernel, program
 
 
 @kernel
 def interior_flux(u: Arr[Fin[n], Real], f: Arr[Fin[n], Real]):
     for j in u.dom:
-        with when((j > 0) & (j + 1 < u.dom.size)):
+        if (j > 0) & (j + 1 < u.dom.size):
             f[j] = 0.5 * u[j] * u[j]
 
 
@@ -844,17 +857,21 @@ def test_a_cell_the_reader_stores_itself_is_a_zero_or_its_own() -> None:
     # of what bounded stored, and the reason says it is one or the other.
     (fact,) = definedness(edged)
     assert IslOracle().establish(fact).status is Status.DECIDED
+    term = edged.term
     assert fact.provenance["reason"] == (
-        "bounded.S2 reads f[0] and f[n - 1], the zeros there unless bounded.S0 "
-        "or bounded.S1 stored them before the read, which is not asked"
+        f"{named(term, 'bounded.S2')} reads f[0] and f[n - 1], the zeros there "
+        f"unless {named(term, 'bounded.S0')} or {named(term, 'bounded.S1')} "
+        "stored them before the read, which is not asked"
     )
     # Storing only the first, the last cell is a zero nobody stored, at
     # every size it is not the first.
     (fact,) = definedness(half_edged)
     assert IslOracle().establish(fact).status is Status.DECIDED
+    reading = named(half_edged.term, "first_edge.S1")
     assert fact.provenance["reason"] == (
-        "first_edge.S1 reads the zeros at f[n - 1] when n >= 2; first_edge.S1 "
-        "reads f[0], the zeros there unless first_edge.S0 stored them before "
+        f"{reading} reads the zeros at f[n - 1] when n >= 2; {reading} "
+        f"reads f[0], the zeros there unless "
+        f"{named(half_edged.term, 'first_edge.S0')} stored them before "
         "the read, which is not asked"
     )
 
@@ -865,9 +882,11 @@ def test_a_write_isl_cannot_list_may_have_stored_the_zeros_read() -> None:
     # the fact is decided, and the reason says the zeros may be gone.
     (fact,) = definedness(scattered_into)
     assert IslOracle().establish(fact).status is Status.DECIDED
+    term = scattered_into.term
     assert fact.provenance["reason"] == (
-        "shifted.S0 reads the zeros at f[a0] for 0 <= a0 <= n - 1, unless "
-        "scatter.S0 stored them, which isl cannot list"
+        f"{named(term, 'shifted.S0')} reads the zeros at f[a0] for "
+        f"0 <= a0 <= n - 1, unless {named(term, 'scatter.S0')} stored them, "
+        "which isl cannot list"
     )
 
 
@@ -883,7 +902,8 @@ def test_a_read_under_a_guard_isl_cannot_state_is_not_shown_to_see_zeros() -> No
         assert fact.status is Status.ASSUMED, fact.statement
         assert fact.term is None
         reason = fact.provenance["reason"]
-        assert f"masked.S0 reads {array} under a guard isl cannot state (m[" in reason
+        reading = named(marked.term, "masked.S0")
+        assert f"{reading} reads {array} under a guard isl cannot state (m[" in reason
     y = Arr.zeros(6)
     marked(Arr.from_numpy(velocity(6)), y)
     assert y.numpy()[0] == 0.0 and y.numpy()[-1] == 0.0
@@ -967,7 +987,7 @@ def test_the_fused_loop_is_one_loop_and_agrees_with_the_native_run() -> None:
     assert fused.key == (
         "burgers[c].fuse(burgers.flux.j, burgers.divergence.i, shift=1)"
     )
-    assert statements(fused) == [("bijective", "decided"), ("monotone", "decided")]
+    assert statements(fused) == [MADE, *CAST]
     loop = fused.term.stmt("flux.S0").inames[0]
     assert fused._layout.coords["divergence.S0"] == (loop,)
     entry = fused.kernel.default_entrypoint
@@ -1001,7 +1021,7 @@ def test_a_fusion_is_a_map_per_statement_and_affine_takes_it_as_well() -> None:
     by_hand = Schedule(burgers).affine(
         f"{{ flux_S0[{j}] -> [k] : k = {j}; divergence_S0[{i}] -> [k] : k = {i} + 1 }}"
     )
-    assert statements(by_hand) == [("bijective", "decided"), ("monotone", "decided")]
+    assert statements(by_hand) == [MADE, *CAST]
     assert by_hand.order[-1] == "k"
     agrees(burgers, by_hand, burgers_inputs(9))
     with pytest.raises(ValueError, match="their maps have to make the same new ones"):
@@ -1021,7 +1041,7 @@ def test_a_fusion_in_place_runs_the_writes_after_the_reads() -> None:
     # update writes u[i] in place, which flux reads at j = i: run one step
     # behind, flux has read it by then.
     fused = Schedule(stepped).fuse(stepped.flux.j, stepped.update.i, shift=1)
-    assert statements(fused) == [("bijective", "decided"), ("monotone", "decided")]
+    assert statements(fused) == [MADE, *CAST]
     for size in (1, 3, 8):
         agrees(stepped, fused, {"u": Arr.from_numpy(velocity(size))})
 
@@ -1038,7 +1058,7 @@ def test_two_loops_fuse_with_a_shift_each() -> None:
         "fuse(squares.square2.i, squares.down.p, shift=1)"
     )
     fused = schedule.fuse(squares.square2.j, squares.down.q, shift=(1, 0))
-    assert statements(fused) == [("bijective", "decided"), ("monotone", "decided")]
+    assert statements(fused) == [MADE, *CAST]
     for rows, cols in ((1, 1), (2, 3), (6, 5)):
         a = np.arange(rows * cols, dtype=float).reshape(rows, cols) / 7.0
         agrees(
@@ -1054,7 +1074,7 @@ def test_a_statement_deeper_in_the_producer_moves_with_its_row() -> None:
     # rows_then_cells has a statement in r and one in r and c; the domain of
     # c is nested in r's, and moves along the producer's map with it.
     fused = Schedule(rows).fuse(rows.rows_then_cells.r, rows.row_sum.w)
-    assert statements(fused) == [("bijective", "decided"), ("monotone", "decided")]
+    assert statements(fused) == [MADE, *CAST]
     assert fused.buildable == (True, "")
     for size, width in ((1, 1), (3, 2), (5, 4)):
         a = np.arange(size * width, dtype=float).reshape(size, width) + 1.0
@@ -1077,7 +1097,7 @@ def test_the_outer_loop_of_a_nest_fuses_with_a_loop_of_one_level() -> None:
     fused = Schedule(squared_rows).fuse(
         squared_rows.square2.i, squared_rows.row_total.w
     )
-    assert statements(fused) == [("bijective", "decided"), ("monotone", "decided")]
+    assert statements(fused) == [MADE, *CAST]
     assert fused.buildable == (True, "")
     loop = squared_rows.term.stmt("square2.S0").inames[0]
     entry = fused.kernel.default_entrypoint
@@ -1106,7 +1126,7 @@ def test_the_outer_loop_fuses_after_a_split_or_a_tile() -> None:
         (1, base, i),
     ):
         fused = schedule.fuse(row, squared_rows.row_total.w)
-        expected = [("bijective", "decided"), ("monotone", "decided")] * steps
+        expected = [MADE, *CAST * steps]
         assert statements(fused) == expected
         assert fused.buildable == (True, ""), fused.buildable
         for rows, cols in ((1, 1), (3, 4), (5, 3)):
@@ -1122,7 +1142,7 @@ def test_a_call_between_the_fused_runs_after_their_loop() -> None:
     # order for the three (a CycleError) until those were cut back to the
     # dependences the casts were checked against.
     fused = Schedule(between).fuse(between.flux.j, between.back.i)
-    assert statements(fused) == [("bijective", "decided"), ("monotone", "decided")]
+    assert statements(fused) == [MADE, *CAST]
     entry = fused.kernel.default_entrypoint
     insns = {insn.id: insn for insn in entry.instructions}
     assert "front_S0" not in insns["back_S0"].depends_on
@@ -1262,7 +1282,9 @@ def test_a_statement_s_map_moves_every_loop_of_the_step_it_runs_in() -> None:
     term = rows.term
     row = term.stmt("rows_then_cells.S0").inames[0]
     cell = term.stmt("rows_then_cells.S1").inames[1]
-    with pytest.raises(ValueError, match=f"S1 runs in {row} as well"):
+    # named by the id the map names it by, with its text and line
+    shown = rf"S1 \(g\[r, c\] = .*\) runs in {row} as well"
+    with pytest.raises(ValueError, match=shown):
         Schedule(rows).affine(
             f"{{ rows_then_cells_S0[{row}] -> [q] : q = {row}; "
             f"rows_then_cells_S1[{cell}] -> [q] : q = {cell} }}"
@@ -1334,7 +1356,7 @@ def test_two_passes_fuse_on_the_element_loop_and_no_deeper() -> None:
     assert fused.key == (
         "two_passes[c].fuse(two_passes.along[0].e, two_passes.along[1].e)"
     )
-    assert statements(fused) == [("bijective", "decided"), ("monotone", "decided")]
+    assert statements(fused) == [MADE, *CAST]
     assert fused.buildable == (True, "")
     # One loop over the elements, and the two passes' row loops in it, one
     # after the other (the loops before them zero t).
@@ -1359,7 +1381,7 @@ def test_the_loops_named_are_the_depth_a_fusion_goes_down_to() -> None:
     outer = whole_nest.fuse(squares.square2.i, squares.down.p, shift=1)
     assert outer.history == ("fuse(squares.square2.i, squares.down.p, shift=1)",)
     assert len(outer.order) == loops - 1
-    assert statements(outer) == [("bijective", "decided"), ("monotone", "decided")]
+    assert statements(outer) == [MADE, *CAST]
     for height, width in ((1, 1), (2, 3), (6, 5)):
         a = np.arange(height * width, dtype=float).reshape(height, width) / 7.0
         agrees(
@@ -1452,14 +1474,17 @@ def test_a_read_of_a_cell_the_producer_does_not_store_is_refused() -> None:
         "padded.interior_flux has stored by the time it is read"
     )
     message = str(caught.value)
-    assert message.startswith("substitute(padded.f) illegal: padded.shifted reads f[")
-    assert "which padded.interior_flux does not store" in message
+    term = padded.term
+    assert message.startswith(
+        f"substitute(padded.f) illegal: {named(term, 'shifted.S0')} reads f["
+    )
+    assert f"which {named(term, 'interior_flux.S0')} does not store" in message
     assert "would see the zeros" in message
     assert len(fact.provenance["witness"]) == 1
     (program_fact,) = definedness(padded)
     assert IslOracle().establish(program_fact).status is Status.DECIDED
     # The same for h, whose back half back reads and front leaves zero.
-    with pytest.raises(IllegalCast, match="between.back reads h\\["):
+    with pytest.raises(IllegalCast, match=r"\(test_fusion.py:\d+\) reads h\["):
         Schedule(between).substitute(between.h)
 
 

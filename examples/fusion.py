@@ -44,6 +44,15 @@ within each. Without the shift,
 ``divergence`` at ``i`` would read ``f[i + 1]`` a step before ``flux`` stores
 it, and the refusal names that pair, and the shift that is accepted.
 
+*No zeros that no read sees.* ``f = Arr.zeros_like(u)`` zeroes every cell
+of ``f``, and ``flux`` stores every cell before ``divergence`` reads it, so
+no read sees those zeros. Every schedule of the program runs without them:
+the ``definedness`` fact, every cell ``divergence`` reads, ``flux`` stored
+before the read, is decided by isl when ``Schedule(burgers_rhs)`` is made,
+at the line that makes ``f``, and the window and the substitution below
+rest on it. A program that reads its zeros, as padding at a boundary, keeps
+them.
+
 *An intermediate is stored only as long as it is live.* Fused one step
 behind, the divergence reads ``f[j]`` and ``f[j - 2]`` at step ``j``, so three
 cells of ``f`` are live at once: ``contract(burgers_rhs.f)`` finds that
@@ -57,7 +66,7 @@ flux that overwrote it.
 
 *Or not at all.* ``substitute(burgers_rhs.f)`` computes ``0.5 * u[j] * u[j]``
 at each read instead (loopy's ``assignment_to_subst``), twice per flux, and the
-temporary goes, with the loop that zeroed it. That is legal because of the same
+temporary goes. That is legal because of the same
 ``definedness`` fact, and because nothing writes ``u`` in between (the
 ``monotone`` fact over the program as it now runs).
 
@@ -71,7 +80,7 @@ from __future__ import annotations
 import numpy as np
 from lanky.prelude import Real
 
-from loopty import Arr, Fin, IllegalCast, Schedule, kernel, program, when
+from loopty import Arr, Fin, IllegalCast, Schedule, kernel, program
 
 #: Sixteen points, as in ``composition.py``.
 N = 16
@@ -88,7 +97,7 @@ def flux(u: Arr[Fin[n], Real], f: Arr[Fin[n], Real]):
 def divergence(f: Arr[Fin[n], Real], rhs: Arr[Fin[n], Real]):
     """The centred divergence of the flux, at the interior points."""
     for i in rhs.dom:
-        with when((i > 0) & (i + 1 < rhs.dom.size)):
+        if i > 0 and i + 1 < rhs.dom.size:
             rhs[i] = -(f[i + 1] - f[i - 1]) / 2
 
 

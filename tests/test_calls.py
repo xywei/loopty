@@ -37,7 +37,6 @@ from loopty import (
     program,
     reduce_sum,
     table,
-    when,
 )
 from loopty.executor import LoopyExecutor, emit_code
 from loopty.faithful import KIND
@@ -359,7 +358,7 @@ def test_what_a_scalar_argument_reads_is_owed_if_the_callee_ignores_it() -> None
         y: Arr[Fin[m], Real],  # noqa: F821
     ):
         for i in y.dom:
-            with when(i + 1 < y.dom.size):
+            if i + 1 < y.dom.size:
                 y[i] = total(x, A[i + 1])
 
     (read,) = [f for f in _facts(guarded) if "read for the value" in f.statement]
@@ -897,7 +896,7 @@ def test_a_row_of_a_table_under_a_false_guard_is_not_read() -> None:
     @kernel
     def next_rows(x: Arr[Fin[2], Real], y: Arr[Fin[2], Real]):  # noqa: F821
         for i in y.dom:
-            with when(i + 1 < 2):
+            if i + 1 < 2:
                 y[i] = calls.dot(rows[i + 1], x)
 
     x = np.array([1.0, -1.0])
@@ -931,8 +930,9 @@ def test_a_scalar_sizes_the_callees_arrays() -> None:
 
 
 def test_a_rules_value_is_not_used_after_its_guard() -> None:
-    # A with block is no scope: z is the call's value compiled, and 0
-    # natively where i > 0 is false, where the call is not made.
+    # An if is no scope either: after it, z is bound only where i > 0 held,
+    # so natively the read of z raises at i = 0, and the trace refuses the
+    # branch where it does.
     @kernel
     def unit(s: Real) -> Real:
         return s + 1.0
@@ -940,15 +940,15 @@ def test_a_rules_value_is_not_used_after_its_guard() -> None:
     @kernel
     def inside(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
         for i in y.dom:
-            with when(i > 0):
+            if i > 0:
                 z = unit(x[i])
-                with when(x[i] < 10.0):
+                if x[i] < 10.0:
                     y[i] = z * 2.0
 
     @kernel
     def after(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
         for i in y.dom:
-            with when(i > 0):
+            if i > 0:
                 z = unit(x[i])
             y[i] = z
 
@@ -957,10 +957,9 @@ def test_a_rules_value_is_not_used_after_its_guard() -> None:
     np.testing.assert_array_equal(native, [0.0, 6.0, 8.0])
     np.testing.assert_array_equal(interpreted, native)
     np.testing.assert_array_equal(compiled, native)
-    native = Arr.zeros(3)
-    after(Arr.from_numpy(x), native)
-    np.testing.assert_array_equal(native.numpy(), [0.0, 3.0, 4.0])
-    with pytest.raises(TraceError, match=r"the value of unit\(x\[i\]\), called "):
+    with pytest.raises(UnboundLocalError):
+        after(Arr.from_numpy(x), Arr.zeros(3))
+    with pytest.raises(TraceError, match="on the branch where i <= 0"):
         after.term
 
 
@@ -994,7 +993,7 @@ def test_what_a_rows_indices_read_is_owed_if_the_callee_ignores_it() -> None:
         y: Arr[Fin[m], Real],  # noqa: F821
     ):
         for i in y.dom:
-            with when(i + 1 < y.dom.size):
+            if i + 1 < y.dom.size:
                 y[i] = second(A[p[i + 1]], 1.0)
 
     (read,) = [f for f in _facts(guarded) if "read for the row" in f.statement]
@@ -1009,7 +1008,7 @@ def test_a_rule_under_a_false_guard_is_not_called_natively() -> None:
     @kernel
     def guarded(A: Arr[Fin[m], Fin[n], Real], y: Arr[Fin[m], Real]):  # noqa: F821
         for i in y.dom:
-            with when(i < A.dom[i].size):
+            if i < A.dom[i].size:
                 y[i] = picky(A[i], i)
 
     A = RNG.standard_normal((4, 2))
@@ -1148,7 +1147,7 @@ def test_a_python_int_a_narrow_integer_does_not_hold_is_refused_alike() -> None:
     @kernel
     def short_of(y: Arr[Fin[n], Real]):  # noqa: F821
         for i in y.dom:
-            with when(i < 3):
+            if i < 3:
                 y[i] = small(i + 125)
 
     @kernel

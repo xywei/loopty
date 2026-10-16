@@ -382,7 +382,7 @@ class InProcessCTarget(_ReadDeclining, lp.ExecutableCTarget):
 
     loopy hoists a condition shared by every instruction of a kernel as far out
     as the iname it names allows, and one that names no iname, such as a
-    ``when(flag)`` or ``when(a > 0.5)`` guarding the whole body, goes out of the
+    ``if flag:`` or ``if a > 0.5:`` around the whole body, goes out of the
     device function into the host code around its call. ``lp.ExecutableCTarget``
     generates that host code and never runs it: its executor calls the device
     function directly. So the guard was gone and the body ran unconditionally
@@ -586,7 +586,7 @@ class InKernelOpenCLTarget(_ReadDeclining, lp.PyOpenCLTarget):
 
 
 class CheckedOpenCLTarget(_ReadDeclining, lp.OpenCLTarget):
-    """The ``opencl`` target where pyopencl is not installed: checked, not built.
+    """The ``opencl`` target where pyopencl is not installed: checked, not run.
 
     What a schedule for a device claims (the order of its loops, which work
     item runs each instance, whether loopy can build it) is read off the
@@ -597,9 +597,65 @@ class CheckedOpenCLTarget(_ReadDeclining, lp.OpenCLTarget):
     ``"opencl"`` is built on this one, and its facts are the ones it has
     where pyopencl is: a file keeps its device schedules beside the others,
     ``python file.py`` and ``lanky check file.py`` run anywhere, and the
-    ledger lists their facts. Generating their code and running them are
-    pyopencl's, and are refused here, saying so (:func:`require_pyopencl`).
+    ledger lists their facts.
+
+    Its kernel code is :class:`InKernelOpenCLTarget`'s, numpy's arithmetic
+    and pyopencl's complex numbers included (:class:`_OpenCLCode`), since
+    writing it needs nothing of pyopencl's but the names of its two complex
+    types (:meth:`get_dtype_registry`): ``loopty run --emit-code`` prints the
+    code a device runs on a machine with no device (#291). Running it is
+    pyopencl's, and is refused here, saying so (:func:`require_pyopencl`).
     """
+
+    hash_fields = (*lp.OpenCLTarget.hash_fields, "arithmetic")
+    arithmetic = CODE_DIGEST
+    #: What the kernel's declaration reads off the PyOpenCL target, at the
+    #: values :class:`InKernelOpenCLTarget` has: no argument passed in a
+    #: buffer of overflow arguments, and a host pointer's size.
+    limit_arg_size_nbytes = None
+    pointer_size_nbytes = tuple.__itemsize__
+
+    def get_device_ast_builder(self) -> Any:
+        return _OpenCLCode(self)
+
+    def get_dtype_registry(self) -> Any:
+        """loopy's OpenCL C types, and pyopencl's ``cfloat_t`` and ``cdouble_t``.
+
+        A complex number of the kernel is one of pyopencl's two structs, which
+        its header defines (``pyopencl-complex.h``, which the code includes).
+        The PyOpenCL target names them from pyopencl's registry of types, and
+        importing pyopencl is what registers them there; this one names them
+        itself, so that the code is the same.
+        """
+        return _checked_opencl_types(self.atomics_flavor, self.use_int8_for_bool)
+
+
+@functools.cache
+def _checked_opencl_types(atomics_flavor: str, use_int8_for_bool: bool) -> Any:
+    """The types of :class:`CheckedOpenCLTarget`, wrapped as loopy wraps its own."""
+    from loopy.target.c import CompyteDTypeRegistryWrapper
+    from loopy.target.c.compyte.dtypes import (
+        DTypeRegistry,
+        fill_registry_with_opencl_c_types,
+    )
+    from loopy.target.opencl import (
+        DTypeRegistryWrapperWithCL1Atomics,
+        DTypeRegistryWrapperWithInt8ForBool,
+        _register_vector_types,
+    )
+
+    registry = DTypeRegistry()
+    fill_registry_with_opencl_c_types(registry)
+    registry.get_or_register_dtype("cfloat_t", np.complex64)
+    registry.get_or_register_dtype("cdouble_t", np.complex128)
+    _register_vector_types(registry)
+    result = CompyteDTypeRegistryWrapper(registry)
+    if atomics_flavor != "cl1":
+        raise NotImplementedError(f"atomics flavor: {atomics_flavor}")
+    result = DTypeRegistryWrapperWithCL1Atomics(result)
+    if use_int8_for_bool:
+        result = DTypeRegistryWrapperWithInt8ForBool(result)
+    return result
 
 
 @functools.cache
@@ -611,12 +667,12 @@ def pyopencl_installed() -> bool:
 
 
 def require_pyopencl(kernel: Any) -> None:
-    """Refuse to generate or run code for a :class:`CheckedOpenCLTarget` kernel."""
+    """Refuse to run a :class:`CheckedOpenCLTarget` kernel; its code is printed."""
     if isinstance(kernel.target, CheckedOpenCLTarget):
         raise ImportError(
-            "generating and running OpenCL code needs pyopencl, which is not "
-            "installed here; the schedule's facts are checked without it. "
-            "Install loopty's opencl extra where the device is"
+            "running OpenCL code needs pyopencl, which is not installed here; "
+            "the schedule's facts are checked and its code is generated "
+            "without it. Install loopty's opencl extra where the device is"
         )
 
 
@@ -632,7 +688,8 @@ def target_for(target: str = "c") -> Any:
     here and nowhere else, inside the branch, so that importing loopty on a
     machine without a device costs nothing and can never fail; where
     pyopencl is not installed, it is :class:`CheckedOpenCLTarget`, whose
-    schedules are checked and not built. All of them write ``//``, ``%``,
+    schedules are checked and whose code is printed, and not run. All of
+    them write ``//``, ``%``,
     ``<<`` and ``>>`` as numpy computes them (:mod:`loopty.operations`).
     """
     if target in ("c", None):
@@ -771,10 +828,10 @@ class ExpressionLowerer(Mapper):
         alone, and loopy reads such a predicate as an isl set
         (``loopy.symbolic.condition_to_set``) for its bounds check, whose
         evaluator raised on a cast instead of declining it:
-        ``when(i ** 0.5 > 1.5)`` failed there. It declines one now
+        ``if i ** 0.5 > 1.5:`` failed there. It declines one now
         (:mod:`loopty.isl_reading`), but an integer is still widened without
         one, by a product with a 64-bit ``1``, so that loopy reads an affine
-        guard and narrows its bounds check by it: ``when(i * i < m)`` is
+        guard and narrows its bounds check by it: ``if i * i < m:`` is
         ``1l * i * i < m``, which wrapped round at ``i = 46341`` when its
         integers were left in 32 bits, and ``100000l * i < m`` is read. An
         operand numpy computes in double is multiplied by ``1.0``, which C
@@ -1379,6 +1436,17 @@ class ExpressionLowerer(Mapper):
     def map_logical_not(self, expr: Any) -> prim.Expression:
         return prim.LogicalNot(self.rec(expr.child))
 
+    def map_if(self, expr: Any) -> prim.Expression:
+        """A select, ``a if c else b``, which C computes with ``c ? a : b`` (#266).
+
+        A conditional expression of the body on data is one statement whose
+        value two paths choose between (:class:`loopty.trace.Select`); C
+        evaluates only the branch chosen, as the native run does.
+        """
+        return prim.If(
+            self.rec(expr.condition), self.rec(expr.then), self.rec(expr.else_)
+        )
+
     def map_lanky_abs(self, expr: Any) -> prim.Expression:
         """lanky's ``Abs``, as a call of ``abs`` is (:meth:`_absolute`)."""
         return self._absolute(expr, expr.operand)
@@ -1914,6 +1982,13 @@ def is_reserved(name: str) -> bool:
     return name in RESERVED_WORDS or RESERVED_PREFIX.match(name) is not None
 
 
+def _said(term: Term, stmt_id: str) -> str:
+    """A statement as a message names it: ``y[i] = x[i] (f.py:3)``."""
+    from loopty.handles import statement_names
+
+    return statement_names(term)(stmt_id)
+
+
 def _sanitize(name: str) -> str:
     """A loopy-safe identifier: every non-word character becomes an underscore."""
     return re.sub(r"\W", "_", name)
@@ -2214,9 +2289,8 @@ def _refuse_bounds_over_reduction_binders(term: Term, builder: _Builder) -> None
                     else:
                         continue
                     over = ", ".join(sorted(depends))
-                    where = f" ({stmt.where})" if stmt.where else ""
                     raise LoweringError(
-                        f"statement {stmt.id} of {term.name}{where} has a "
+                        f"the statement {_said(term, stmt.id)} of {term.name} has a "
                         f"reduction over {', '.join(inner.inames)} bounded by "
                         f"{bound}, which depends on {over}, the binder of the "
                         "reduction it is nested in. A bound that is not affine "
@@ -2591,7 +2665,7 @@ class _Builder:
 
         See :func:`_without_loops_ignored`; the loops are those of statement
         ``stmt_id``, over its domain, the points its instruction runs at: an
-        affine ``when`` narrows the domain, and the rest of a guard is the
+        affine ``if`` narrows the domain, and the rest of a guard is the
         instruction's predicate. The names a domain may name besides them are
         the ones a call fixes, its sizes and its scalars, and the binders of
         the statement's sums.
@@ -3336,7 +3410,7 @@ def _loops_before_fiber(loops: isl.Set, param: str) -> int:
     in ``for j in val.dom[r]: for k in val.dom[r]:`` the loop over ``k``
     reads the length once per ``j``, and only counting the loop over ``j``
     missed a rewrite inside it (#111). A guard can make that loop's bound
-    follow from another's, ``when(k == j)``, which isl then leaves out of the
+    follow from another's, ``if k == j:``, which isl then leaves out of the
     narrowed domain, and the body still reads it. When ``param`` bounds none
     of the loops, all of them count.
     """
@@ -3411,11 +3485,12 @@ def _refuse_bounds_rewritten_in_a_loop(
                     continue
                 loop = user.inames[row]
                 raise LoweringError(
-                    f"statement {user.id} is bounded by the row length "
-                    f"{count_params[count_id]}, which is computed from {source} "
-                    f"once per row, before the loop over {loop}; {writer.id} "
-                    f"rewrites that row's {source} inside that loop, so from its "
-                    f"second iteration on {user.id} would see the old length "
+                    f"the statement {_said(term, user.id)} is bounded by the row "
+                    f"length {count_params[count_id]}, which is computed from "
+                    f"{source} once per row, before the loop over {loop}; "
+                    f"{_said(term, writer.id)} rewrites that row's {source} inside "
+                    "that loop, so from its second iteration on it would see the "
+                    "old length "
                     "where the body reads the new one. Rewrite it outside the "
                     f"loop over {loop}, or in a kernel of its own."
                 )
@@ -3639,11 +3714,11 @@ def lower_generic(
                 count_id = stale[0]
                 source = count_reads[count_id]
                 raise LoweringError(
-                    f"statement {stmt.id} is bounded by the row length "
-                    f"{count_params[count_id]}, which is computed from {source} "
-                    f"once, where {first_use[count_id]} first needs it; "
-                    f"{rewritten[count_id]} rewrites {source} before {stmt.id} "
-                    f"runs, so {stmt.id} would see the old length. Rewrite "
+                    f"the statement {_said(term, stmt.id)} is bounded by the row "
+                    f"length {count_params[count_id]}, which is computed from "
+                    f"{source} once, where {_said(term, first_use[count_id])} first "
+                    f"needs it; {_said(term, rewritten[count_id])} rewrites {source} "
+                    "before it runs, so it would see the old length. Rewrite "
                     f"{source} after the last statement bounded by it, or in a "
                     "kernel of its own."
                 )
@@ -3944,14 +4019,16 @@ def _merge_domains(domains: Sequence[isl.Set]) -> list[isl.Set]:
     for the same reason. Identical domains are therefore dropped.
 
     Two domains over the same inames that are genuinely different sets are
-    merged by union, which is what a ``when`` guard produces: the guarded
-    statement's domain is narrower and the loop has to run over the wider of the
+    merged by union, which is what a branch produces: the statement under an
+    ``if`` has a narrower domain and the loop has to run over the wider of the
     two. The narrower statement does not simply inherit the union;
     :func:`_restore_narrower_domains` gives it back its own domain as an
     instruction predicate, so the loop is the union and the statement is not. A
-    union that is not convex is a nest loopy cannot express with one iname, and
-    saying so here names the domains rather than letting loopy fail later about
-    a generated instruction.
+    union that is not convex, ``i == 0`` and ``i == n - 1`` from ``if i == 0 or
+    i == n - 1:``, is no single domain loopy can give an iname, and the loop
+    runs over its convex hull instead, every statement predicated back to its
+    own points the same way. A hull isl cannot give as one piece is refused
+    here, naming the domains, rather than left to loopy to fail on later.
     """
     merged: list[isl.Set] = []
     for domain in domains:
@@ -3969,6 +4046,8 @@ def _merge_domains(domains: Sequence[isl.Set]) -> list[isl.Set]:
                 break
             union = left.union(right).coalesce()
             if union.n_basic_set() != 1:
+                union = isl.Set.from_basic_set(union.convex_hull())
+            if union.n_basic_set() != 1:  # pragma: no cover - a hull is one piece
                 raise LoweringError(
                     f"two domains over {names} that do not merge into one: "
                     f"{seen} and {domain}. loopy gives an iname a single "

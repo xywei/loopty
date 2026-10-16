@@ -52,7 +52,7 @@ from __future__ import annotations
 import numpy as np
 from lanky.prelude import Real
 
-from loopty import Arr, Fin, Schedule, kernel, program, when
+from loopty import Arr, Fin, Schedule, kernel, program
 
 #: Sixteen points: enough for the boundary to be visible, small enough that the
 #: three commands each take about a second.
@@ -70,7 +70,7 @@ def flux(u: Arr[Fin[n], Real], f: Arr[Fin[n], Real]):
 def divergence(f: Arr[Fin[n], Real], rhs: Arr[Fin[n], Real]):
     """The centred divergence of the flux, at the interior points."""
     for i in rhs.dom:
-        with when((i > 0) & (i + 1 < rhs.dom.size)):
+        if i > 0 and i + 1 < rhs.dom.size:
             rhs[i] = -(f[i + 1] - f[i - 1]) / 2
 
 
@@ -122,8 +122,9 @@ def main() -> int:
     for name, typ in term.temporaries:
         print(f"  temporary {name}: {len(typ.axes)} axis, element {typ.dtype}")
     for stmt in term.stmts:
-        loops = ", ".join(stmt.inames)
-        print(f"  {stmt.id:14} over {loops:3} from {stmt.where}")
+        # the zeros the program made f with are a statement no line writes
+        said = stmt.text or f"the zeros of {stmt.assignee.array}"
+        print(f"  {said:36} from {stmt.where}")
 
     print()
     print(emit_code(burgers_rhs))

@@ -18,6 +18,21 @@ took out is refused with that step. Everything a schedule prints names loops
 and arrays by these paths: its repr, its steps in the facts' statements and
 the ledger, the refusals and the fixes they suggest, and `loopty run`.
 
+A kernel body branches with Python's own `if`, `elif` and `else`, `and`,
+`or`, `not` and conditional expressions, and a loop nest is one line,
+`for box, a, b in R.dom:`. The trace runs the body once per path through its
+branches, answering each traced condition from the path, and joins the runs
+into one term; `with when(...)` is gone. The flagship kernel reads as a
+numpy user writes it:
+
+```python
+for box, a, b in R.dom:
+    if a < 2:
+        R[box, a, b] = C[box, a, b]
+    else:
+        R[box, a, b] = -R[box, a - 2, b + 2]
+```
+
 ### Breaking
 
 - **Every step takes handles, and a string is a `TypeError`** that writes
@@ -62,8 +77,73 @@ the ledger, the refusals and the fixes they suggest, and `loopty run`.
   `k.arrays.term` or `k.loops.sizes`, and its definition warns with
   `ShadowedName`, naming the long form. `examples/p2p.py`'s `term` is
   `contribution` for this reason.
+- **`with when(condition):` is removed.** Using it raises a `TraceError`,
+  natively and traced, under any name it is imported as, that shows the
+  `if` to write in its place, read off the source, and an `else` where the
+  next block is the complementary `when`. The native run takes the branch
+  each point takes, where `when` ran the block and masked its writes, so a
+  read the condition protects is not made where it fails: the masked
+  branch read `R[box, a - 2, b + 2]` at `a < 2`, a negative index numpy
+  wraps. `loopy` is unchanged: a statement still carries its path's
+  conditions as predicates.
+
+  | 0.3 | 0.4 |
+  |---|---|
+  | `with when(a < 2):` ... `with when(a >= 2):` ... | `if a < 2:` ... `else:` ... |
+  | `with when((i > 0) & (i + 1 < n)):` | `if i > 0 and i + 1 < n:`, or `if (i > 0) & (i + 1 < n):` |
+  | `with when(~(i > 0)):` | `if not (i > 0):`, or `if i <= 0:`; `if ~(i > 0):` is refused, since `~` of a Python bool is `-2` or `-1`, which Python's `if` takes as true |
+  | `with when(x[i] > 0): f[i] = a[i]` and `with when(x[i] <= 0): f[i] = b[i]` | `f[i] = a[i] if x[i] > 0 else b[i]`, one statement with a select |
+  | `for i in R.dom: for a in R.dom[i]: for b in R.dom[i, a]:` | unchanged, or `for i, a, b in R.dom:` |
+
+- **A condition on a loop variable whose loop has closed** (`if i > 0:`
+  after `for i in x.dom:`) is refused as a write that mentions it is, and
+  **`~` of a Python bool in a condition** is refused by the trace, naming the
+  comparison and `not`: natively it is an integer Python's `if` takes as
+  true, which nothing else refuses.
 
 ### Added
+
+- **Branches** (`loopty.trace`). A traced condition's truth value is
+  answered by the tracer (`Tracer.decide`), which runs the body again until
+  every condition it asked has been answered both ways: one run per path.
+  Each statement carries the conditions of its path as its guard, narrowing
+  its isl domain where isl states them and evaluated at run time otherwise,
+  as `when`'s guard was, and each condition's reads are stated where the
+  conditions before it held (`Stmt.path`): `if i > 0 and x[i - 1] > 0:`
+  reads `x[i - 1]` only where `i > 0`. The runs are joined: a statement
+  after an `if`/`else` is recorded once, its guards `g and c` and `g and not
+  c` merged to `g`; a statement whose value two paths choose between under
+  a condition on data is one statement whose value is a select
+  (`loopty.trace.Select`, pymbolic's `If`, `?:` in C), the value select the
+  advection flux lacked (#266); a path isl shows to be empty (`a < 2` and
+  then `a == 3`) records nothing. One run answers a condition once, as
+  `x and y` asks `x` twice when it is false; a condition computed again
+  after the run wrote an array it reads is another condition, answered
+  apart, and the value a name holds, asked again, is the condition it was.
+  Records of one path, by runs that parted after the statement, are joined
+  first, so a statement between two branches on data is one statement. The
+  runs are capped at `loopty.trace.MAX_RUNS`, 256, refused past it with the
+  conditions and what to write instead; a `while` on a traced condition is
+  refused, since its paths have no bound; and a branch that raises is
+  refused with its path, `on the branch where a >= 2`. A condition the trace
+  can evaluate, a module constant, is Python's own. Two more are refused,
+  each naming its
+  statements: a statement under a condition on an array, or a value that
+  selects by one, where a statement after the `if` and before it (or in a
+  loop opened after the `if` that holds both) writes that array, since the
+  term asks the condition again as each statement runs, where Python asked
+  it once, so `if x[i] > 0: x[i] = -1.0 else: x[i] = 1.0` would run both
+  branches (write it as one statement, `x[i] = -1.0 if x[i] > 0 else
+  1.0`); and a statement that a branch inside a closed loop decides, `a =
+  1.0 if i == 0 else 2.0` in the loop and `y[0] = a` after it, which
+  natively is the last iteration's choice.
+- **One-line loop nests.** `for box, a, b in R.dom:` is the three loops `for
+  box in R.dom`, `for a in R.dom[box]` and `for b in R.dom[box, a]`, natively
+  and traced, with those binder names and their scoped handles
+  (`reconstruct.box`, `reconstruct.a`, `reconstruct.b`).
+- **A loop whose statements' domains do not merge into one set**, the two
+  points of `if i == 0 or i == n - 1:`, runs over their convex hull,
+  each statement predicated back to its own points.
 
 - **Handles** (`loopty.handles`). A kernel's and a program's attributes are
   its loops, arrays, sizes and calls, made from the traced body: `for` and
@@ -88,8 +168,32 @@ the ledger, the refusals and the fixes they suggest, and `loopty run`.
 - **The term records where its names come from** (`loopty.term.Binder`,
   `loopty.term.Callsite`): each binder's name, its line and the calls it is
   in, and each call's labels, kernel, line and arrays.
+- **A device schedule's code where pyopencl is not installed** (#291).
+  `loopty run --emit-code` and `loopty.executor.emit_code` print the OpenCL
+  C of a schedule for `"opencl"` on `CheckedOpenCLTarget`, the code
+  `InKernelOpenCLTarget` generates where pyopencl is, numpy's arithmetic and
+  pyopencl's complex numbers included. Running it still needs pyopencl, and
+  says so.
 
 ### Changed
+
+- **A schedule runs without the zeros no read sees** (#290). Where isl
+  decides that every cell a program's calls read of an array it makes, an
+  earlier call stored, the definedness `substitute` and `contract` ask, the
+  schedule drops the zeros the program makes the array with, on every
+  target and before any step. The fact is the schedule's first, at the line
+  that makes the array (`every cell of burgers_rhs.f that burgers_rhs reads,
+  burgers_rhs.flux has stored by the time it is read, so burgers_rhs runs
+  without the zeros burgers_rhs.f is made with`), and a window or a
+  substitution rests on it instead of a definedness fact of its own. So a
+  split loop that stores such an array is legal on a device (#289):
+  `examples/l2p.py`'s `on_a_gpu` zeroes nothing, and the C target no longer
+  zeroes what the executor allocates as zeros. Zeros a read sees, padding at a
+  boundary, are kept, and a tag refused for them says which read sees them.
+- The definedness of a window or a substitution is refused for a read of
+  the cell its own instance stores, `f[i] = x[i] + f[i // 2]` at `i = 0`,
+  which no dependence pairs with its store, and asks whether a read comes
+  before a later store under what `assume` says of the sizes.
 
 - Every printed loop, array and statement of a schedule is its path. The
   zeros a program makes an array with are `the zeros of l2p.R`, with the
@@ -105,6 +209,159 @@ the ledger, the refusals and the fixes they suggest, and `loopty run`.
 - `examples/l2p.py` names its boxes `box` where it named them `i`, and its
   three calls fuse in one step, so `fused` has two cast facts where it had
   four.
+- **A sum's operands that read none of its binders are computed once,
+  before the sum** (#270), in the code a kernel or a schedule generates, as
+  a loopy author writes `<> x = ...` before it. `x` and `y` of
+  `examples/l2p.py`'s `evaluate`, Python locals the trace reads into the
+  summand, were divided out at every term of the triangle; `loopty run
+  --emit-code` now shows them assigned once per target, `invariant_0 = (tx[...]
+  + -1.0 * cx[box]) / rscale`, and the sum reading `invariant_0`. The loop
+  form of `contracted` on C, one core, at order 10: 33.0 ms before, 29.7 ms
+  after, plain loopy's own loop 29.2 ms. The potentials are the same bits:
+  only a whole operand moves, or the leading operands of a real sum or
+  product, of the type it is computed in where it stands, under the
+  statement's guard, and one that reads an array only where its cells are
+  in bounds at every instance or the sum has a term at every instance (note
+  33 in `docs/loopy-notes.md`). No fact changes: the steps transform and
+  check the kernel as it is lowered, and the temporaries are in the code
+  generated after them (`loopty.hoist`).
+- **Two layouts at a number are stated for Lean as written (#275).** At a
+  module constant, `N = 3`, Python folds `N**3 * e + (a + N * b + N**2 *
+  c)` to `27*e + a + 3*b + 9*c` before loopty reads it, and `dim_tags`
+  built the same sum from its strides, so `--show-lean as_dim_tags` in
+  `examples/storage_layouts.py` read `27 * e + a + 3 * b + 9 * c = 27 * e +
+  a + 3 * b + 9 * c`: true, and the arithmetic Python's. A layout's body is
+  now run once more with each module constant it reads a symbol, and the
+  number put back unfolded, and `dim_tags` gives each stride as the product
+  of the extents nested inside it, so Lean is asked `3 ^ 3 * e + a + 3 * b
+  + 3 ^ 2 * c = ((3 * 3) * 3) * e + a + 3 * b + (3 * 3) * c`, and proves
+  it. isl reads the address Python computed, as before; a body that
+  branches on a constant keeps the folded address alone.
+- **The flagship's agreement with sumpy says how close it is (#278).**
+  `sumpy_l2p` is `@upstream(l2p, within=1e-14)`, and its row reads `the
+  native run of l2p agrees with sumpy_l2p in pot within 1e-14 of the largest
+  value, on its example inputs`, where it said only that the two agree to
+  the `approx` class, a millionth. On the example inputs the two differ by
+  8.3e-17 where the largest potential is 0.217.
+- A ledger row, a reason and a refusal about one statement name it as a
+  refused pair names its instances, by its text, shortened as they shorten
+  it, and its line, where they named it by its id (#274): `y[r] is in bounds
+  for every instance of y[r] = reduce_sum(...) (spmv.py:114)`, not `... of
+  S0`; `every cell of off that off[r + 1] = off[r] + cnt[r] (spmv.py:83)
+  reads was written before the read, by off[0] = 0 (spmv.py:81) or itself`,
+  not `every cell of off that S1 reads, S0 or S1 wrote before the read`;
+  the definedness reasons, `y[i] = f[i] + 1.0 (padding.py:19) reads the
+  zeros at f[0] and f[n - 1]`, not `shifted.S0 reads ...`; and atomic's,
+  the window refusals, a program's flat access and loopy's guard refusals
+  the same way. A statement loopty adds is named by what it is: `the zeros
+  of l2p.R (l2p.py:317)`, and `the check of perm before travel.gather
+  (travel.py:106)` with its flag `the check's flag`. A program's access is
+  spelled with the source's loop names, `val[off[r] + j]` and not
+  `val[off[r_0] + j]`, and so is the cell of an update it refuses. Fact
+  ids, the witnesses in a fact's provenance and a map per statement still
+  name a statement by its id, which is how such a map names it; its
+  refusals give both, `S0 (y[r] = 0.0, rows.py:12)`.
+  `loopty.source.Named` and `loopty.handles.statement_names` do the naming.
+- The parts of a cast, and of a kernel's ordering and definedness facts,
+  that `--verbose` and Lean show name their statements the same way, and
+  spell each cell with the loops and sums the source names (#307):
+  `R[box, a, b] written again by R[box, a, b] = -R[box, a - 2, b + 2]
+  (l2p.py:273) after R[box, a, b] is written by R[box, a, b] = C[box, a, b]
+  (l2p.py:271)`, not `R[i_0, a_0, b_0] written again by reconstruct.S1
+  ...`; zeros a read sees, which a schedule keeps, write `a cell of f`, and
+  a statement after them `the same cell`; and a sum's
+  binder as written, `R[box, a, b]` and not `R[box, a_1, b_1]`. So does the
+  reason a cast through the part of a tile isl computed is not offered to
+  Lean, and the rule of a theorem's series row.
+- **`IllegalCast.instances`** is the witness's pair as the message names
+  it, `('u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2 (stencil_skew.py:61)
+  at t=0, i=8', 'the same statement at t=1, i=7')`; `witness` keeps the
+  ids. `examples/stencil_skew.py` and `examples/wavefront_acoustic.py`
+  print it, `witness: ... runs before the same statement at t=1, i=7, where
+  nt=16, nx=16`, where they printed the tuple, and their `rejected_*`
+  functions return the refusal, not its message and witness. The wave demo
+  lists the ids its map per statement names, each with its statement, and
+  `examples/calls.py` and `examples/composition.py` show a statement's text
+  where they showed its id.
+
+### Fixed
+
+- `realize(k.y, tree=True)` records one fact, that the accumulation into
+  `k.y` is reassociated, and no `bijective` or `monotone` fact: the step
+  moves no instance and changes no order, so the two said nothing about it,
+  as `atomic`'s did not (#203). `examples/spmv.py`'s ledger is two rows
+  shorter, and so is `examples/p2p.py`'s.
+- A program fact's term in the JSON ledger (`lanky check --json`, `loopty
+  run --json`) is one text whatever the hash seed: a hypothesis prints the
+  arrays it mentions sorted, where a frozenset printed them in the order of
+  the process's hash seed, `{'C', 'R'}` in one run of `examples/l2p.py` and
+  `{'R', 'C'}` in another (#298).
+- The test suite passes with the `opencl` extra installed. The two tests
+  that ask that nothing imports pyopencl ask it where pyopencl is not
+  installed, since `import loopy` imports it where it is; the test of
+  `loopty run --target opencl` on a machine without pyopencl hides it (#179).
+  The refusal of a group axis over a window kept in global memory is asked
+  without pyopencl too, on loopy's plain OpenCL target, so that CI sees it,
+  and with the refusal's wording since #276 (#299).
+- **A program may pass one array to two parameters a kernel only reads
+  (#221).** `outer_product(u, u, z)` runs natively, since reads do not race,
+  and the program's term was refused when it was built. The term now names
+  `u` once, and the two parameters' sizes are unified, so `a: Arr[Fin[n],
+  Real]` and `b: Arr[Fin[m], Real]` make `n` and `m` the one length of `u`.
+  A kernel that writes either is still refused, now saying which it writes;
+  and what its contract checks of an array an earlier call wrote is checked
+  once, however many parameters it is given for.
+- **A union with sizes of other names (#249).** A kernel over `Fin[m] +
+  Fin[m]` given an array built over `Fin[n] + Fin[n]` read no size off a
+  union natively, so its contract could not tell what `m` is and refused
+  the call, while the program that passes it on composed. Each piece is now
+  solved for its sizes as a `Where` is.
+- **A program's `x.dom[i].size` checks that the fiber exists (#250).** The
+  composer kept the axis and not the index, so `x.dom[99].size`, and
+  `x.dom[0].size` of an `x` with no rows, were read as the length of `x`'s
+  second axis, where natively `x.dom[99]` raises `IndexError`. The term
+  keeps the fiber (`loopty.term.Fiber`), an index out of range at every size
+  is refused when the term is built, and the compiled run is refused at
+  sizes that leave the fiber out, with `IndexError`, as natively.
+- **A refused call after a checked point keeps what ran before it (#176).**
+  The compiled program ran every call, the refused one and those after it
+  included, and wrote back what they computed before it raised the
+  refusal, where natively the program stops inside the refused call. The
+  run is now of the program stopped at that call by a flag of its own
+  (`loopty.compose.stopped_at`), so the caller's arrays hold what the calls
+  before it wrote, as natively.
+- **A layout called in a traced kernel is checked by the address the call
+  returned (#236).** At symbolic indices the check called the layout's
+  function a second time, on fresh variables, and compared that term with
+  the stated one, so a function that answers differently when called again
+  passed, and the kernel read through a subscript the layout's facts say
+  nothing about. The term the call returned, which the trace records, is
+  now compared with the stated address at the call's own indices and
+  sizes: the same term, the same polynomial multiplied out, or the same
+  quasi-affine function as isl reads it.
+- **`@upstream` runs on the comparison's own file's `example_inputs()`
+  (#262).** It read the kernel's module's, so a comparison declared in a
+  file of its own, importing the kernel (`from l2p import l2p` in
+  `l2p_vs_sumpy.py`), was `assumed` where the kernel's file has none, or
+  compared on inputs the comparison file did not mean. The comparison's
+  file comes first, then the kernel's, and the row's provenance says whose
+  were used (`inputs`: `example_inputs() of l2p.py`).
+- **A theorem a kernel cites that gives it nothing says why (#234).** It
+  had no row and no reason anywhere, so a recurrence off by one, a guard
+  off by one or a conjunct about reals that rounds looked the same as a
+  theorem never cited, and an exception of the matcher was taken for a
+  theorem that does not apply. Such a theorem now has a row of kind
+  `by-theorem`, `assumed`, `on_the_triangle, which off_by_one cites,
+  applies to it`, and `lanky check` says why under the table, in the
+  kernel's terms: the hypothesis about an array the kernel writes that no
+  conjunct of the postcondition is, put in the kernel's names, with the
+  nearest conjunct (`no conjunct of the postcondition of off_by_one is its
+  hypothesis recurrence, ... R[a + 2, b] == -R[a, b + 2]; the nearest is
+  ... R[a + 2, b] == -R[a, b + 1]`); the conjunct about reals that would be
+  a hypothesis and rounds; the binding no array or size can stand for
+  (`its integer k would be s, which is no integer of fill's`); a conclusion
+  that rounds; a refuted postcondition; or the exception. A theorem that
+  decides a conjunct of the postcondition, or gives a row, has none.
 
 ## [0.3.0] - 2026-10-15
 

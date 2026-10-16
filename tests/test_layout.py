@@ -16,8 +16,9 @@ from pathlib import Path
 
 import pytest
 from lanky.ledger import Status
+from lanky.prelude import Real
 
-from loopty import Fin, IslOracle, Where, layout
+from loopty import Arr, Fin, IslOracle, Where, kernel, layout
 from loopty.layout import LayoutError
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -96,7 +97,7 @@ def test_grudges_dim_tags_store_every_cell_where_the_dof_array_does() -> None:
             "dof_array stores every cell where dim_tags N3,N0,N1,N2 does",
         )
     ]
-    assert EXAMPLE.as_dim_tags.facts()[0].where == "storage_layouts.py:101"
+    assert EXAMPLE.as_dim_tags.facts()[0].where == "storage_layouts.py:99"
 
 
 def test_a_nesting_with_a_size_inside_is_refuted_at_a_size() -> None:
@@ -317,6 +318,50 @@ def test_a_layout_called_after_what_it_computes_with_changed_is_refused(
         helped(Var("i"))
 
 
+#: How often ``alternating`` has been called.
+CALLS = [0]
+
+
+def alternating(i: Fin[4]) -> Fin[4]:  # noqa: F821
+    """``i`` on every odd call, ``(i + 1) % 4`` on every even one."""
+    CALLS[0] += 1
+    return i if CALLS[0] % 2 else (i + 1) % 4
+
+
+def test_a_traced_call_is_compared_by_the_address_it_returns() -> None:
+    # #236: the address a traced call returns is what the trace records, and
+    # a check that called the function a second time compared that call's
+    # term instead, which a function that answers differently on alternate
+    # calls passes: the kernel read x[(i + 1) % 4] through a layout whose
+    # facts are about x[i]
+    from lanky.terms import Var
+
+    CALLS[0] = 0
+    checked = layout(alternating)  # the first call: i
+    with pytest.raises(LayoutError) as caught:
+        checked(Var("i"))  # the second: (i + 1) % 4
+    assert str(caught.value).startswith(
+        "alternating now computes the address (i + 1) % 4, where its facts say i"
+    )
+
+    @kernel
+    def through(x: Arr[Fin[4], Real], y: Arr[Fin[4], Real]):
+        for i in y.dom:
+            y[i] = x[checked(i)]
+
+    CALLS[0] = 1  # the trace's call is an even one
+    (fact,) = through.facts()
+    assert (fact.kind, fact.status) == ("trace", Status.REFUTED)
+    assert "alternating now computes the address (i + 1) % 4" in (
+        fact.provenance["reason"]
+    )
+    # an address written at other indices is the same term there
+    def shifted(i: Fin[4]) -> Fin[4]:  # noqa: F821
+        return (i + 1) % 4
+
+    assert layout(shifted)(Var("j") + 1) is not None
+
+
 def test_a_kernel_reads_through_the_layout_it_declares() -> None:
     inputs = EXAMPLE.example_inputs()
     EXAMPLE.unflatten(**inputs["unflatten"])
@@ -421,3 +466,34 @@ def test_the_statements_lean_is_given_without_lean() -> None:
     assert {piece.disjunct for piece in part.hints.witness} == {0, 1}
     (same,) = EXAMPLE.as_dim_tags.facts()
     assert [p.name for p in same.term.lean_obligation().parts] == ["same_0_0"]
+
+
+#: A module constant a layout branches on: no term of the cell as a symbol.
+WIDE = 3
+
+
+def test_two_layouts_at_a_number_are_stated_as_written() -> None:
+    # #275: Python folds N**3 * e to 27*e when N = 3, and dim_tags built the
+    # same sum from its strides, so Lean was asked 27 * e + ... = 27 * e + ...
+    # and the arithmetic was Python's. The body is run once more with N a
+    # symbol, and dim_tags' strides are the products of the extents inside.
+    from lanky.lean import statement_of
+
+    (piece,) = EXAMPLE.dof_array.pieces
+    assert str(piece.address) == "27*e + a + 3*b + 9*c"
+    assert str(piece.written) == "3**3*e + a + 3*b + 3**2*c"
+    (same,) = EXAMPLE.as_dim_tags.facts()
+    (part,) = same.term.lean_obligation().parts
+    assert statement_of(part.term, "as_dim_tags", mathlib=False).goal == (
+        "(3 : Int) ^ 3 * e + a + 3 * b + (3 : Int) ^ 2 * c = "
+        "((3 * 3) * 3) * e + a + 3 * b + (3 * 3) * c"
+    )
+    # isl still reads the address Python computed, and decides it
+    assert IslOracle().establish(same).status is Status.DECIDED
+    # a layout at every size, or with no constant, is written as it was read
+    assert all(p.written is None for p in layout(dof_array).pieces)
+
+    def branching(i: Fin[4]) -> Fin[4]:  # noqa: F821
+        return i if WIDE > 2 else 3 - i
+
+    assert layout(branching).pieces[0].written is None

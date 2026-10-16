@@ -70,6 +70,25 @@ def _isl_decides_unless_lean_is_tested(
 
 
 @pytest.fixture
+def without_pyopencl(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """pyopencl unimportable, as where loopty's ``opencl`` extra is not installed.
+
+    CI installs no pyopencl, and a test of what loopty says without it checks
+    something else where it is installed (#179). A ``None`` in
+    ``sys.modules`` makes ``import pyopencl`` fail and
+    ``importlib.util.find_spec`` find nothing, and
+    :func:`loopty.lower.pyopencl_installed`, which keeps its answer, is asked
+    again here and after the test.
+    """
+    from loopty import lower
+
+    monkeypatch.setitem(sys.modules, "pyopencl", None)
+    lower.pyopencl_installed.cache_clear()
+    yield
+    lower.pyopencl_installed.cache_clear()
+
+
+@pytest.fixture
 def plain_opencl(monkeypatch):
     """loopy's plain OpenCL target in place of the pyopencl one; loopy itself.
 

@@ -77,10 +77,8 @@ def along_r(
     v: Arr[Fin[ne], Fin[n], Fin[n], Real],
 ):
     """``F`` applied along the first reference axis of every element."""
-    for e in v.dom:
-        for a in v.dom[e]:
-            for b in v.dom[e, a]:
-                v[e, a, b] = reduce_sum(F[a, m] * u[e, m, b] for m in F.dom[a])
+    for e, a, b in v.dom:
+        v[e, a, b] = reduce_sum(F[a, m] * u[e, m, b] for m in F.dom[a])
 
 
 @kernel
@@ -90,10 +88,8 @@ def along_s(
     w: Arr[Fin[ne], Fin[n], Fin[n], Real],
 ):
     """``G`` applied along the second reference axis of every element."""
-    for e in w.dom:
-        for a in w.dom[e]:
-            for b in w.dom[e, a]:
-                w[e, a, b] = reduce_sum(G[b, m] * v[e, a, m] for m in G.dom[b])
+    for e, a, b in w.dom:
+        w[e, a, b] = reduce_sum(G[b, m] * v[e, a, m] for m in G.dom[b])
 
 
 @program
@@ -185,10 +181,9 @@ def main() -> int:
     print()
 
     print(f"accepted: {fused!r}")
-    v = weak_derivative.v
-    # the loops the program zeroes v in, which no source wrote, are v's
-    passes = [loop for loop in fused.nest if not loop.startswith(f"{v!r}.zeros")]
-    print(f"  the passes' loops, outermost first: {', '.join(passes)}")
+    # no loop zeroes v: no read sees the zeros it is made with, so every
+    # schedule of the program runs without them, the first fact below
+    print(f"  the passes' loops, outermost first: {', '.join(fused.nest)}")
     for fact in fused.facts():
         print(f"  {fact.status.value:8} {fact.decided_by:4} {fact.statement}")
     fact = LoopyExecutor().differential(weak_derivative, fused, inputs())
@@ -203,8 +198,13 @@ def main() -> int:
     window = contracted.windows["v"]
     print(f"accepted: {contracted!r}")
     print(f"  v kept in {window.extents[0]} cells, {window.placement}")
-    for storage in contracted.facts()[-2:]:
-        print(f"  {storage.status.value:8} {storage.decided_by:4} {storage.statement}")
+    # the window's own fact; the definedness it rests on is fused's, above
+    shown = {fact.id for fact in fused.facts()}
+    for storage in contracted.facts():
+        if storage.id not in shown:
+            print(
+                f"  {storage.status.value:8} {storage.decided_by:4} {storage.statement}"
+            )
     kept = LoopyExecutor().differential(weak_derivative, contracted, inputs())
     print(f"  w: agrees with the native run -> {kept.status.value}")
     tested = fact.status.value == "tested" and kept.status.value == "tested"

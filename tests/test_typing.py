@@ -9,7 +9,8 @@ from lanky.ledger import Status
 from lanky.prelude import Nat, Real
 from lanky.terms import evaluate_annotations
 
-from loopty import Arr, Fin, reduce_sum, when
+from lines import said
+from loopty import Arr, Fin, reduce_sum
 from loopty import typing as rules
 from loopty.oracle import IslOracle, Monotone, Subset
 from loopty.trace import trace
@@ -42,6 +43,13 @@ def shift(u: Arr[Fin[n], Real], v: Arr[Fin[n], Real]):  # noqa: F821
 def copy(u: Arr[Fin[n], Real], v: Arr[Fin[n], Real]):  # noqa: F821
     for i in u.dom:
         v[i] = u[i]
+
+
+def test_a_padded_instance_is_rendered_as_a_message_names_it() -> None:
+    term, _ = facts_of(shift)
+    stmt = said(shift, "v[i] = u[i + 1]")
+    assert rules.render_instance(term, (0, 3)) == f"{stmt} at i=3"
+    assert rules.render_instance(term, (5, 3)) == "(5, 3)"
 
 
 def test_an_affine_access_states_a_subset_obligation() -> None:
@@ -101,7 +109,7 @@ def gated_past_the_end(
     y: Arr[Fin[n], Real],  # noqa: F821
 ):
     for i in y.dom:
-        with when(flag[i + 1] != 0):
+        if flag[i + 1] != 0:
             y[i] = 2.0
 
 
@@ -244,7 +252,7 @@ def gated_by_a_conjunction(
 ):
     row = y.dom
     for i in row:
-        with when((i + 1 < row.size) & (flag[i + 1] != 0)):
+        if (i + 1 < row.size) & (flag[i + 1] != 0):
             y[i] = 2.0
 
 
@@ -263,7 +271,7 @@ def test_a_guard_read_is_stated_over_the_loop_nest_not_the_narrowed_domain() -> 
 def guarded_shift(u: Arr[Fin[n], Real], v: Arr[Fin[n], Real]):  # noqa: F821
     row = u.dom
     for i in row:
-        with when(i + 1 < row.size):
+        if i + 1 < row.size:
             v[i] = u[i + 1]
 
 
@@ -284,7 +292,7 @@ def accumulates_where_the_guard_reads(
 ):
     row = y.dom
     for i in row:
-        with when((i + 1 < row.size) & (y[i + 1] != 0)):
+        if (i + 1 < row.size) & (y[i + 1] != 0):
             y[i + 1] = y[i + 1] + 1.0
 
 
@@ -394,7 +402,10 @@ def test_the_offsets_read_through_are_decided_in_bounds() -> None:
     facts = in_bounds_of(spmv_through_offsets)
     assert facts["off[r]"].status is Status.DECIDED, facts["off[r]"].provenance
     assert facts["off[r]"].decided_by == "isl"
-    assert facts["off[r]"].statement.endswith("for every instance of S0")
+    assert facts["off[r]"].statement.endswith(
+        "for every instance of "
+        + said(spmv_through_offsets, "y[r] = reduce_sum(...)", "y[r] =")
+    )
     assert "off[r + 1]" not in facts
 
 
@@ -462,14 +473,15 @@ def test_an_offsets_fact_names_the_ragged_access_it_serves() -> None:
     # read nobody could find in the kernel.
     facts = in_bounds_of(spmv_through_short_offsets)
     served = "val[r, j] and col[r, j] are flattened through"
+    summed = said(spmv_through_short_offsets, "y[r] = reduce_sum(...)", "y[r] =")
     assert facts["off[r]"].statement == (
         f"off[r], the start of row r that {served}, is in bounds for every "
-        "instance of S0"
+        f"instance of {summed}"
     )
     assert facts["off[r]"].provenance["layout"] == f"the start of row r that {served}"
     # An access the source spells keeps its statement, and its provenance.
     assert facts["val[r, j]"].statement == (
-        "val[r, j] is in bounds for every instance of S0"
+        f"val[r, j] is in bounds for every instance of {summed}"
     )
     assert "layout" not in facts["val[r, j]"].provenance
 
@@ -492,7 +504,8 @@ def test_a_ragged_loop_bound_is_an_obligation_of_its_own() -> None:
     assert fact.decided_by == "isl"
     assert fact.statement == (
         "cnt[r], the length of row r that bounds the loop over j, is in bounds "
-        "for every instance of S0"
+        "for every instance of "
+        + said(spmv_through_offsets, "y[r] = reduce_sum(...)", "y[r] =")
     )
     assert fact.provenance["layout"] == (
         "the length of row r that bounds the loop over j"
@@ -525,7 +538,12 @@ def test_the_length_of_another_row_is_read_where_its_loop_starts() -> None:
     assert fact.status is Status.REFUTED
     assert fact.statement == (
         "cnt[r - 1], the length of row r - 1 that bounds the loop over j, is in "
-        "bounds for every instance of S0"
+        "bounds for every instance of "
+        + said(
+            previous_row_sums,
+            "y[r] = reduce_sum(val[r - 1, j] for j in val.dom[r - 1])",
+            "y[r] =",
+        )
     )
     assert fact.provenance["witness_text"].startswith("[a0=-1]")
 
@@ -664,7 +682,7 @@ def test_a_fact_over_a_domain_a_guard_left_wide_says_so() -> None:
     # the whole loop nest and the facts about it are about masked instances too.
     def below(a: Real, y: Arr[Fin[n], Real]):  # noqa: F821
         for i in y.dom:
-            with when(i < a):
+            if i < a:
                 y[i] = 1.0
 
     _term, facts = facts_of(below)
@@ -673,7 +691,10 @@ def test_a_fact_over_a_domain_a_guard_left_wide_says_so() -> None:
     assert entry["conjunct"] == "i < a"
     assert "the scalar a of sort Real" in entry["why"]
     assert kinds["disjoint-writes"].provenance["unnarrowed"] == [entry]
-    assert kinds["ordering"].provenance["unnarrowed"] == {"S0": [entry]}
+    # the ordering fact is about every statement, each named by its text
+    assert kinds["ordering"].provenance["unnarrowed"] == {
+        said(below, "y[i] = 1.0"): [entry]
+    }
     # Wider is harder, never easier: y[i] is still in bounds everywhere.
     (write,) = [f for f in settled(facts) if f.kind == "in-bounds"]
     assert write.status is Status.DECIDED
@@ -686,7 +707,7 @@ def test_a_real_guard_no_longer_discharges_an_obligation() -> None:
     # wide. Sound, if not sharp: a Real a no longer proves anything about i.
     def clipped(a: Real, x: Arr[Fin[m], Real], y: Arr[Fin[n], Real]):  # noqa: F821
         for i in y.dom:
-            with when((i < a) & (a < x.dom.size)):
+            if (i < a) & (a < x.dom.size):
                 y[i] = x[i]
 
     _term, facts = facts_of(clipped)
@@ -707,7 +728,7 @@ def test_a_real_guard_no_longer_discharges_an_obligation() -> None:
 def test_a_guard_isl_states_whole_leaves_nothing_to_say() -> None:
     def below(a: Nat, y: Arr[Fin[n], Real]):  # noqa: F821
         for i in y.dom:
-            with when(i < a):
+            if i < a:
                 y[i] = 1.0
 
     _term, facts = facts_of(below)
@@ -719,7 +740,7 @@ def test_a_guards_own_read_is_not_over_the_wide_domain() -> None:
     # domain it is stated over, so nothing about it is over-approximated.
     def flagged(flag: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
         for i in y.dom:
-            with when(flag[i] > 0.0):
+            if flag[i] > 0.0:
                 y[i] = 1.0
 
     _term, facts = facts_of(flagged)
@@ -804,9 +825,9 @@ def test_a_write_into_a_fin_array_is_refuted_where_it_leaves_the_sort() -> None:
     _, facts = facts_of(self_perm)
     sort, read = gathered(facts)
     assert sort.id == "element-sort:self_perm:S0:perm[i]"
-    assert sort.statement == (
-        "the value S0 writes into perm[i], i + 1, is a point of Fin(n)"
-    )
+    # the statement's text says the value, since it is not shortened
+    written = said(self_perm, "perm[i] = i + 1")
+    assert sort.statement == f"the value {written} writes is a point of Fin(n)"
     assert read.status is Status.DECIDED
     assert read.decided_by == "type"
     assert read.rests_on == (sort.id,)
@@ -815,8 +836,8 @@ def test_a_write_into_a_fin_array_is_refuted_where_it_leaves_the_sort() -> None:
     assert refuted.status is Status.REFUTED
     assert refuted.decided_by == "isl"
     assert (
-        "is one of the instances of S0 writing a value outside Fin(n) into perm"
-        in refuted.provenance["reason"]
+        f"is one of the instances of {written} writing a value outside Fin(n) "
+        "into perm" in refuted.provenance["reason"]
     )
     assert refuted.provenance["witness_text"].startswith("[i=")
     # The read is worth what the write it rests on is worth.
@@ -882,7 +903,8 @@ def test_a_size_only_an_element_sort_names_is_not_negative() -> None:
     start = next(
         fact
         for fact in facts
-        if fact.kind == "element-sort" and fact.statement.startswith("the value S0")
+        if fact.kind == "element-sort"
+        and fact.statement.startswith("the value off[0] = 0 (")
     )
     assert Ledger(settled(facts))[start.id].status is Status.DECIDED
 
@@ -965,12 +987,14 @@ def test_the_terms_of_a_sum_over_a_number_share_their_facts() -> None:
     (stmt,) = term.stmts
     assert stmt.unrolled == (("d", 3),)
     statements = [fact.statement for fact in settled(facts)]
+    summed = said(directions_summed, "grad[x, k] = reduce_sum(...)", "grad[x, k] =")
     assert (
         "Ft[3*x + d, k, c] is in bounds for every d in Fin(3) and every instance "
-        "of S0"
+        f"of {summed}"
     ) in statements
     assert (
-        "vs[3*x + d, c] is in bounds for every d in Fin(3) and every instance of S0"
+        "vs[3*x + d, c] is in bounds for every d in Fin(3) and every instance of "
+        f"{summed}"
     ) in statements
     assert not [line for line in statements if "3*x + 0" in line]
     assert [line for line in statements if line.startswith("the accumulation")] == [
@@ -991,7 +1015,8 @@ def test_a_term_out_of_bounds_refutes_the_one_fact() -> None:
     ]
     assert reads.statement.startswith("Ft[3*x + d")
     assert reads.statement.endswith(
-        "is in bounds for every d in Fin(3) and every instance of S0"
+        "is in bounds for every d in Fin(3) and every instance of "
+        + said(one_direction_too_far, "grad[x, k] = reduce_sum(...)", "grad[x, k] =")
     )
     assert reads.status is Status.REFUTED
 

@@ -29,7 +29,7 @@ import pymbolic.primitives as prim
 import pytest
 from lanky.prelude import Bool, Int, Nat, Real
 
-from loopty import Arr, Fin, Schedule, TraceError, kernel, program, reduce_sum, when
+from loopty import Arr, Fin, Schedule, TraceError, kernel, program, reduce_sum
 from loopty.contract import (
     INDEX_RANGE,
     INTEGRAL_RANGE,
@@ -207,7 +207,7 @@ def masked_scale(
 def odd_compared(k: Arr[Fin[n], Int], y: Arr[Fin[n], Real]):  # noqa: F821
     """A connective of an integer inside a comparison, in a guard."""
     for i in k.dom:
-        with when((k[i] & 1) != 0):
+        if (k[i] & 1) != 0:
             y[i] = 1.0
 
 
@@ -215,7 +215,7 @@ def odd_compared(k: Arr[Fin[n], Int], y: Arr[Fin[n], Real]):  # noqa: F821
 def guarded_bits(k: Arr[Fin[n], Int], y: Arr[Fin[n], Real]):  # noqa: F821
     """A connective of an integer and a comparison, as a guard."""
     for i in k.dom:
-        with when((k[i] > 0) | k[i]):
+        if (k[i] > 0) | k[i]:
             y[i] = 1.0
 
 
@@ -235,7 +235,7 @@ def low_bits(
     """The fix: the low bit as arithmetic, and as a comparison in a guard."""
     for i in k.dom:
         y[i] = (k[i] % 2) * x[i]
-        with when((k[i] % 2 != 0) & (x[i] > 0.5)):
+        if (k[i] % 2 != 0) & (x[i] > 0.5):
             y[i] = y[i] + 1.0
 
 
@@ -550,7 +550,7 @@ def f32_compared(
     """A ``float32`` compared with a Python float, and in a guard with an integer."""
     for i in x.dom:
         b[i] = x[i] > 0.1
-        with when(x[i] < k[i]):
+        if x[i] < k[i]:
             y[i] = 1.0
 
 
@@ -797,11 +797,11 @@ def guarded_squares(
 ):
     """Guards on the loops and on a scalar whose products leave 32 bits."""
     for i in x.dom:
-        with when(i * i < 2**31 + 5):
+        if i * i < 2**31 + 5:
             y[i] = x[i]
-        with when(k * k > i + 2**31):
+        if k * k > i + 2**31:
             z[i] = x[i]
-        with when(100_000 * i < 2**31):
+        if 100_000 * i < 2**31:
             w[i] = x[i]
 
 
@@ -1033,7 +1033,7 @@ def divisible(
 ):
     """A remainder in a guard."""
     for i in k.dom:
-        with when(k[i] % m[i] == 0):
+        if k[i] % m[i] == 0:
             y[i] = 1.0
 
 
@@ -1105,7 +1105,7 @@ def complex_index_by_zero(y: Arr[Fin[n], np.complex128]):  # noqa: F821
 def guard_by_zero(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
     """A loop variable divided by zero in a guard."""
     for i in x.dom:
-        with when(i / 0 > 1):
+        if i / 0 > 1:
             y[i] = x[i]
 
 
@@ -1170,7 +1170,7 @@ def guarded_sum(
 ):
     """A sum of a truth value and a truth scalar, in a guard."""
     for i in b.dom:
-        with when(b[i] + f > 1):
+        if b[i] + f > 1:
             y[i] = 1.0
 
 
@@ -1414,7 +1414,7 @@ def compared_bits(
     for i in k.dom:
         y[i] = (k[i] < (k[i] ^ 1)) * 1.0
         z[i] = (x[i] < (k[i] == 1)) * 1.0
-        with when(i < (i ^ 1)):
+        if i < (i ^ 1):
             w[i] = 1.0
 
 
@@ -1452,10 +1452,10 @@ def bits_compared(
 ):
     """``^``, ``<<`` and ``>>`` compared, in a guard, as a number and under ``~``."""
     for i in k.dom:
-        with when((k[i] ^ 1) == 0):
+        if (k[i] ^ 1) == 0:
             y[i] = 1.0
         z[i] = ((k[i] << 1) != 4) * 1.0 + ((k[i] >> 1) > 1) * 2.0
-        with when((i << 2) > 5):
+        if (i << 2) > 5:
             w[i] = 1.0
         v[i] = 1.0 * ~((k[i] ^ 1) == 0) + 1.0 * ~((k[i] >> 1) > 1)
 
@@ -1665,7 +1665,7 @@ def test_an_integer_to_a_negative_power_is_refused_by_the_trace():
 def on_the_loops(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
     """Guards on loop variables alone that numpy computes in other types."""
     for i in x.dom:
-        with when((i**0.5 > 1.5) & (i * i < 40) & (i / 2 > 1) & ((i + 1) ** -1 < 0.3)):
+        if (i**0.5 > 1.5) & (i * i < 40) & (i / 2 > 1) & ((i + 1) ** -1 < 0.3):
             y[i] = 2.0 * x[i]
 
 
@@ -1690,7 +1690,7 @@ def on_the_scalars(
 ):
     """A guard on scalars, which loopy reads into isl as it does one on the loops."""
     for i in x.dom:
-        with when(s * a > 0.300000008):
+        if s * a > 0.300000008:
             y[i] = x[i]
 
 
@@ -1718,7 +1718,7 @@ def single_on_the_loops(
 ):
     """A guard on the loops that numpy computes in single precision."""
     for i in x.dom:
-        with when(a + (i + 1) ** -1 > 0.5):
+        if a + (i + 1) ** -1 > 0.5:
             y[i] = x[i]
 
 
@@ -2609,7 +2609,7 @@ def complex_mixed(
     """A ``complex64`` beside a double, compared in ``complex128``, and a guard."""
     for i in z.dom:
         b[i] = z[i] == x[i]
-        with when(x[i] != z[i]):
+        if x[i] != z[i]:
             y[i] = 1.0
 
 
@@ -2646,8 +2646,7 @@ def test_a_comparison_of_complex_values_compares_both_parts_on_opencl():
     # pyopencl's complex types are structs, which OpenCL C does not compare
     # with == and !=, and the kernel did not build (#158). Each is compared
     # part by part, as numpy compares, a real operand with a zero imaginary
-    # part. Generating the code needs pyopencl and no device.
-    pytest.importorskip("pyopencl")
+    # part. Generating the code needs neither pyopencl nor a device (#291).
     code = emit_code(complex_compared, "opencl")
     assert (
         "b[i] = (char) (cdouble_real(z[i]) == cdouble_real(w[i]) && "
@@ -2780,7 +2779,7 @@ def absolute_on_the_loops(
     """``abs`` of widened arithmetic of loop variables and scalars."""
     for i in x.dom:
         y[i] = abs(i * i - m) + abs((i << 3) - m * i)
-        with when(x[i] < abs(i * i - m)):
+        if x[i] < abs(i * i - m):
             y[i] = 0
         z[i] = abs(s * s - i)
 
@@ -2822,13 +2821,13 @@ def absolute_in_guards(
 ):
     """``abs`` of a real in a guard, in double and single precision."""
     for i in x.dom:
-        with when(x[i] + abs(z[i]) > 1):
+        if x[i] + abs(z[i]) > 1:
             y[i] = 1.0
-        with when(x[i] * 0.0 + 1 / abs(z[i]) > 0):
+        if x[i] * 0.0 + 1 / abs(z[i]) > 0:
             w[i] = 1.0
-        with when(f[i] + abs(g[i]) > 1):
+        if f[i] + abs(g[i]) > 1:
             v[i] = 1.0
-        with when(i * 0.0 + abs(i * 0.5 - 2) < 1):
+        if i * 0.0 + abs(i * 0.5 - 2) < 1:
             u[i] = 1.0
 
 
@@ -2877,7 +2876,7 @@ def root_in_a_guard(
 ):
     """A function only a guard calls."""
     for i in x.dom:
-        with when(x[i] + _root(z[i]) > 1):
+        if x[i] + _root(z[i]) > 1:
             y[i] = 1.0
 
 
@@ -2889,7 +2888,7 @@ def root_in_both(
 ):
     """The same function, called in the guard and in the value."""
     for i in x.dom:
-        with when(x[i] + _root(z[i]) > 1):
+        if x[i] + _root(z[i]) > 1:
             y[i] = _root(z[i])
 
 
@@ -2905,7 +2904,8 @@ def test_a_function_only_a_guard_calls_is_refused_with_the_fix_named():
     with pytest.raises(LoweringError, match="calls sqrt, which loopy") as refused:
         LoopyExecutor().run(root_in_a_guard, **make())
     message = str(refused.value)
-    assert "S0 of root_in_a_guard at test_arithmetic.py:" in message
+    assert "the guard of y[i] = 1.0 (test_arithmetic.py:" in message
+    assert ") in root_in_a_guard calls sqrt" in message
     assert "into an array the guard then reads" in message
     with pytest.raises(LoweringError, match="calls sqrt"):
         emit_code(root_in_a_guard)
@@ -2931,7 +2931,7 @@ def test_abs_of_an_element_is_compared_on_either_side():
     ):
         """``abs`` on the left of a comparison, in a guard and as a value."""
         for i in k.dom:
-            with when(abs(k[i]) > 2):
+            if abs(k[i]) > 2:
                 y[i] = 1
             z[i] = (127 == abs(c[i])) * 1 + (abs(k[i]) + 1 > 2) * 2
             z[i] = z[i] + (abs(k[i]) != 3) * 4
@@ -3072,7 +3072,7 @@ def _isl_size(x: Arr[Fin[max], Real], y: Arr[Fin[max], Real]):  # noqa: F821
 
 def _isl_scalar(x: Arr[Fin[n], Real], floor: Int, y: Arr[Fin[n], Real]):  # noqa: F821
     for i in x.dom:
-        with when(i < floor):
+        if i < floor:
             y[i] = x[i]
 
 
@@ -3324,9 +3324,9 @@ def test_a_literal_past_64_bits_is_compared_in_numpys_real():
 def guarded_past_64(m: Int, y: Arr[Fin[n], Int], z: Arr[Fin[n], Int]):  # noqa: F821
     """Guards on the loops and on a scalar that compare past 64 bits."""
     for i in y.dom:
-        with when((i < 2**70) & (i > -(2**70))):
+        if (i < 2**70) & (i > -(2**70)):
             y[i] = 1
-        with when((m < 2**63 + 5) & (m > -(2**63) - 5)):
+        if (m < 2**63 + 5) & (m > -(2**63) - 5):
             z[i] = 2
 
 
@@ -3574,9 +3574,9 @@ def runtime_wide(a: Arr[Fin[n], np.int8], y: Arr[Fin[n], Int]):  # noqa: F821
 
 @kernel
 def guarded_negative(u: Arr[Fin[n], np.uint32], y: Arr[Fin[n], Int]):  # noqa: F821
-    """``i - 3`` under a guard that masks the write and not the arithmetic."""
+    """``i - 3`` under an ``if``, which skips the arithmetic where it fails."""
     for i in u.dom:
-        with when(i >= 3):
+        if i >= 3:
             y[i] = u[i] + (i - 3)
 
 
@@ -3619,7 +3619,7 @@ def summed_with_a_clause_guarded(
 ):
     """The same sum under a guard, which masks the write and not the sum."""
     for i in a.dom:
-        with when(i < 3):
+        if i < 3:
             y[i] = reduce_sum(a[j] + j for j in a.dom if j < 100)
 
 
@@ -3627,7 +3627,7 @@ def summed_with_a_clause_guarded(
 def summed_guarded(a: Arr[Fin[n], np.int8], y: Arr[Fin[n], Int]):  # noqa: F821
     """A sum with no clause under a guard: computed at every j."""
     for i in a.dom:
-        with when(i < 3):
+        if i < 3:
             y[i] = reduce_sum(a[j] + j for j in a.dom)
 
 
@@ -3676,6 +3676,23 @@ def offset_then_checked(u, v, w, y, z):
 
 
 @kernel
+def shifted_reals(u: Arr[Fin[n], Real], v: Arr[Fin[n], Real]):  # noqa: F821
+    """``u + 1``, a call no checked point comes before."""
+    for i in u.dom:
+        v[i] = u[i] + 1.0
+
+
+@program
+def refused_then_more(u, v, w, y, z):
+    """A call before the checked point, the refused call, and one after it (#176)."""
+    shifted_reals(u, v)
+    c = Arr.zeros_like(u, dtype=np.int64)
+    truncated(u, c)
+    offset_counts(c, w, y)
+    as_reals(c, z)
+
+
+@kernel
 def index_after(
     c: Arr[Fin[n], Nat],  # noqa: F821
     z: Arr[Fin[n], Real],  # noqa: F821
@@ -3697,9 +3714,9 @@ def checked_then_stored(u, z, y):
 
 @kernel
 def stored_nowhere(y: Arr[Fin[n], np.uint8]):  # noqa: F821
-    """``300`` stored into a ``uint8`` under a guard that holds nowhere."""
+    """``300`` stored into a ``uint8`` under an ``if`` a short ``y`` never takes."""
     for i in y.dom:
-        with when(i < 0):
+        if i >= 5:
             y[i] = 300
 
 
@@ -3707,7 +3724,7 @@ def stored_nowhere(y: Arr[Fin[n], np.uint8]):  # noqa: F821
 def stored_once(y: Arr[Fin[n], np.uint8]):  # noqa: F821
     """``300`` stored into a ``uint8`` under a guard that holds at ``i = 0``."""
     for i in y.dom:
-        with when(i < 1):
+        if i < 1:
             y[i] = 300
 
 
@@ -3739,11 +3756,9 @@ def test_loop_arithmetic_a_numpy_integer_does_not_hold_is_refused_compiled_too()
     assert "u[i] + (i - 3) at test_arithmetic.py:" in message
     assert "'(i - 3) * np.int64(1)'" in message
     agrees(runtime_negative_fixed, lambda: unsigned(5))
-    # Under a guard as well: the body computes at every point of its loop.
-    with pytest.raises(OverflowError, match="-3 out of bounds"):
-        guarded_negative(**unsigned(4))
-    with pytest.raises(RefusedNatively, match="-3 at i = 0"):
-        LoopyExecutor().run(guarded_negative, **unsigned(4))
+    # Under an if, natively the body computes only where i >= 3, and the
+    # compiled run is not refused where it does not.
+    agrees(guarded_negative, lambda: unsigned(5))
     # In a sum, over the sum's own loop too.
     summed = {"a": np.ones(3, np.uint16), "y": np.zeros(3, np.int64)}
     with pytest.raises(OverflowError, match="-1 out of bounds for uint16"):
@@ -3846,14 +3861,59 @@ def test_loop_arithmetic_a_numpy_integer_does_not_hold_is_refused_compiled_too()
     LoopyExecutor().run(checked_then_stored, **compiled)
     assert np.array_equal(native["y"].numpy(), compiled["y"].numpy())
 
-    # A literal stored under a guard is stored only where the guard holds,
+    # A literal stored under an if is stored only where the condition holds,
     # and numpy converts nothing elsewhere: refused where the call's sizes
-    # reach a point of the guard, and computed where they reach none.
+    # reach a point of the branch, and computed where they reach none.
     agrees(stored_nowhere, lambda: {"y": np.zeros(3, np.uint8)})
     with pytest.raises(OverflowError, match="300 out of bounds for uint8"):
         stored_once(y=np.zeros(3, np.uint8))
     with pytest.raises(RefusedNatively, match="the store of 300 into y"):
         LoopyExecutor().run(stored_once, y=np.zeros(3, np.uint8))
+
+
+def test_a_refused_call_after_a_checked_point_keeps_what_ran_before_it() -> None:
+    # #176: natively the program stops inside offset_counts, at i = 0, with
+    # v written by the call before and y and z as they were. The compiled
+    # program ran every call, the refused one and the one after it too, and
+    # wrote y (wrapped round) and z back before it raised the refusal.
+    from loopty.refusal import RefusedNatively
+
+    def make(first: float = 1.0) -> dict:
+        return {
+            "u": Arr.from_numpy(np.array([first, 2.0, 3.0])),
+            "v": Arr.zeros(3),
+            "w": Arr.from_numpy(np.full(3, 7, np.uint32)),
+            "y": Arr.from_numpy(np.full(3, -5, np.int64)),
+            "z": Arr.from_numpy(np.full(3, -9.0)),
+        }
+
+    def held(arrays: dict) -> dict:
+        return {name: arrays[name].numpy().tolist() for name in ("v", "y", "z")}
+
+    native = make()
+    with pytest.raises(OverflowError, match="-3 out of bounds for uint32"):
+        refused_then_more(**native)
+    assert held(native) == {
+        "v": [2.0, 3.0, 4.0],
+        "y": [-5, -5, -5],
+        "z": [-9.0, -9.0, -9.0],
+    }
+    for runs in (refused_then_more, Schedule(refused_then_more)):
+        compiled = make()
+        with pytest.raises(RefusedNatively, match="-3 at") as refused:
+            LoopyExecutor().run(runs, **compiled)
+        assert held(compiled) == held(native)
+        assert "keeps what the calls before it wrote" in str(refused.value)
+    # Where the checked point fails, both runs raise its error, and what the
+    # call before it wrote is kept, as before.
+    native, compiled = make(-1.0), make(-1.0)
+    with pytest.raises(ValueError) as failed:
+        refused_then_more(**native)
+    assert not isinstance(failed.value, OverflowError)
+    with pytest.raises(ValueError, match="stops before offset_counts") as failed:
+        LoopyExecutor().run(refused_then_more, **compiled)
+    assert not isinstance(failed.value, OverflowError)
+    assert held(compiled) == held(native)
 
 
 # }}}

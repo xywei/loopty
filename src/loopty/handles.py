@@ -109,11 +109,14 @@ import inspect
 import textwrap
 import warnings
 from collections.abc import Iterable, Iterator, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pymbolic.primitives as prim
 
 from loopty.term import ArrType, Binder, Callsite, Term
+
+if TYPE_CHECKING:
+    from loopty.source import Named
 
 __all__ = [
     "Array",
@@ -128,6 +131,7 @@ __all__ = [
     "binders_of",
     "callsites_of",
     "scope",
+    "statement_names",
 ]
 
 
@@ -422,6 +426,60 @@ def _index(root: Any) -> _Index:
     return index
 
 
+#: The last terms :func:`statement_names` named, by identity, with their names.
+_NAMED: dict[int, tuple[Term, Named]] = {}
+
+
+def statement_names(term: Term, index: _Index | None = None) -> Named:
+    """``term``'s statements as a message names them (:class:`~loopty.source.Named`).
+
+    A call and an array by their paths, ``l2p.reconstruct`` and ``l2p.R``,
+    from ``index`` (a schedule's), or from the term's own: its name is the
+    first segment, which is the kernel's or the program's. A term's own are
+    kept for the next message about it, since every fact names a statement.
+    """
+    from loopty.source import Named
+
+    if index is None:
+        cached = _NAMED.get(id(term))
+        if cached is not None and cached[0] is term:
+            return cached[1]
+        try:
+            named = statement_names(term, _Index(term, term))
+        except Exception:  # noqa: BLE001 - named by labels and names, then
+            named = Named(term.stmts, binders=term.binders)
+        if len(_NAMED) >= 16:
+            _NAMED.pop(next(iter(_NAMED)))
+        _NAMED[id(term)] = (term, named)
+        return named
+    calls: dict[str, tuple[str, ...]] = {}
+    for found in term.scopes:
+        for stmt_id in found.statements:
+            calls[stmt_id] = (found.call,)
+    for call in term.calls:
+        for stmt_id in call.statements:
+            calls.setdefault(stmt_id, (*call.within, call.label))
+
+    def called(stmt_id: str) -> str:
+        labels = calls.get(stmt_id)
+        if labels is None:
+            labels = (stmt_id.rsplit(".", 1)[0],)
+        return index.scope_path(labels)
+
+    def arrays(name: str) -> str:
+        if name in index.root_arrays:
+            return index.array_path((), name)
+        return name
+
+    return Named(
+        term.stmts,
+        called=called,
+        calls=lambda label: index.scope_path((label,)),
+        arrays=arrays,
+        binders=term.binders,
+    )
+
+
 # }}}
 
 
@@ -583,11 +641,14 @@ class Array(Handle):
         if name.startswith("_"):
             raise AttributeError(name)
         if name == "zeros":
-            # what Schedule.nest prints a loop the program zeroes it in by
+            # what Schedule.nest prints a loop the program zeroes it in by,
+            # where a read sees the zeros, which a schedule keeps only then
+            # (Schedule._drop_unseen_zeros, #290)
             raise AttributeError(
                 f"{self.path}.zeros, the loops the program zeroes {self.path} in, "
-                "are no line's, and no step names them: they take the tag of the "
-                f"loop that stores {self.path}, and a window of it drops them"
+                "are no line's, and no step names them: a schedule runs without "
+                "them where no read sees the zeros, and otherwise they take the "
+                f"tag of the loop that stores {self.path}"
             )
         raise AttributeError(
             f"{self.path} is an array, which has no {name}; a step that takes "

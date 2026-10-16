@@ -1,6 +1,6 @@
 # Notes on loopy and islpy
 
-Thirty-one interactions with loopty's dependencies that cost real debugging
+Thirty-three interactions with loopty's dependencies that cost real debugging
 time, each with the local workaround and the reason it is local. No upstream
 issues were filed: these are notes so that the next person meets the answer
 instead of the symptom.
@@ -530,7 +530,7 @@ after `affine(...).tile(k.loops.a, k.loops.b, 4, 4)` is `b_inner`. `Schedule.str
 each loop replaced and its expression. A loop with a tag, the loop of a
 reduction, a loop another domain names as a parameter, and a loop whose offset
 involves a loop that does not run around all its instructions keep loopy's
-test. A guard that narrows a loop to a congruence (`when(i % 2 == 0)`) is
+test. A guard that narrows a loop to a congruence (`if i % 2 == 0`) is
 stepped over the same way.
 
 **A map per statement.** A time offset between two statements, which diamond
@@ -542,7 +542,7 @@ domain, and the two have to share their loops to interleave, so the rewrite
 keeps one domain for the new loops, the union of the two images when isl
 coalesces it into one basic set and its polyhedral hull otherwise, and
 predicates each instruction on its own image, as the lowering predicates a
-statement a `when` narrows. In each instruction the old loops are replaced by
+statement an `if` narrows. In each instruction the old loops are replaced by
 its own statement's inverse. For the acoustic pair the images are the points
 where `a + b` is even and those where it is odd, so every point is one
 statement's; the code tests which, `if (-1 * a + -1 * b + 2 * ((a + b) / 2) ==
@@ -811,7 +811,7 @@ kernel, is missing from the compiled code:
 @kernel
 def g_real(a: Real, y: Arr[Fin[n], Real]):
     for i in y.dom:
-        with when(a > 0.5):
+        if a > 0.5:
             y[i] = 1.0
 ```
 
@@ -824,10 +824,10 @@ for (int32_t i = 0; i <= -1 + n; ++i)
 ```
 
 for `lp.ExecutableCTarget`, so the compiled run writes `y` at `a = 0.0`,
-where the native run writes nothing. `when(flag)` of a `Bool` scalar, a guard
-on one cell of an array (`when(x[0] > 0.5)`), and a guarded statement outside
+where the native run writes nothing. `if flag` of a `Bool` scalar, a guard
+on one cell of an array (`if x[0] > 0.5`), and a guarded statement outside
 any loop (`y[0] = 1.0`), are the same. A guard that
-names a loop variable (`when(a > i)`) is emitted, as is a guard on one
+names a loop variable (`if a > i`) is emitted, as is a guard on one
 statement of several.
 
 **Cause.** loopy's conditional hoisting (`build_insn_group` in
@@ -983,7 +983,7 @@ another way than a type:
 - a kernel named `floor` fails with `KeyError: 'floor'` inside loopy, and one
   named `cpow` over complex arrays with a power in gcc, `conflicting types
   for 'cpow'` (#108);
-- `with when(i ** 0.5 > 1.5)` on a loop variable fails in loopy's bounds
+- `if i ** 0.5 > 1.5:` on a loop variable fails in loopy's bounds
   check with `PwAffEvaluationMapper cannot handle expressions of type
   TypeCast`.
 
@@ -1019,8 +1019,8 @@ define the operations, but not in a guard: loopy's type inference visits an
 instruction's expression and never its predicates, so a callable called only
 in a guard is dropped from the translation unit, and
 `infer_arg_descr` fails with `KeyError: 'loopty_mod'`. The same holds of any
-function a guard calls and no statement's value does: `when(x[i] + abs(z[i])
-> 1)` of a real `z` failed with `KeyError: 'abs'` (#154).
+function a guard calls and no statement's value does: `if x[i] + abs(z[i])
+> 1` of a real `z` failed with `KeyError: 'abs'` (#154).
 
 **Local fix.** `loopty.operations` defines each operation as a C function of
 two operands of one type, as numpy's loops define it (`floor_div`,
@@ -1171,14 +1171,14 @@ expression into isl:
   whose value holds a cast (`(t[j] + 1) % n` of a 32-bit `Fin[n]` entry,
   computed in 64 bits), into a read `x[p[i]]` fails the same way in code
   generation (#145).
-- `with when(i * 0.5 >= 1): y[i] = x[i + 4]` compiles, and the compiled run
-  reads past the end of `x` where the native one is refused; `when(i < 1.5)`
-  lets `x[i + n - 1]` through at `i = 1`. And `when(i * 0.5 < 2)` over
+- `if i * 0.5 >= 1: y[i] = x[i + 4]` compiles, and the compiled run
+  reads past the end of `x` where the native one is refused; `if i < 1.5`
+  lets `x[i + n - 1]` through at `i = 1`. And `if i * 0.5 < 2` over
   `x[i + 4]`, in bounds natively, is refused with `could not establish
   '[n] -> { [i0] : 4 <= i0 <= 3 + n }' is a subset of ...` (#137).
-- The same past the end of `x[i + 100]` under `when(i * 2.0**52 + 1.0 <= i
-  * 2.0**52)`, which holds from `i = 2` in double, and under `when((i < a) &
-  (i > a - 1))` of a `Real` scalar `a`, which holds at `i = 1` for `a = 1.5`.
+- The same past the end of `x[i + 100]` under `if i * 2.0**52 + 1.0 <= i
+  * 2.0**52`, which holds from `i = 2` in double, and under `if (i < a) &
+  (i > a - 1)` of a `Real` scalar `a`, which holds at `i = 1` for `a = 1.5`.
 
 **Cause.** loopy reads a subscript into isl for its bounds check
 (`symbolic.get_access_map`) and to simplify it in code generation
@@ -1224,7 +1224,7 @@ readings are installed a thread outside every context reads with loopy's
 own. So another user of loopy in the process, sumpy, pytential or a
 Volumential kernel, has its kernels read, checked and generated as without
 loopty, before, after and while loopty works: loopy's own reading of
-`when(i * 2.0 < n)` lets its bounds check pass `x[2 * i]`, which loopty's
+`if i * 2.0 < n` lets its bounds check pass `x[2 * i]`, which loopty's
 refuses (#148). loopty enters the context at these chokepoints, and every
 path of its into loopy goes through one:
 
@@ -1292,15 +1292,15 @@ tests and `wavefront_acoustic.py --bench` do. With the readings:
   scalar in it, is not read, and loopy checks an access under it at every
   point of its loop, as under a product of loop variables or an array's
   entry. It refuses an access it cannot show in bounds there, one the guard
-  keeps in bounds included (`when(i * 2.0 < n)` over `x[2 * i]`, which the
-  same guard in integers lets through), as it refused `when(i * 0.5 < 2)`
+  keeps in bounds included (`if i * 2.0 < n` over `x[2 * i]`, which the
+  same guard in integers lets through), as it refused `if i * 0.5 < 2`
   before, from the wrong reading. loopy's `LoopyIndexError` names its own
   instruction, `'x[i + 4]' in instruction 'S0'`, and no fix, so loopty's
   executor and `emit_code` raise in its place `refusal.GuardNotRead`, a
   `LoopyIndexError` too, which names the statement, where the body wrote
   it, the guard, and the guard over integers isl finds that keeps every
   access loopy refused in bounds, with each size as the body reads it from
-  an array's domain, `when(i <= y.dom.size - 5)` (#148). A statement
+  an array's domain, `if i <= y.dom.size - 5` (#148). A statement
   whose guard is stated whole is left loopy's message.
 
 ## 24. loopy's assumptions of a kernel given none follow the hash seed
@@ -1665,13 +1665,87 @@ checked to be the same set wherever the statement's domain holds, which is
 wherever loopy runs the sum's update, since the update carries the statement's
 own predicates (`realize_reduction` gives it `insn.predicates`). Over a box,
 `b` is `[n] -> { [b] : 0 <= b < n }` and its loop holds every lane. So does a
-sum under an affine `when` on its row, which narrows the statement's domain,
+sum under an affine `if` on its row, which narrows the statement's domain,
 and one bounded by a scalar, which a call fixes as it fixes a size. A bound
 that reads a loop keeps it: a triangle's `j < i + 1`, or a clause the sum is
 narrowed by, keeps the sum nested in that loop, a loop of the sum per lane
 where the loop is an `ilp` one. A domain that names a ragged row's length,
 which is assigned inside the row's loop, keeps every loop, as before, and so
-does the sum of a statement that never runs (a `when` that holds nowhere):
+does the sum of a statement that never runs (an `if` that holds nowhere):
 within an empty set every set is the same one, and the gist would make the
 domain unbounded. The facts are those of the term, and the device code of
 every other shape the S1 driver times is the same as before.
+
+## 33. A sum's body is evaluated at every term, operands that read none of its binders included
+
+**Symptom.** `examples/l2p.py`'s `evaluate` computes each target's offset
+from its box's centre as Python locals before the Taylor sum,
+
+```python
+x = (tx[box, target] - cx[box]) / rscale
+y = (ty[box, target] - cy[box]) / rscale
+pot[box, target] = SCALING * reduce_sum(
+    R[box, a, b] * ipow(x, a) * ipow(y, b) * INV_FACT[a] * INV_FACT[b] ...
+```
+
+and the C and the OpenCL loopy generated computed both at every term of the
+triangle, two divisions and four loads per term:
+
+```c
+acc_a_1_b_1 = acc_a_1_b_1 + R_window[11 * a_1 + b_1] * loopy_pow_float64_int32((tx[off_cnt[box] + target] + -1.0 * cx[box]) / rscale, a_1) * ...
+```
+
+The loop form of `contracted` was 1.37x plain loopy's on the H200 at order
+10, and plain loopy with `x` and `y` written into the sum
+(`benchmarks/l2p.py --variant inline`) was as slow; unrolled, the compilers
+fold the repeated terms and the two were at parity (#270).
+
+**Cause.** The trace reads a local into the summand: what loopty lowers is
+the expression, not the name, and a loopy reduction evaluates its body as
+written at each term. loopy moves nothing out of a sum, and neither GCC nor
+the CUDA compiler took the loads and the divisions out of the triangle's
+loops.
+
+**Local fix.** `loopty.hoist.hoist_invariants` lowers an operand of a sum
+that reads none of its binders, nor an enclosing sum's, into a private
+temporary, assigned in the statement's loops before the sum, as a loopy
+author writes `<> x = ...`:
+
+```c
+invariant_0 = (tx[off_cnt[box] + target] + -1.0 * cx[box]) / rscale;
+invariant_1 = (ty[off_cnt[box] + target] + -1.0 * cy[box]) / rscale;
+for (int32_t a_1 = 0; a_1 <= 10; ++a_1)
+  for (int32_t b_1 = 0; b_1 <= 10 + -1 * a_1; ++b_1)
+    acc_a_1_b_1 = acc_a_1_b_1 + R_window[11 * a_1 + b_1] * loopy_pow_float64_int32(invariant_0, a_1) * ...
+```
+
+It runs on the kernel code is generated from, `Schedule.kernel` after every
+step and a kernel run without a schedule, so no step and no fact sees the
+temporaries, and loopy privatizes one along an `ilp` loop as it does any
+private temporary (`invariant_0[16]` in `layer_potential.py`'s tile). It keeps
+the bits and the reads:
+
+- Only a whole operand moves, or the leading operands of a real sum or
+  product, which C computes first: `h * w[i] * f[j]` is `(h * w[i]) *
+  f[j]`, and `f[j] * h * w[i]` keeps both products in the sum. A floating or
+  complex one only, of the type every operation from the sum down to it is
+  written in: loopy writes a Python number in the type context it is
+  handed (note 25), and a temporary's context is its own type, so a
+  `float32` operand of a double sum stays.
+- Nothing moves out of a conditional, an `and` or an `or`, which evaluate a
+  part only sometimes, out of a subscript, which loopy reads as affine, or
+  out of a substitution, whose body loopy expands later. Nor out of a
+  statement with a sum on a local axis: loopy runs that statement on the
+  axis (`realize_reduction`) and refuses an instruction that does not run
+  on every local axis of its kernel (`check_for_unused_hw_axes_in_insns`),
+  as a temporary of the statement's loops alone would not.
+- The temporary is assigned under the statement's predicates, after what the
+  statement waits for, where the sum computed the operand at each of its
+  terms, of which there may be none. An operand that reads arrays moves
+  where loopy's own check of an instruction's reads finds every cell it
+  reads inside its array at every instance of the statement, or where isl
+  finds that the sum has a term at every instance. `x[i - 1]` in a sum over
+  `Fin[i]` stays: `i = 0` has no term, and `x[-1]` is no cell.
+
+An operand of an inner sum that reads an outer sum's binder stays: an
+instruction cannot run inside another's sum.

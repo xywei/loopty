@@ -22,7 +22,7 @@ from lanky.prelude import Nat, Real
 
 import hand_terms as ht
 from lines import where
-from loopty import Arr, Fin, kernel, reduce_sum, when
+from loopty import Arr, Fin, kernel, reduce_sum
 from loopty.executor import emit_code
 from loopty.handles import scope
 from loopty.isl_reading import declining
@@ -199,7 +199,7 @@ def gated_by_the_next(
     """
     for i in y.dom:
         flag[i] = 1
-        with when(flag[i + 1] != 0):
+        if flag[i + 1] != 0:
             y[i] = 2.0
 
 
@@ -288,7 +288,7 @@ def row_sums_then_next_count(
     """
     for r in y.dom:
         y[r] = reduce_sum(val[r, j] for j in val.dom[r])
-        with when(r + 1 < y.dom.size):
+        if r + 1 < y.dom.size:
             cnt[r + 1] = 0
 
 
@@ -343,7 +343,7 @@ def sums_at_i_then_next_count(
     for r in y.dom:
         for i in x.dom:
             y[r] = y[r] + x[i] * reduce_sum(val[r, t] for t in val.dom[r] if t == i)
-        with when(r + 1 < y.dom.size):
+        if r + 1 < y.dom.size:
             cnt[r + 1] = 0
 
 
@@ -538,6 +538,25 @@ def test_realizing_a_reduction_as_a_tree_marks_it_reassociated() -> None:
     assert exactness[0].status.value == "decided"
 
 
+def test_realize_moves_no_instance_and_records_no_cast_of_its_own() -> None:
+    # A reduction tree changes how the sum is added up, not which instance
+    # runs when, so its one fact is the reassociation, as atomic's is; a
+    # step after it is a cast as before (#203).
+    schedule = Schedule(ht.spmv_term(exactness="reassoc"))
+    tree = schedule.realize(SPMV_REASSOC.y, tree=True)
+    assert [fact.statement for fact in tree.facts()] == [
+        "the accumulation into spmv.y is reassociated by "
+        "realize(spmv.y, tree=True), so its result is compared at 'reassoc'"
+    ]
+    assert list(schedule.realize(SPMV_REASSOC.y, tree=False).facts()) == []
+    split = tree.split(SPMV_REASSOC.j, 2)
+    assert [fact.kind for fact in split.facts()] == [
+        "exactness",
+        "bijective",
+        "monotone",
+    ]
+
+
 def test_a_tree_over_an_exact_accumulation_is_rejected() -> None:
     schedule = Schedule(ht.spmv_term(exactness="exact"))
     with pytest.raises(IllegalCast) as caught:
@@ -594,7 +613,7 @@ def potential(
 def running(x: Arr[Fin[m], Real], out: Arr[Fin[n], Real]):  # noqa: F821
     """Each cell the one before it plus a sum: a dependence along ``t``."""
     for t in out.dom:
-        with when(t > 0):
+        if t > 0:
             out[t] = out[t - 1] + reduce_sum(x[s] for s in x.dom)
 
 
@@ -1405,7 +1424,9 @@ def test_a_statement_in_one_of_two_tiled_loops_is_split_by_its_own_loop() -> Non
     # part over r alone that means anything for it.
     with pytest.raises(ValueError, match="not in j, and the map mixes them"):
         Schedule(term, sizes={"n": 5}).skew(scope(term).j, by=scope(term).r)
-    with pytest.raises(ValueError, match="S0 runs in r but not in j"):
+    # one map for every statement: the statement by its text and line
+    with pytest.raises(ValueError, match=r"y\[r\] = 0\.0 \(test_schedule\.py:\d+\) "
+                       "runs in r but not in j"):
         Schedule(term, sizes={"n": 5}).affine(
             "{ [r, j] -> [a, b] : a = r + j and b = r - j }"
         )
@@ -1731,7 +1752,7 @@ def every_other(
 ):
     """Double the even cells: a guard whose congruence narrows the domain."""
     for i in x.dom:
-        with when(i % 2 == 0):
+        if i % 2 == 0:
             y[i] = 2.0 * x[i]
 
 
@@ -2005,7 +2026,7 @@ def masked_then_shifted(
 ):
     """Two independent statements, the first under a guard that reads."""
     for i in x.dom:
-        with when(mask[i] > 0):
+        if mask[i] > 0:
             y[i] = 2.0 * x[i]
         z[i] = x[i] + 1.0
 
@@ -2195,12 +2216,15 @@ def test_maps_per_statement_move_statements_that_run_in_all_their_loops() -> Non
     from loopty.trace import trace
 
     term = trace(ragged_row_totals, evaluate_annotations(ragged_row_totals))
-    with pytest.raises(ValueError, match="S0 runs in r but not in j"):
+    # a map per statement names it by its id, and the message by both
+    with pytest.raises(
+        ValueError, match=r"S0 \(y\[r\] = 0\.0, test_schedule\.py:\d+\) runs in r but"
+    ):
         Schedule(term).affine(
             "{ S0[r, j] -> [q, k] : q = r and k = j; "
             "S1[r, j] -> [q, k] : q = r and k = j }"
         )
-    with pytest.raises(ValueError, match="S0 does not run in j"):
+    with pytest.raises(ValueError, match=r"S0 \(y\[r\] = 0\.0, .*\) does not run in j"):
         Schedule(term).affine("{ S0[j] -> [k] : k = j; S1[j] -> [k] : k = j }")
     with pytest.raises(ValueError, match="have to take the same loops"):
         Schedule(term).affine(

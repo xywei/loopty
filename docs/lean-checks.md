@@ -25,17 +25,21 @@ its schedule, reads:
 ```console
 $ lanky check examples/stencil_skew.py
 STATUS  BY           WHERE                OWNER   STATEMENT
-------  -----------  -------------------  ------  --------------------------------------------------------------------------------------
-proved  lean         stencil_skew.py:62   jacobi  u[t + 1, i] is in bounds for every instance of S0
-proved  lean         stencil_skew.py:62   jacobi  u[t, i - 1] is in bounds for every instance of S0
-proved  lean         stencil_skew.py:62   jacobi  u[t, i + 1] is in bounds for every instance of S0
-proved  lean         stencil_skew.py:62   jacobi  distinct instances of S0 write distinct cells of u
-proved  lean         stencil_skew.py:54   jacobi  the source order runs every dependence forward in time
-tested  interpreter  stencil_skew.py:54   jacobi  the traced term computes what the body computes
-proved  lean         stencil_skew.py:116  jacobi  skew(jacobi.i, by=jacobi.t) renames the instances of jacobi one for one
-proved  lean         stencil_skew.py:116  jacobi  the order after skew(jacobi.i, by=jacobi.t) runs every dependence of jacobi forward
-proved  lean         stencil_skew.py:117  jacobi  tile(jacobi.t, jacobi.i, 8, 8) renames the instances of jacobi one for one
-proved  lean         stencil_skew.py:117  jacobi  the order after tile(jacobi.t, jacobi.i, 8, 8) runs every dependence of jacobi forward
+------  -----------  -------------------  ------  ----------------------------------------------------------------------------------------------
+proved  lean         stencil_skew.py:61   jacobi  u[t + 1, i] is in bounds for every instance of u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2
+                                                    (stencil_skew.py:61)
+proved  lean         stencil_skew.py:61   jacobi  u[t, i - 1] is in bounds for every instance of u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2
+                                                    (stencil_skew.py:61)
+proved  lean         stencil_skew.py:61   jacobi  u[t, i + 1] is in bounds for every instance of u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2
+                                                    (stencil_skew.py:61)
+proved  lean         stencil_skew.py:61   jacobi  distinct instances of u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2 (stencil_skew.py:61) write
+                                                    distinct cells of u
+proved  lean         stencil_skew.py:53   jacobi  the source order runs every dependence forward in time
+tested  interpreter  stencil_skew.py:53   jacobi  the traced term computes what the body computes
+proved  lean         stencil_skew.py:115  jacobi  skew(jacobi.i, by=jacobi.t) renames the instances of jacobi one for one
+proved  lean         stencil_skew.py:115  jacobi  the order after skew(jacobi.i, by=jacobi.t) runs every dependence of jacobi forward
+proved  lean         stencil_skew.py:116  jacobi  tile(jacobi.t, jacobi.i, 8, 8) renames the instances of jacobi one for one
+proved  lean         stencil_skew.py:116  jacobi  the order after tile(jacobi.t, jacobi.i, 8, 8) runs every dependence of jacobi forward
 
 10 facts: 9 proved, 1 tested
 
@@ -47,11 +51,11 @@ and `loopty run` proves the casts of every schedule it runs:
 ```console
 $ loopty run examples/stencil_skew.py
 ...
-proved  lean   stencil_skew.py:116  jacobi  skew(jacobi.i, by=jacobi.t) renames the instances of jacobi one for one
-proved  lean   stencil_skew.py:116  jacobi  the order after skew(jacobi.i, by=jacobi.t) runs every dependence of jacobi forward
-proved  lean   stencil_skew.py:117  jacobi  tile(jacobi.t, jacobi.i, 8, 8) renames the instances of jacobi one for one
-proved  lean   stencil_skew.py:117  jacobi  the order after tile(jacobi.t, jacobi.i, 8, 8) runs every dependence of jacobi forward
-tested  loopy  stencil_skew.py:117  jacobi  the scheduled run of jacobi agrees with the native run to the accurac...
+proved  lean   stencil_skew.py:115  jacobi  skew(jacobi.i, by=jacobi.t) renames the instances of jacobi one for one
+proved  lean   stencil_skew.py:115  jacobi  the order after skew(jacobi.i, by=jacobi.t) runs every dependence of jacobi forward
+proved  lean   stencil_skew.py:116  jacobi  tile(jacobi.t, jacobi.i, 8, 8) renames the instances of jacobi one for one
+proved  lean   stencil_skew.py:116  jacobi  the order after tile(jacobi.t, jacobi.i, 8, 8) runs every dependence of jacobi forward
+tested  loopy  stencil_skew.py:116  jacobi  the scheduled run of jacobi agrees with the native run to the accurac...
 
 5 facts: 4 proved, 1 tested
 
@@ -68,7 +72,7 @@ text it is given:
 ```console
 $ lanky check examples/stencil_skew.py --show-lean "u[t, i - 1]"
 ...
-LEAN jacobi at stencil_skew.py:62: u[t, i - 1] is in bounds for every instance of S0
+LEAN jacobi at stencil_skew.py:61: u[t, i - 1] is in bounds for every instance of u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2 (stencil_skew.py:61)
   proved by Lean (omega)
     set_option autoImplicit false in
     theorem Lanky.jacobi_in_bounds
@@ -89,8 +93,8 @@ LEAN jacobi at stencil_skew.py:62: u[t, i - 1] is in bounds for every instance o
       omega
 ```
 
-`h2` to `h4` are the guard the kernel wrote, `with when((t + 1 < steps.size) &
-(i > 0) & (i + 1 < row.size))`, and `h5` to `h8` its two loops. The file the
+`h2` to `h4` are the condition the kernel wrote, `if t + 1 < steps.size and
+i > 0 and i + 1 < row.size:`, and `h5` to `h8` its two loops. The file the
 source is part of replays with `lean` alone. `loopty run --show-lean` does the
 same for the casts.
 
@@ -100,7 +104,7 @@ proves the claim false there:
 ```console
 $ lanky check tests/kernels/out_of_bounds.py
 ...
-REFUTED shift at out_of_bounds.py:24: u[i + 1] is in bounds for every instance of S0
+REFUTED shift at out_of_bounds.py:24: u[i + 1] is in bounds for every instance of v[i] = u[i + 1] (out_of_bounds.py:24)
   witness: (1,)
   cells u[i + 1] reaches are cells u has, except [a0=1] at [n=1]
   Lean confirmed the counterexample: the claim is false at n=1, i=0
@@ -183,8 +187,8 @@ LEAN matvec at calls.py:100: A[i], the row passed to dot as a, is in bounds wher
       omega
 ```
 
-A class two statements never form, `S1` before `S0` in a program whose `S0`
-runs first, has a hypothesis that is `False` as written, and is closed by
+A class two statements never form, the second statement of a program before
+the first, which runs first, has a hypothesis that is `False` as written, and is closed by
 `contradiction`: that a class is empty is isl's verdict too, and Lean proves
 it again.
 
@@ -223,7 +227,8 @@ LEAN scan at spmv.py:69: off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[
       omega
 ```
 
-`h3` is `S1`'s value equation: what it stores at `r` is `off[r] + cnt[r]`,
+`h3` is the value equation of the statement `off[r + 1] = off[r] + cnt[r]`:
+what it stores at `r` is `off[r] + cnt[r]`,
 and isl's discharge took it at `r`, the hint `have hi0 := h3 r`.
 
 That the equations are what the kernel does is the reading of a kernel's
@@ -341,8 +346,9 @@ stays `decided`.
   hypotheses only the conjuncts in which nothing rounds, copies and sign
   changes, whose two readings agree: `s[i] == a[i] + b[i]` holds of the
   floats a kernel stores, and not of them read as reals.
-- The gap between the model and the code: lowering, loopy and the compiler,
-  which the native and compiled differential covers, by sampling.
+- The gap between the model and the code: lowering, the operands of a sum
+  the generated code computes once before it (`loopty.hoist`), loopy and the
+  compiler, which the native and compiled differential covers, by sampling.
 
 ## Cost
 

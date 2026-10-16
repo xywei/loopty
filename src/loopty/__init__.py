@@ -75,6 +75,8 @@ _EXPORTS = {
     "tested": "loopty.tested",
     "trace": "loopty.trace",
     "upstream": "loopty.upstream",
+    # Removed in 0.4: kept importable so that using it raises with the if to
+    # write (loopty.trace.when).
     "when": "loopty.trace",
 }
 

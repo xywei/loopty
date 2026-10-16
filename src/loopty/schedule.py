@@ -305,10 +305,12 @@ from loopty.handles import (
     _Index,
     _Several,
     binders_of,
+    statement_names,
 )
 from loopty.handles import (
     _index as _handles_of,
 )
+from loopty.hoist import hoist_invariants
 from loopty.isl_reading import declining_methods
 from loopty.lower import (
     Lowering,
@@ -320,7 +322,7 @@ from loopty.lower import (
     reductions_of,
 )
 from loopty.obligations import IslOnly
-from loopty.source import instances_text
+from loopty.source import Named, as_spelled, instances_text
 from loopty.term import Stmt, Term, commutes
 from loopty.typing import layout_fact_ids
 
@@ -448,12 +450,26 @@ class IllegalCast(TypeError):
     ``witness`` this witness when isl gave one. A substitution refused on a
     question isl could not answer carries it ``ASSUMED`` instead (see
     :meth:`Schedule.substitute`).
+
+    The witness names each statement by its id, as a map per statement and a
+    fact's provenance do: ``(('S0', {'t': 0, 'i': 8}), ('S0', {'t': 1, 'i':
+    7}), {'nt': 16, 'nx': 16})``. ``instances`` names its instances as the
+    message does, each statement by its text and line: ``('u[t + 1, i] = ...
+    (stencil_skew.py:62) at t=0, i=8', 'the same statement at t=1, i=7')``,
+    and is empty where the witness is no such pair.
     """
 
-    def __init__(self, message: str, witness: Any = None, fact: Any = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        witness: Any = None,
+        fact: Any = None,
+        instances: Sequence[str] = (),
+    ) -> None:
         super().__init__(message)
         self.witness = witness
         self.fact = fact
+        self.instances = tuple(instances)
 
 
 class UnbuildableSchedule(TypeError):
@@ -3278,6 +3294,22 @@ class Defined:
 
 
 @dataclass(frozen=True)
+class _Definedness:
+    """The answer of :meth:`Schedule._defined`, for a fact to be made of.
+
+    ``status`` is ``"decided"``, ``"refuted"`` or ``"assumed"``; ``why`` is
+    the refusal in words, after the step that is refused, and empty when
+    decided; ``term`` the claim for Lean.
+    """
+
+    status: str
+    witness: Any
+    detail: str
+    why: str
+    term: Any
+
+
+@dataclass(frozen=True)
 class _Settled:
     """isl's verdict on a fact a step decided when it was taken: ``ok``."""
 
@@ -3541,6 +3573,12 @@ class Schedule:
         self._reindex = isl.Map.identity(
             self._instances.get_space().map_from_set()
         ).intersect_domain(self._instances)
+        #: The arrays the program makes whose zeros no read sees, each with
+        #: the ``definedness`` fact that shows it, and the others' with why
+        #: a read may see them; the first are not zeroed (#290).
+        self._unseen: dict[str, Any] = {}
+        self._kept: dict[str, tuple[str, str]] = {}
+        self._drop_unseen_zeros()
 
     # {{{ plumbing
 
@@ -3648,12 +3686,24 @@ class Schedule:
         share their loops, and each runs at the points of its own image only,
         which its instruction's predicates state.
 
+        Each sum's operands that read none of its binders are computed before
+        it, once per iteration of the loops around it
+        (:func:`loopty.hoist.hoist_invariants`): here, after every step, and
+        not in the kernel the steps transform and check, so that no step and
+        no fact sees the temporaries they are kept in.
+
         ``None`` once a step could not be written as a loopy kernel at all,
         which only :meth:`affine` can cause; the schedule's ``buildable`` fact
         says why, and :meth:`require_buildable` refuses before anything reads
         this.
         """
-        return self._code
+        made = self.__dict__.get("_hoisted")
+        if made is None or made[0] is not self._code:
+            # A clone shares this with the schedule it was made from until a
+            # step gives it code of its own.
+            made = (self._code, hoist_invariants(self._code))
+            self._hoisted = made
+        return made[1]
 
     @property
     def strides(self) -> dict[str, str]:
@@ -4079,15 +4129,25 @@ class Schedule:
                 return f"{self._shown(name[: -len(prefix)], loops)}.{prefix[1:]}"
         return name
 
+    def _statement_names(self) -> Named:
+        """The term's statements as a message names them, by the schedule's paths."""
+        return statement_names(self._term, self._handles)
+
     def _stmt_shown(self, stmt_id: str) -> str:
-        """A statement as the source writes it, with its line, or its id."""
-        try:
-            stmt = self._term.stmt(stmt_id)
-        except KeyError:
+        """A statement as the source writes it, with its line, or its id.
+
+        A statement loopty adds by what it is (:class:`loopty.source.Named`).
+        """
+        return self._statement_names()(stmt_id)
+
+    def _mapped_shown(self, stmt_id: str) -> str:
+        """A statement a map names by its id, with its text: ``S0 (u[t + 1, i] =
+        ..., stencil_skew.py:62)``, which tells the reader which one it is."""
+        shown = self._stmt_shown(stmt_id)
+        if shown == stmt_id or not shown.endswith(")"):
             return stmt_id
-        if stmt.text and stmt.where:
-            return f"{stmt.text} ({stmt.where})"
-        return stmt.text or stmt_id
+        text, _, where = shown[:-1].rpartition(" (")
+        return f"{stmt_id} ({text}, {where})"
 
     def _stmts_shown(self, stmt_ids: Iterable[str], word: str = "or") -> str:
         """Statements as a reader knows them: by their call, or as written.
@@ -4107,31 +4167,9 @@ class Schedule:
         for stmt_id in stmt_ids:
             if stmt_id in calls:
                 out.append(self._handles.scope_path(calls[stmt_id]))
-            elif stmt_id.endswith(".zeros"):
-                array = stmt_id[: -len(".zeros")]
-                out.append(f"the zeros of {self._shown_array(array)}")
-            elif stmt_id in self._handles.check_stmts:
-                labels, _param = self._handles.check_stmts[stmt_id]
-                out.append(
-                    f"the check of {self._shown_array(self._checked(stmt_id))} "
-                    f"before {self._handles.scope_path(labels)}"
-                )
             else:
                 out.append(self._stmt_shown(stmt_id))
         return _joined(list(dict.fromkeys(out)), word)
-
-    def _checked(self, stmt_id: str) -> str | None:
-        """The array a statement of a program's checked point checks, or ``None``.
-
-        The array the program passed for the parameter the call requires
-        something of: ``idx`` for ``gather.check.idx``.
-        """
-        found = self._handles.check_stmts.get(stmt_id)
-        if found is None:
-            return None
-        labels, param = found
-        site = self._handles.sites.get(labels)
-        return param if site is None else dict(site.arrays).get(param, param)
 
     def _shown_array(self, name: str) -> str:
         """An array of the term by its path: ``l2p.R``.
@@ -4574,9 +4612,10 @@ class Schedule:
                 if part is None:
                     outside = [name for name in inputs if name not in coords]
                     raise ValueError(
-                        f"{text}: {stmt_id} runs in {', '.join(inside)} but not "
-                        f"in {', '.join(outside)}, and the map mixes them, so it "
-                        "has no part that moves the loops of that statement alone"
+                        f"{text}: {self._stmt_shown(stmt_id)} runs in "
+                        f"{', '.join(inside)} but not in {', '.join(outside)}, "
+                        "and the map mixes them, so it has no part that moves "
+                        "the loops of that statement alone"
                     )
                 own = part
             first = min(coords.index(name) for name in inside)
@@ -4650,9 +4689,10 @@ class Schedule:
                     "make, so their maps have to make the same new ones"
                 )
                 raise ValueError(
-                    f"{text}: the map of {stmt_id} takes [{', '.join(ins)}] to "
-                    f"[{', '.join(outs)}] and the map of {other} takes "
-                    f"[{', '.join(other_ins)}] to [{', '.join(other_outs)}]; {why}"
+                    f"{text}: the map of {self._mapped_shown(stmt_id)} takes "
+                    f"[{', '.join(ins)}] to [{', '.join(outs)}] and the map of "
+                    f"{self._mapped_shown(other)} takes [{', '.join(other_ins)}] "
+                    f"to [{', '.join(other_outs)}]; {why}"
                 )
             for name in ins:
                 taken.setdefault(name, (stmt_id, ins))
@@ -4665,30 +4705,33 @@ class Schedule:
             if not inside:
                 if piece is not None:
                     raise ValueError(
-                        f"{text}: {stmt_id} does not run in {', '.join(ins)}, so "
-                        "its map has no loop of it to move"
+                        f"{text}: {self._mapped_shown(stmt_id)} does not run in "
+                        f"{', '.join(ins)}, so its map has no loop of it to move"
                     )
                 continue
             if piece is None:
                 raise ValueError(
-                    f"{text}: {stmt_id} runs in {', '.join(inside)} and is given "
-                    "no map; with a map per statement, every statement in the "
-                    "loops the maps name needs one"
+                    f"{text}: {self._mapped_shown(stmt_id)} runs in "
+                    f"{', '.join(inside)} and is given no map; with a map per "
+                    "statement, every statement in the loops the maps name "
+                    "needs one"
                 )
             outside = [name for name in ins if name not in coords]
             if outside:
                 mine = [name for name in ins if name in coords]
                 raise ValueError(
-                    f"{text}: {stmt_id} runs in {', '.join(mine)} but not in "
-                    f"{', '.join(outside)}, and a map per statement moves "
-                    "statements that run in every loop it names"
+                    f"{text}: {self._mapped_shown(stmt_id)} runs in "
+                    f"{', '.join(mine)} but not in {', '.join(outside)}, and a "
+                    "map per statement moves statements that run in every loop "
+                    "it names"
                 )
             extra = [name for name in inside if name not in ins]
             if extra:
                 owner = taken[extra[0]][0]
                 raise ValueError(
-                    f"{text}: {stmt_id} runs in {', '.join(extra)} as well, which "
-                    f"the map of {owner} moves and its own does not; a "
+                    f"{text}: {self._mapped_shown(stmt_id)} runs in "
+                    f"{', '.join(extra)} as well, which the map of "
+                    f"{self._mapped_shown(owner)} moves and its own does not; a "
                     "statement's map moves every loop of the step it runs in"
                 )
 
@@ -5533,7 +5576,9 @@ class Schedule:
             message = f"{exc}; " + "; ".join(fixes)
             provenance = {**exc.fact.provenance, "reason": message}
             fact = dataclasses.replace(exc.fact, provenance=provenance)
-            raise IllegalCast(message, witness=exc.witness, fact=fact) from None
+            raise IllegalCast(
+                message, witness=exc.witness, fact=fact, instances=exc.instances
+            ) from None
 
     def _fused_check(self, handles: Sequence[Any], witness: Any) -> str | None:
         """The fusion of a checked point that a refused fusion ran past, or ``None``.
@@ -5931,7 +5976,7 @@ class Schedule:
                 "computes the value of the one statement that stores it"
             )
         (producer,) = producers
-        why = _not_pointwise(producer, array, term)
+        why = _not_pointwise(producer, array, term, self._statement_names())
         if why is not None:
             raise ValueError(f"{text}: {why}")
         # The reads of the producer move to the readers, and a window is
@@ -5996,12 +6041,18 @@ class Schedule:
                 "through two arrays is not done, so substitute only one of them"
             )
 
-        fact = self._definedness_fact([producer], readers, array, text, recipe)
+        # the zeros no read sees were dropped where the schedule was made, on
+        # the fact a substitution asks, which it rests on as it stands
+        unseen = self._unseen.get(array)
+        fact = unseen or self._definedness_fact(
+            [producer], readers, array, text, recipe
+        )
         if fact.status.value != "decided":
             raise IllegalCast(
                 fact.provenance["reason"],
                 witness=fact.provenance.get("witness"),
                 fact=fact,
+                instances=self._witnessed(fact.provenance.get("witness")),
             )
         gone = {stmt.id for stmt in writers}
         staged = self._clone()
@@ -6049,7 +6100,8 @@ class Schedule:
         staged._flow_note = (
             f"those of {term.name} with {array} computed where it is read: the "
             f"dependences of {', '.join(sorted(gone))} dropped, and those of "
-            f"{producer.id}'s reads carried over to the reads of {array}"
+            f"{self._stmt_shown(producer.id)}'s reads carried over to the reads "
+            f"of {array}"
         )
         staged._reindex = self._reindex.intersect_domain(staged._origin)
         staged._instances = staged._reindex.range().coalesce()
@@ -6063,7 +6115,11 @@ class Schedule:
         draft = staged._draft()
         if draft.kernel is not None:
             ids = self._lowering.insn_ids
-            removed = [ids[stmt.id] for stmt in writers if stmt.id == zeros]
+            removed = [
+                ids[stmt.id]
+                for stmt in writers
+                if stmt.id == zeros and zeros not in self._gone
+            ]
             kernel, reason = _substituted_kernel(
                 draft.kernel,
                 array,
@@ -6079,7 +6135,7 @@ class Schedule:
             draft,
             text,
             recipe,
-            leading=(fact,),
+            leading=() if unseen is not None else (fact,),
             gone=frozenset(gone),
             substituted=(array, producer, tuple(readers)),
         )
@@ -6227,7 +6283,7 @@ class Schedule:
             array,
             self._gone,
             text,
-            lambda sid: self._stmts_shown([sid]),
+            self._stmt_shown,
             shown=self._shown_array,
             owner=self._handles.name,
         )
@@ -6276,7 +6332,9 @@ class Schedule:
                 f"order; contract {handle!r} before prioritize"
             )
 
-        fact = self._definedness_fact(
+        # as for a substitution: the zeros dropped where the schedule was made
+        unseen = self._unseen.get(array)
+        fact = unseen or self._definedness_fact(
             producers, readers, array, text, recipe, losing="a window would not"
         )
         if fact.status.value != "decided":
@@ -6284,6 +6342,7 @@ class Schedule:
                 fact.provenance["reason"],
                 witness=fact.provenance.get("witness"),
                 fact=fact,
+                instances=self._witnessed(fact.provenance.get("witness")),
             )
 
         layout = self._origin_layout
@@ -6394,7 +6453,7 @@ class Schedule:
                 fix = ""
             k, triple, message = clobbered
             clobbered = (k, triple, message + fix)
-        facts = [fact]
+        facts = [] if unseen is not None else [fact]
         no_clobber = self._no_clobber_fact(window, clobbered, shown, recipe, fact)
         facts.append(no_clobber)
         if no_clobber.status.value != "decided":
@@ -6402,6 +6461,7 @@ class Schedule:
                 no_clobber.provenance["reason"],
                 witness=no_clobber.provenance.get("witness"),
                 fact=no_clobber,
+                instances=self._witnessed(no_clobber.provenance.get("witness")),
             )
 
         zeros = f"{array}.zeros"
@@ -6474,7 +6534,7 @@ class Schedule:
                     [ids[producer.id] for producer in producers],
                     chosen,
                     removed,
-                    {insn: stmt_id for stmt_id, insn in ids.items()},
+                    {insn: self._stmt_shown(stmt_id) for stmt_id, insn in ids.items()},
                 )
                 if not isinstance(plan, str) and plan[0] in self._strides:
                     plan = (
@@ -6784,6 +6844,172 @@ class Schedule:
         other._facts = (*earlier, *facts)
         return other
 
+    def _drop_unseen_zeros(self) -> None:
+        """Take out the zeros of each array the program makes that no read sees.
+
+        A program zeroes every array it makes (``C = Arr.zeros(...)``, ``f =
+        Arr.zeros_like(u)``) in a statement of its own, ``C.zeros``, which
+        its code runs too. Where every cell a statement reads, a statement
+        that stores the array stored before the read, in the program's
+        order, no read sees those zeros, and they are work and nothing
+        else: a pass over every cell before the calls run, which a run on C
+        makes twice, since the executor allocates the array as zeros, and
+        which a device makes on every work item unless a tag can place it
+        (:func:`_zeros_tags`, #289). That is the ``definedness`` fact
+        :meth:`substitute` and :meth:`contract` ask before they drop the
+        zeros (:meth:`_definedness_fact`), asked here of the program as it
+        is, before any step; where isl decides it, the zeros are dropped as
+        those steps drop them, and the fact is the schedule's first, placed
+        at the line that makes the array, the same on every target and
+        after any step, which a later window or substitution rests on
+        (#290). Where a read may see the zeros (padding the program means,
+        an update that starts from them) or isl cannot tell, they are kept,
+        and why is kept for a refusal that meets them.
+        """
+        from lanky.ledger import Fact, Status
+
+        term = self._term
+        checks = dict(term.checks)
+        name = self._handles.name
+        gone: set[str] = set()
+        for array, _typ in term.temporaries:
+            zeros = f"{array}.zeros"
+            if array in checks or zeros not in self._layout.coords:
+                continue
+            producers = [
+                stmt
+                for stmt in term.stmts
+                if stmt.assignee.array == array and stmt.id != zeros
+            ]
+            readers = [
+                stmt
+                for stmt in term.stmts
+                if stmt.id != zeros
+                and any(
+                    kind == "read" and touched == array
+                    for kind, touched, _indices, _part in _accesses(stmt, term)
+                )
+            ]
+            if not producers or not readers:
+                continue
+            found = self._defined(producers, readers, array, "they are kept")
+            if found.status != "decided":
+                self._kept[array] = (found.status, found.why)
+                continue
+            shown = self._shown_array(array)
+            stored_by = self._stmts_shown(producer.id for producer in producers)
+            self._unseen[array] = Fact(
+                id=fact_id(
+                    "definedness", **self._definition, detail=f"zeros:{array}"
+                ),
+                kind="definedness",
+                statement=(
+                    f"every cell of {shown} that {name} reads, {stored_by} has "
+                    f"stored by the time it is read, so {name} runs without "
+                    f"the zeros {shown} is made with"
+                ),
+                term=found.term,
+                status=Status.DECIDED,
+                decided_by="isl",
+                provenance={
+                    "oracle": "isl",
+                    "detail": found.detail,
+                    "dependences": self._flow_note,
+                    "array": array,
+                },
+                where=term.stmt(zeros).where or self._kernel_where(),
+                owner=term.name,
+            )
+            gone.add(zeros)
+        if not gone:
+            return
+        layout = self._layout
+        origin = self._origin
+        for stmt_id in sorted(gone):
+            instances = _embed(self._domains[stmt_id], layout.index(stmt_id), layout)
+            instances = instances.align_params(origin.get_space())
+            origin = origin.align_params(instances.get_space()).subtract(instances)
+        self._gone = frozenset(gone)
+        self._origin = origin.coalesce()
+        self._instances = self._origin
+        self._reindex = self._reindex.intersect_domain(self._origin)
+        self._deps = tuple(
+            dep for dep in self._deps if dep.source not in gone and dep.sink not in gone
+        )
+        self._updates = tuple(
+            dep
+            for dep in self._updates
+            if dep.source not in gone and dep.sink not in gone
+        )
+        self._within = tuple(dep for dep in self._within if dep.source not in gone)
+        if self._deps_total is not None:
+            self._deps_total = self._deps_total.intersect_domain(
+                self._origin
+            ).intersect_range(self._origin)
+        arrays = _joined(sorted(self._shown_array(array) for array in self._unseen))
+        self._flow_note = (
+            f"{self._flow_note}; without the zeros of {arrays}, which no read sees"
+        )
+        live = {
+            loop
+            for stmt_id, coords in layout.coords.items()
+            if stmt_id not in gone
+            for loop in coords
+        }
+        self._order = [loop for loop in self._order if loop in live]
+        ids = self._lowering.insn_ids
+        removed = {ids[stmt_id] for stmt_id in gone}
+        entry = self._kernel.default_entrypoint
+        loops = {
+            loop
+            for insn in entry.instructions
+            if insn.id in removed
+            for loop in insn.within_inames
+        }
+        kernel = lp.remove_instructions(self._kernel, removed)
+        kernel = lp.remove_unused_inames(kernel, loops)
+        # and the zeros' nest from the lowering's priorities, which loopy
+        # refuses with a loop it does not know
+        entry = kernel.default_entrypoint
+        left = entry.all_inames()
+        self._kernel = _with_priority(
+            kernel,
+            [
+                [loop for loop in nest if loop in left]
+                for nest in entry.loop_priority
+            ],
+        )
+        self._code = self._kernel
+        self._facts = tuple(self._unseen.values())
+
+    def _kept_zeros_hint(self, array: str, axis: str) -> str:
+        """Why the zeros of ``array`` run on every work item of ``axis``, and the fix.
+
+        The zeros go on the work item that stores each cell where the
+        statements that store the array store it along a loop of their own
+        on the axis (:func:`_zeros_tags`), and they are there at all only
+        where a read may see them (:meth:`_drop_unseen_zeros`), which the
+        hint says, with the read.
+        """
+        shown = self._shown_array(array)
+        placed = (
+            f". The zeros {shown} is made with run on the work item that stores "
+            f"each cell only where every statement that stores {shown} stores "
+            f"it along a loop of its own on {axis}, and none does here"
+        )
+        status, why = self._kept.get(array, ("", ""))
+        if status == "refuted":
+            return (
+                f"{placed}; and {why}: store every cell a call reads in a call "
+                "before it, and they are dropped"
+            )
+        if status == "assumed":
+            return (
+                f"{placed}; and they are kept, since isl cannot tell that no "
+                f"read sees them: {why}"
+            )
+        return placed
+
     def _definedness_fact(
         self,
         producers: Sequence[Stmt],
@@ -6795,17 +7021,22 @@ class Schedule:
     ) -> Any:
         """The ``definedness`` fact of :meth:`substitute`, decided or refuted.
 
-        Two questions about the reads of ``array``: are their cells cells
+        Three questions about the reads of ``array``: are their cells cells
         ``producers`` write (:func:`loopty.flow.definedness`, asked without
-        the zeros, which the substitution takes away), and does any read
-        come before the write of its cell, a dependence from the read to a
-        producer, which would read the zeros. The first refutation is the
-        fact's. A read isl cannot list (an index that is not affine, a guard
-        it cannot state) leaves the first question open: the step is refused
-        all the same, and the fact is ``assumed``, not refuted. ``losing``
-        says what the step does without the zeros, for the message:
-        ``computing it again would not`` (see them) for a substitution, ``a
-        window would not`` for a contraction.
+        the zeros, which the substitution takes away); does any read come
+        before the write of its cell, a dependence from the read to a
+        producer, which would read the zeros; and does a producer read a
+        cell it stores itself, at the same instance, which it reads before
+        it stores it: ``f[i] = 2 * f[i - k]`` at ``k = 0``. The first
+        refutation is the fact's, under what the schedule assumes of the
+        sizes (:meth:`assume`). A read isl cannot list (an index that is not
+        affine, a guard it cannot state) leaves the first question open: the
+        step is refused all the same, and the fact is ``assumed``, not
+        refuted. ``losing`` says what the step does without the zeros, for
+        the message: ``computing it again would not`` (see them) for a
+        substitution, ``a window would not`` for a contraction, and ``they
+        are kept`` where the schedule asks it of the zeros as the program
+        makes them (:meth:`_drop_unseen_zeros`).
 
         Lean states a decided one from loopty's description (:class:`Defined`):
         every read is of a cell a producer stored before it, in the
@@ -6813,8 +7044,6 @@ class Schedule:
         before some store of its cell is refused by the second question, so
         that is the claim isl decided as two questions.
         """
-        from loopty.flow import definedness
-
         # led by the step, so that two steps' facts, a substitution's and a
         # window's after one fusion, read apart in a ledger that lists both
         stored_by = self._stmts_shown(producer.id for producer in producers)
@@ -6823,26 +7052,43 @@ class Schedule:
             f"{self._handles.name} reads, {stored_by} has stored by the time it "
             "is read"
         )
+        found = self._defined(producers, readers, array, losing)
+        return self._fact(
+            "definedness",
+            statement,
+            status=found.status,
+            witness=found.witness,
+            detail=found.detail,
+            step=recipe,
+            reason=f"{text} illegal: {found.why}" if found.why else "",
+            about=array,
+            term=found.term,
+        )
+
+    def _defined(
+        self,
+        producers: Sequence[Stmt],
+        readers: Sequence[Stmt],
+        array: str,
+        losing: str,
+    ) -> _Definedness:
+        """The three questions of :meth:`_definedness_fact`, answered."""
+        from loopty.flow import definedness
+
         verdict = definedness(self._term, array, list(producers), readers)
-        message = ""
+        why = ""
         witness: Any = None
         detail = "every read of the array is of a cell the statement stores, after it"
         if verdict.ok is not True:
             witness = verdict.witness
             detail = verdict.detail
-            # the statements as a reader knows them, by their calls
+            # the statements by their text and line, as the detail names them
             said = verdict.detail
-            for stmt in (*producers, *readers):
-                said = re.sub(
-                    rf"(?<![\w.@]){re.escape(stmt.id)}(?![\w])",
-                    self._stmts_shown([stmt.id]),
-                    said,
-                )
-            message = (
-                f"{text} illegal: {said}, so the read would see the "
-                f"zeros the array was made with, and {losing}"
+            why = (
+                f"{said}, so the read would see the zeros the array was made "
+                f"with, and {losing}"
                 if verdict.ok is False
-                else f"{text} illegal: {said}"
+                else said
             )
         else:
             ids = {producer.id for producer in producers}
@@ -6854,6 +7100,8 @@ class Schedule:
                     and dep.array == array
                     and dep.sink in ids
                     and dep.window is None
+                    # none where the sizes are as assumed
+                    and not dep.relation.is_empty()
                 ),
                 None,
             )
@@ -6861,40 +7109,90 @@ class Schedule:
                 witness = self._pair_in(early.relation)
                 (reader, coords), (writer, stored), params = witness
                 cell = _cell_text(early.source_indices, coords, params)
-                detail = f"{reader} reads {array} before {writer} stores it"
-                reading, storing = self._named((reader, coords), (writer, stored))
-                message = (
-                    f"{text} illegal: {reading} reads {array}[{cell}] before "
-                    f"{storing} stores it"
-                    f"{self._sizes_shown(params)}, so the read sees the "
-                    f"zeros the array was made with, and {losing}"
+                detail = (
+                    f"{self._stmt_shown(reader)} reads {array} before "
+                    f"{self._stmt_shown(writer)} stores it"
                 )
-        return self._fact(
-            "definedness",
-            statement,
+                reading, storing = self._named((reader, coords), (writer, stored))
+                why = (
+                    f"{reading} reads {array}[{cell}] before {storing} stores it"
+                    f"{self._sizes_shown(params)}, so the read sees the zeros "
+                    f"the array was made with, and {losing}"
+                )
+            else:
+                own = self._read_before_own_store(producers, readers, array)
+                if own is not None:
+                    witness, indices = own
+                    (reader, coords), _same, params = witness
+                    cell = _cell_text(indices, coords, params)
+                    detail = (
+                        f"{self._stmt_shown(reader)} reads {array} at the cell "
+                        "it stores"
+                    )
+                    (reading,) = self._named((reader, coords))
+                    why = (
+                        f"{reading} reads {array}[{cell}], the cell it stores, "
+                        f"before it stores it{self._sizes_shown(params)}, so "
+                        f"the read sees the zeros the array was made with, and "
+                        f"{losing}"
+                    )
+        return _Definedness(
             status=(
-                "decided"
-                if not message
-                else "assumed"
-                if verdict.ok is None
-                else "refuted"
+                "decided" if not why else "assumed" if verdict.ok is None else "refuted"
             ),
             witness=witness,
             detail=detail,
-            step=recipe,
-            reason=message,
-            about=array,
+            why=why,
             term=(
                 None
                 if verdict.ok is None
                 else Defined(self._term, array, tuple(producers), tuple(readers))
-                if not message
+                if not why
                 else IslOnly(
                     "isl refuted it with a read, which a counterexample of a "
                     "∀∃ claim cannot name for Lean"
                 )
             ),
         )
+
+    def _read_before_own_store(
+        self, producers: Sequence[Stmt], readers: Sequence[Stmt], array: str
+    ) -> tuple[tuple, tuple[Any, ...]] | None:
+        """A producer's read of a cell its own instance stores, and the read's indices.
+
+        One instance reads before it stores, so the read sees what an earlier
+        instance stored there or the zeros, and no dependence pairs it with
+        its own store, since a dependence joins two instances. ``None`` where
+        no producer among ``readers`` reads so; otherwise the instance, as
+        :meth:`_pair_in` names a pair (the instance twice), and the indices
+        of its read.
+        """
+        term = self._term
+        layout = self._origin_layout
+        ids = {producer.id for producer in producers}
+        for stmt in readers:
+            if stmt.id not in ids:
+                continue
+            accesses = [
+                (kind, indices)
+                for kind, name, indices, _part in _accesses(stmt, term)
+                if name == array
+            ]
+            for kind, read in accesses:
+                if kind != "read":
+                    continue
+                for other, stored in accesses:
+                    if other != "write" or len(stored) != len(read):
+                        continue
+                    pairs = _same_cell(stmt, stmt, read, stored, layout, self._params)
+                    pairs = pairs.intersect(isl.Map.identity(pairs.get_space()))
+                    origin = self._origin.align_params(pairs.get_space())
+                    pairs = pairs.align_params(origin.get_space()).intersect_domain(
+                        origin
+                    )
+                    if not pairs.is_empty():
+                        return self._pair_in(pairs), read
+        return None
 
     def _computed_from_inputs(self, array: str) -> bool:
         """Whether ``array``, computed where it is read, reads only what nothing writes.
@@ -7179,7 +7477,9 @@ class Schedule:
         A tree reassociates, so the result's exactness class drops to
         ``reassoc`` and the fact records it; over an ``exact`` accumulation the
         cast is rejected instead, because ``exact`` is a request for the bits and
-        a tree does not give them.
+        a tree does not give them. The step moves no instance and changes no
+        order, so, as :meth:`atomic`, it records no ``bijective`` or
+        ``monotone`` fact of its own (#203).
         """
         text = f"realize({handle!r}, tree={tree})"
         recipe = ("realize", (handle,), {"tree": tree})
@@ -7209,7 +7509,7 @@ class Schedule:
         draft = self._draft()
         if tree:
             draft.reassoc.add(var)
-        return self._commit(draft, text, recipe)
+        return self._commit(draft, text, recipe, cast=False)
 
     def atomic(self, handle: Any) -> Schedule:
         """Make every update of ``array`` atomic, so two may run at the same time.
@@ -7260,7 +7560,9 @@ class Schedule:
                 raise ValueError(f"{text}: {name} does not write {handle!r}")
             raise ValueError(
                 f"{text}: {name} does not update {handle!r}: "
-                + "; ".join(_no_update_text(stmt) for stmt in writers)
+                + "; ".join(
+                    _no_update_text(stmt, self._statement_names()) for stmt in writers
+                )
                 + f". An update adds to the cell it writes a value that reads "
                 f"nothing else of {array}, {array}[...] += v, and atomic makes "
                 "two such updates safe to run at the same time"
@@ -7349,8 +7651,9 @@ class Schedule:
         ``leading`` are facts the step decided before it came here, which go
         before the ones decided here (see :meth:`substitute`). ``cast`` is
         false for a step that moves no instance and changes no order
-        (:meth:`atomic`): it is checked all the same, and its ``bijective``
-        and ``monotone`` facts, which would say nothing, are not recorded.
+        (:meth:`atomic`, :meth:`realize`): it is checked all the same, and its
+        ``bijective`` and ``monotone`` facts, which would say nothing, are not
+        recorded.
         """
         # the loops each loop of the source is after the step, which the
         # step's messages and the schedule's after it name loops by
@@ -7421,7 +7724,12 @@ class Schedule:
             )
         )
         if not verdict.ok:
-            raise IllegalCast(message, witness=verdict.witness, fact=facts[-1])
+            raise IllegalCast(
+                message,
+                witness=verdict.witness,
+                fact=facts[-1],
+                instances=self._witnessed(verdict.witness),
+            )
 
         reindex = self._reindex.apply_range(step)
         instances = step.range()
@@ -7481,7 +7789,12 @@ class Schedule:
             )
         )
         if refused:
-            raise IllegalCast(message, witness=witness, fact=facts[-1])
+            raise IllegalCast(
+                message,
+                witness=witness,
+                fact=facts[-1],
+                instances=self._witnessed(witness),
+            )
         concurrent = self._concurrent_updates(text, schedule, reindex, work, draft)
         if concurrent is not None:
             message, witness, detail, oracle, array = concurrent
@@ -7500,7 +7813,12 @@ class Schedule:
                     term=IslOnly(UPDATES_ISL_ONLY),
                 )
             )
-            raise IllegalCast(message, witness=witness, fact=facts[-1])
+            raise IllegalCast(
+                message,
+                witness=witness,
+                fact=facts[-1],
+                instances=self._witnessed(witness),
+            )
 
         other = self._clone()
         other._loops = loops
@@ -8086,13 +8404,31 @@ class Schedule:
         A statement of a call by the call's path, where two calls of one
         kernel need telling apart, and an array by its path.
         """
-        return instances_text(
-            self._statements(),
-            *instances,
-            called=lambda stmt_id: self._stmts_shown([stmt_id]),
-            arrays=self._shown_array,
-            checked=self._checked,
-        )
+        return instances_text(self._statement_names(), *instances)
+
+    def _witnessed(self, witness: Any) -> tuple[str, ...]:
+        """A refusal's witness, its instances as its message names them.
+
+        ``(('S0', {'t': 0, 'i': 8}), ('S0', {'t': 1, 'i': 7}), {'nt': 16})``
+        is ``('u[t + 1, i] = ... (f.py:3) at t=0, i=8', 'the same statement at
+        t=1, i=7')`` (:meth:`_named`); a witness of another shape, a point of
+        isl's, has none.
+        """
+        if not isinstance(witness, tuple) or len(witness) < 2:
+            return ()
+        *instances, sizes = witness
+        if not isinstance(sizes, Mapping) or not all(
+            isinstance(instance, tuple)
+            and len(instance) == 2
+            and isinstance(instance[0], str)
+            and isinstance(instance[1], Mapping)
+            for instance in instances
+        ):
+            return ()
+        try:
+            return tuple(self._named(*instances))
+        except Exception:  # noqa: BLE001 - the witness by its ids still stands
+            return ()
 
     def _name_instance(self, point: Sequence[int]) -> tuple[str, dict[str, int]]:
         """A uniform-space point read back as ``(statement id, coordinates)``."""
@@ -8161,8 +8497,16 @@ class Schedule:
         From the example input it was found on, with what the subscript read
         there, when there is one (:meth:`_real_pair`); from isl's pair at the
         sizes otherwise, and then, when the subscript is one isl cannot read,
-        a note for the end of the message that says the pair is isl's.
+        a note for the end of the message that says the pair is isl's. The
+        flag a checked point sets is the check's flag, a name no line of the
+        source wrote.
         """
+        if dep.array in dict(self._term.checks):
+            # the flag a checked point sets, which no line of the source names
+            cell = "the check's flag"
+            if found is not None:
+                return cell, f" on {found.at}{found.where}", ""
+            return cell, self._sizes_shown(params), ""
         if found is not None:
             return found.cell_text, f" on {found.at}{found.where}", ""
         cell = f"{dep.array}[{_cell_text(dep.source_indices, coords, params)}]"
@@ -8444,19 +8788,11 @@ class Schedule:
                     f"loop on {axis}, so on every work item of it"
                 )
                 # zeros the tag could not place (see _zeros_tags): why, and
-                # the steps that drop them
+                # why they are there at all (see _drop_unseen_zeros)
                 zeros = _zeros_ids(self._term)
                 for stmt_id in dict.fromkeys(everywhere_ids):
                     if stmt_id in zeros:
-                        array = self._shown_array(zeros[stmt_id])
-                        hints.append(
-                            f". The zeros {array} is made with run on the work "
-                            "item that stores each cell only where every "
-                            f"statement that stores {array} stores it along a "
-                            f"loop of its own on {axis}, and none does here; "
-                            f"keep {array} in a window (contract) or compute it "
-                            "where it is read (substitute), which drops them"
-                        )
+                        hints.append(self._kept_zeros_hint(zeros[stmt_id], axis))
             how = "; ".join(parts)
         else:
             one = source_loop == sink_loop
@@ -8712,21 +9048,28 @@ def _sizes_text(
     return f" (at {inner}, {how})"
 
 
-def _no_update_text(stmt: Stmt) -> str:
+def _no_update_text(stmt: Stmt, named: Named) -> str:
     """What a statement that writes an array does instead of updating it.
 
-    ``S0 writes y[cell[c, k]] = y[cell[c, k]] * yl[c, k], which is not
+    ``y[cell[c, k]] = y[cell[c, k]] * yl[c, k] (f.py:12), which is not
     y[cell[c, k]] plus a value that reads nothing else of y``, for
-    :meth:`Schedule.atomic`; the sum of a value that is not an integer into
-    an integer array is named as such (see :func:`loopty.trace.update_exactness`).
+    :meth:`Schedule.atomic`, the statement named as ``named`` names it, with
+    what it writes where its text is shortened (``y[cell[c, k]] = ... (f.py:12)
+    writes y[cell[c, k]] = ...``) or where it has none; the sum of a value
+    that is not an integer into an integer array is named as such (see
+    :func:`loopty.trace.update_exactness`).
     """
     from lanky.terms import render
 
     from loopty.trace import update_operands
 
     array = stmt.assignee.array
-    cell = f"{array}[{', '.join(render(i) for i in stmt.assignee.indices)}]"
-    written = f"{stmt.id} writes {cell} = {render(stmt.expr)}"
+    indices = named.spelled(stmt, *stmt.assignee.indices)
+    (value,) = named.spelled(stmt, stmt.expr)
+    cell = f"{array}[{', '.join(render(i) for i in indices)}]"
+    written = named(stmt.id)
+    if not stmt.text or "..." in stmt.text:
+        written = f"{written} writes {cell} = {render(value)}"
     if stmt.kind != "accumulate":
         return f"{written}, which replaces the cell's value"
     if update_operands(stmt.expr, stmt.assignee, stmt.guard) is not None:
@@ -8777,21 +9120,8 @@ def _subscript_text(dep: _Dep, term: Term | None = None) -> str:
             stmt = term.stmt(dep.sink if sink else dep.source)
         except KeyError:
             stmt = None
-        if stmt is not None and stmt.spelled and len(set(stmt.spelled)) == len(
-            stmt.spelled
-        ):
-            names = {
-                name: spelled
-                for name, spelled in zip(stmt.inames, stmt.spelled, strict=False)
-                if name != spelled
-            }
-            if names:
-                from loopty.compose import rename_expr
-
-                try:
-                    indices = tuple(rename_expr(index, names, {}) for index in indices)
-                except Exception:  # noqa: BLE001 - the term's names stand
-                    pass
+        if stmt is not None:
+            indices = as_spelled(stmt, *indices, binders=term.binders)
     return f"{dep.array}[{', '.join(render(i) for i in indices)}]"
 
 
@@ -8946,7 +9276,9 @@ def _joined(names: Iterable[str], word: str = "and") -> str:
     return f"{', '.join(shown[:-1])} {word} {shown[-1]}"
 
 
-def _not_pointwise(stmt: Stmt, array: str, term: Term) -> str | None:
+def _not_pointwise(
+    stmt: Stmt, array: str, term: Term, named: Named | None = None
+) -> str | None:
     """Why :meth:`Schedule.substitute` cannot compute ``stmt`` where it is read.
 
     ``None`` when it can: an assignment of one cell per instance, at its own
@@ -8956,38 +9288,41 @@ def _not_pointwise(stmt: Stmt, array: str, term: Term) -> str | None:
     expression with the loop variables replaced by ``e``, which is what
     loopy's ``assignment_to_subst`` writes.
     """
+    named = named or statement_names(term)
+    said = named(stmt.id)
     indices = stmt.assignee.indices
     names = [
         index.name if isinstance(index, prim.Variable) else None for index in indices
     ]
     if stmt.kind != "assign":
         return (
-            f"{stmt.id} accumulates into {array}, and a substitution computes a "
+            f"{said} accumulates into {array}, and a substitution computes a "
             "value stored once"
         )
     if None in names or len(set(names)) != len(names) or set(names) != set(stmt.inames):
-        shown = ", ".join(str(index) for index in indices)
+        shown = ", ".join(str(index) for index in named.spelled(stmt, *indices))
+        loops = named.spelled(stmt, *(prim.Variable(name) for name in stmt.inames))
         return (
-            f"{stmt.id} stores {array}[{shown}], and a substitution computes a "
+            f"{said} stores {array}[{shown}], and a substitution computes a "
             "statement that stores one cell per instance, at its own loop "
-            f"variables ({', '.join(stmt.inames)}), each once"
+            f"variables ({', '.join(str(loop) for loop in loops)}), each once"
         )
     if reductions_of(stmt.expr):
         return (
-            f"{stmt.id} stores a sum, which a substitution would compute again "
+            f"{said} stores a sum, which a substitution would compute again "
             "at every read of it; only a pointwise statement is substituted"
         )
     if stmt.unnarrowed:
         conjuncts = ", ".join(conjunct for conjunct, _why in stmt.unnarrowed)
         return (
-            f"{stmt.id} runs under a guard isl cannot state ({conjuncts}), so "
+            f"{said} runs under a guard isl cannot state ({conjuncts}), so "
             "which cells it stores is not known"
         )
     if any(
         kind == "read" and name == array
         for kind, name, _indices, _part in _accesses(stmt, term)
     ):
-        return f"{stmt.id} reads {array} as well as storing it"
+        return f"{said} reads {array} as well as storing it"
     return None
 
 
@@ -9583,7 +9918,7 @@ def _first(own: Any, others: frozenset[Any]) -> frozenset[Any]:
     """The predicates ``own`` and ``others``, with ``own`` evaluated first.
 
     loopy joins an instruction's predicates with ``&&`` in no particular
-    order, and a ``when`` guard among them may read an array. At a point of
+    order, and a condition of an ``if`` among them may read an array. At a point of
     the shared loops that is another statement's, this instruction's inverse
     names a loop value it does not have, so each other predicate that could
     fault there, by reading an array, calling a function or dividing by
@@ -9647,7 +9982,7 @@ def _shared_image(
     otherwise, which only over-approximates. Each instruction whose image is
     less than that domain gets it back as a predicate, the gist of its image
     in the domain as loopy writes a condition, as the lowering cuts back a
-    statement a ``when`` narrows; a gist loopy cannot write is refused rather
+    statement an ``if`` narrows; a gist loopy cannot write is refused rather
     than dropped, since the instruction would then run at points it does not
     have.
 
