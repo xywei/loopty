@@ -232,17 +232,14 @@ def identity_of(theorem: Any, text: str) -> Identity:
 
 
 def cited(theorem: Any) -> Any:
-    """The statement a rewrite's Lean part restates ``theorem`` by, as a hypothesis.
+    """The statement a rewrite's part states ``theorem`` by, as a hypothesis: its term.
 
-    The seam for lanky's ``as_cited`` text (the proof-interface design's
-    citation rule): where lanky offers the text its own command proved, a
-    citing part restates that, byte for byte; until then, the theorem's term,
-    as loopty's other restatements (``Applied``, ``SeriesTerms``,
-    ``Unfolded``) restate it today, trusting the printer.
+    The part names the theorem as a citation (:func:`loopty.obligations.cited`),
+    so lanky's Lean oracle restates the hypothesis from the text the
+    theorem's own command proved, ``as_cited``, byte for byte, and refuses a
+    part whose hypothesis is not the theorem's statement; a theorem with no
+    proved text is restated by the printer, and its row says so.
     """
-    lanky_cited = getattr(theorem, "as_cited", None)
-    if lanky_cited is not None and not callable(lanky_cited):
-        return lanky_cited
     return getattr(theorem, "term", None)
 
 
@@ -1095,6 +1092,7 @@ class MathRewrite(RewriteTerm):
     def lean_obligation(self) -> Any:
         from loopty.description import Unstatable
         from loopty.obligations import Claim, _declined, _lanky_obligations, _obligation
+        from loopty.obligations import cited as citations_of
         from loopty.summands import _number_sort
 
         lanky = _lanky_obligations()
@@ -1148,6 +1146,7 @@ class MathRewrite(RewriteTerm):
                     closed,
                     lanky.Hints(rewrites=(lanky.Rewrite(position),)),
                     mathlib=True,
+                    **citations_of(guards, (step.identity.theorem,)),
                 )
             )
         return _obligation(parts, rests_on=(step.identity.fact_id,), decider="")

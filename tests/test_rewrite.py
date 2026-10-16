@@ -338,14 +338,18 @@ def test_the_lean_part_restates_the_theorem_and_the_condition_under_the_sum() ->
     assert obligation.rests_on == (conjugate_form.fact_id,)
 
 
-def test_cited_is_the_seam_for_the_text_a_proof_restates() -> None:
+def test_the_part_names_the_theorem_it_restates_as_a_citation() -> None:
+    """lanky restates the theorem from the text its command proved, by the citation."""
     assert render(cited(conjugate_form)) == render(conjugate_form.term)
-
-    class Proved:
-        term = "the term"
-        as_cited = "the text its own command proved"
-
-    assert cited(Proved()) == "the text its own command proved"
+    (first, _second) = rows(as_sumpy_computes())["rewrite"]
+    (part,) = first.term.lean_obligation().parts
+    citations = getattr(part, "citations", None)
+    if citations is None:  # a lanky without citations restates by the printer
+        return
+    (citation,) = citations
+    guards = [render(guard) for guard in part.term.guard.children]
+    assert guards[citation.hypothesis] == render(conjugate_form.term)
+    assert citation.fact == conjugate_form.fact_id
 
 
 # }}}

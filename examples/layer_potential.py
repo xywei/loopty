@@ -30,7 +30,10 @@ One file holds the three layers of it:
   sumpy's arithmetic: each division by ``alpha`` through its conjugate, one
   real division where a complex one takes three (``conjugate_form``), and
   ``log|alpha|`` with no square root (``log_of_the_modulus``), two math steps
-  of the schedule, each a theorem. Lean proves each step exact over the
+  of the schedule, each a theorem. lanky proves ``conjugate_form`` alone;
+  ``log_of_the_modulus`` has its proof written out, a two-line chain through
+  ``log(abs(alpha) ** 2) / 2`` that cites two facts lanky knows,
+  ``log_of_a_power`` and ``modulus_squared``. Lean proves each step exact over the
   complex numbers wherever ``c[t] - y[s] != 0``, which is tested on the
   example inputs; the compiled run is compared with the native one, and at
   inputs of extreme magnitude the row notes where ``alpha * conj(alpha)``
@@ -63,8 +66,9 @@ Run this file three ways.
     The ledger. ``line_taylor`` reads ``proved`` by Lean where Mathlib is
     installed, and ``assumed`` without it, since the property tester draws no
     table over ``Nat``; ``conjugate_form`` reads ``proved`` with Mathlib and
-    ``tested`` without, and ``log_of_the_modulus`` reads ``tested``, which
-    lanky's search does not prove alone. The row that ``single_layer`` adds
+    ``tested`` without, and so does ``log_of_the_modulus``, by its written
+    proof, which lanky's search would not find alone; the two facts it cites
+    are rows of the ledger, from ``lanky.known``. The row that ``single_layer`` adds
     the theorem's ``a(n)`` is ``decided`` by ``theorem``, and proved by Lean
     with Mathlib. Each math step of ``as_sumpy_computes`` is a row, proved
     by Lean with Mathlib and tested on drawn inputs without it; the
@@ -134,6 +138,7 @@ from pathlib import Path
 
 import numpy as np
 from lanky import theorem
+from lanky.known import log_of_a_power, modulus_squared
 from lanky.prelude import Complex, Fn, Nat, Real
 
 from loopty import Arr, Fin, Schedule, kernel, reduce_sum, tested, upstream
@@ -201,11 +206,12 @@ def conjugate_form(x: Complex, alpha: Complex, nonzero: alpha != 0) -> (
 def log_of_the_modulus(alpha: Complex, nonzero: alpha != 0) -> (
     log(abs(alpha)) == log(real(alpha * conj(alpha))) / 2
 ):
-    """``log|alpha|`` with no square root: half the log of alpha times its conjugate.
-
-    ``log|alpha|`` is half the log of ``|alpha|**2`` (the log of a power), and
-    ``|alpha|**2`` is alpha times its conjugate (the modulus squared).
-    """
+    """``log|alpha|`` with no square root: half the log of alpha times its conjugate."""
+    return (
+        log(abs(alpha))
+        .equals(log(abs(alpha) ** 2) / 2, by=log_of_a_power)
+        .equals(log(real(alpha * conj(alpha))) / 2, by=modulus_squared)
+    )
 
 
 def single(alpha, beta):
