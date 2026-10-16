@@ -27,6 +27,7 @@ from loopty.executor import (
     exactness_of_output,
 )
 from loopty.handles import scope
+from loopty.lower import pyopencl_installed
 from loopty.schedule import Schedule
 
 #: The handles of the hand-built terms (tests/hand_terms.py).
@@ -46,10 +47,15 @@ def axpy_reference(a, x, y, z):
     z[...] = a * x + y
 
 
+@pytest.mark.skipif(
+    pyopencl_installed(),
+    reason="loopy imports pyopencl with itself where it is installed (#179)",
+)
 def test_importing_and_running_never_imports_pyopencl() -> None:
     # The opencl target belongs on a machine with a device. Nothing on the
     # default path may import pyopencl, so that loopty installs and runs without
-    # it.
+    # it. Where pyopencl is installed, ``import loopy`` imports it, so the
+    # claim is asked where it is not, as in CI.
     x = np.arange(4, dtype=np.float64)
     executor().run(ht.axpy_term(), a=1.0, x=x, y=np.zeros(4), z=np.zeros(4))
     assert "pyopencl" not in sys.modules

@@ -416,6 +416,15 @@ class ArrType:
         return tuple(Var(name) for name in sorted(self.domain.size_names()))
 
 
+class _Names(frozenset):
+    """A frozenset of names that prints them sorted (see :class:`Hypothesis`)."""
+
+    def __repr__(self) -> str:
+        if not self:
+            return "frozenset()"
+        return "frozenset({" + ", ".join(repr(name) for name in sorted(self)) + "})"
+
+
 @dataclass(frozen=True, eq=False)
 class Hypothesis:
     """A proposition a fact about a program may assume, and what it rests on.
@@ -439,6 +448,12 @@ class Hypothesis:
     source: str
     rests_on: tuple[str, ...] = ()
     mentions: frozenset[str] = frozenset()
+
+    def __post_init__(self) -> None:
+        # A frozenset of strings prints in the order of the process's hash
+        # seed, and a program fact's term in the JSON ledger is a repr with
+        # this in it, so two runs of one file wrote two ledgers (#298).
+        object.__setattr__(self, "mentions", _Names(self.mentions))
 
 
 @dataclass(frozen=True, eq=False)

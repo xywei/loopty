@@ -298,7 +298,9 @@ def test_a_tag_before_the_window_is_refused_and_one_after_is_checked() -> None:
 def test_a_window_of_a_size_on_opencl_is_shared_and_a_group_axis_refused() -> None:
     # A row of n cells is kept in global memory on OpenCL, one for every work
     # item, so two elements on two work groups store into one slot of it.
-    pytest.importorskip("pyopencl")
+    # Where pyopencl is not installed, the schedule is checked on loopy's
+    # plain OpenCL target, which refuses the tag alike, so CI asks it too
+    # (#299).
     example = load(ROOT / "examples" / "sum_factorization.py")
     program = example.weak_derivative
     on_device = example.fused.retarget("opencl").contract(program.v)
@@ -308,12 +310,13 @@ def test_a_window_of_a_size_on_opencl_is_shared_and_a_group_axis_refused() -> No
     message = str(caught.value)
     assert (
         "stores v[0, 0, 0] in slot 0 of the window lambda e, a, b: b, which "
-        "along_r.S0[e=1, a=0, b=0]"
+        "the same statement at e=1, a=0, b=0 would now overwrite with "
+        "v[1, 0, 0] first"
     ) in message
     assert message.endswith(
-        "; v is kept in a window over the order this tag drops, one for every "
-        "work item since its size is not a number (in global memory on "
-        "OpenCL); a window of a number of cells is each work item's own"
+        "; weak_derivative.v is kept in a window over the order this tag drops, "
+        "one for every work item since its size is not a number (in global "
+        "memory on OpenCL); a window of a number of cells is each work item's own"
     )
 
 

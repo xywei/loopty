@@ -227,7 +227,7 @@ def test_run_on_a_decorated_kernel_file(tmp_path, capsys) -> None:
 
 
 def test_target_retargets_every_schedule_rather_than_ignoring_the_flag(
-    tmp_path, capsys
+    tmp_path, capsys, without_pyopencl
 ) -> None:
     """``--target opencl`` must not quietly run a C-pinned schedule on C.
 
@@ -236,7 +236,8 @@ def test_target_retargets_every_schedule_rather_than_ignoring_the_flag(
     so the ledger claimed a device run that never happened. Now the schedule is
     rebuilt for the target, which re-checks every cast; on a machine with no
     pyopencl that rebuild fails, and the failure is reported by name and turns
-    into a non-zero exit code.
+    into a non-zero exit code. pyopencl is hidden, so that the machine has
+    none whatever is installed (#179).
     """
     path = write_fixture(tmp_path)
     code = main(["run", str(path), "--target", "opencl"])

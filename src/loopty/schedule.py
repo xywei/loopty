@@ -6876,7 +6876,9 @@ class Schedule:
         A tree reassociates, so the result's exactness class drops to
         ``reassoc`` and the fact records it; over an ``exact`` accumulation the
         cast is rejected instead, because ``exact`` is a request for the bits and
-        a tree does not give them.
+        a tree does not give them. The step moves no instance and changes no
+        order, so, as :meth:`atomic`, it records no ``bijective`` or
+        ``monotone`` fact of its own (#203).
         """
         text = f"realize({handle!r}, tree={tree})"
         recipe = ("realize", (handle,), {"tree": tree})
@@ -6906,7 +6908,7 @@ class Schedule:
         draft = self._draft()
         if tree:
             draft.reassoc.add(var)
-        return self._commit(draft, text, recipe)
+        return self._commit(draft, text, recipe, cast=False)
 
     def atomic(self, handle: Any) -> Schedule:
         """Make every update of ``array`` atomic, so two may run at the same time.
@@ -7045,8 +7047,9 @@ class Schedule:
         ``leading`` are facts the step decided before it came here, which go
         before the ones decided here (see :meth:`substitute`). ``cast`` is
         false for a step that moves no instance and changes no order
-        (:meth:`atomic`): it is checked all the same, and its ``bijective``
-        and ``monotone`` facts, which would say nothing, are not recorded.
+        (:meth:`atomic`, :meth:`realize`): it is checked all the same, and its
+        ``bijective`` and ``monotone`` facts, which would say nothing, are not
+        recorded.
         """
         # the loops each loop of the source is after the step, which the
         # step's messages and the schedule's after it name loops by
