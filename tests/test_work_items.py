@@ -676,25 +676,50 @@ def lp_quiet(lp: Any) -> Any:
     return stack
 
 
+@kernel
+def doubled_inside(x: Arr[Fin[n], Real], f: Arr[Fin[n], Real]):  # noqa: F821
+    """Each cell but the first twice ``x``'s; the first is left as it is made."""
+    for i in f.dom:
+        with when(i > 0):
+            f[i] = 2.0 * x[i]
+
+
+@program
+def padded_plus_one(x, y):
+    """``f[0]`` is the zero ``f`` is made with, which ``plus_one`` reads."""
+    f = Arr.zeros_like(x)
+    doubled_inside(x, f)
+    plus_one(f, y)
+
+
+def zeros_of(schedule: Schedule, array: str) -> bool:
+    """Whether the schedule's kernel zeroes the array where the program makes it."""
+    insn = schedule.lowering.insn_ids[f"{array}.zeros"]
+    return insn in {i.id for i in schedule.kernel.default_entrypoint.instructions}
+
+
 def test_a_programs_zeros_run_on_the_work_item_that_stores_each_cell(plain_opencl):
     # The program zeroes f in a statement of its own, in a loop the file
-    # never names (i_1). Tagged with the calls' loop alone, every work item
-    # would zero every cell, those another work item stores included: loopy
-    # asks for a global barrier there. The zeros go on the loop's axis
-    # instead, since doubled stores f along it, and each work item zeroes
-    # the cell it stores, before it stores it.
-    fused = Schedule(twice_plus_one, target="opencl").fuse(
-        twice_plus_one.doubled.i, twice_plus_one.plus_one.i
+    # never names (i_1), and plus_one reads f[0], the zero, so the zeros
+    # stay (#290). Tagged with the calls' loop alone, every work item would
+    # zero every cell, those another work item stores included: loopy asks
+    # for a global barrier there. The zeros go on the loop's axis instead,
+    # since doubled_inside stores f along it, and each work item zeroes the
+    # cell it stores, before it stores it.
+    loop = padded_plus_one.doubled_inside.i
+    fused = Schedule(padded_plus_one, target="opencl").fuse(
+        loop, padded_plus_one.plus_one.i
     )
+    assert zeros_of(fused, "f")
     (zeros,) = [stmt for stmt in fused.term.stmts if stmt.id == "f.zeros"]
-    (loop,) = zeros.inames
+    (zeros_loop,) = zeros.inames
     said = loopy_says(plain_opencl, fused.kernel, {"i": "g.0"})
     assert said.startswith("MissingBarrierError") and GLOBAL_BARRIER in said, said
-    tagged = fused.tag(twice_plus_one.doubled.i, "g.0")
-    assert repr(tagged).endswith(".tag(twice_plus_one.doubled.i, 'g.0')")
+    tagged = fused.tag(loop, "g.0")
+    assert repr(tagged).endswith(".tag(padded_plus_one.doubled_inside.i, 'g.0')")
     assert casts(tagged) == ["decided"] * 4
     assert tagged.buildable == (True, "")
-    assert tagged.tags == {"i": "g.0", loop: "g.0"}
+    assert tagged.tags == {"i": "g.0", zeros_loop: "g.0"}
     with lp_quiet(plain_opencl):
         code = plain_opencl.generate_code_v2(tagged.kernel).device_code()
     body = code[code.index("{", code.index("__kernel")) :]
@@ -703,48 +728,63 @@ def test_a_programs_zeros_run_on_the_work_item_that_stores_each_cell(plain_openc
     ), code
 
 
-def test_zeros_a_split_loop_stores_are_refused_saying_what_drops_them(plain_opencl):
-    # Split, doubled stores f[4*i_outer + i_inner], along no loop of its own,
-    # so the zeros stay on every work item, and the refusal says why and
-    # which steps drop them.
+def test_a_program_runs_without_the_zeros_no_read_sees(plain_opencl):
+    # Every cell plus_one reads, doubled stored before it, so twice_plus_one
+    # runs without the zeros f is made with (#290): there is nothing to place
+    # on a work item, and the split loop that stores f, along no loop of its
+    # own, is legal (#289), where the zeros on every work item were refused.
     fused = Schedule(twice_plus_one, target="opencl").fuse(
         twice_plus_one.doubled.i, twice_plus_one.plus_one.i
     )
+    assert not zeros_of(fused, "f")
+    (made,) = [fact for fact in fused.facts() if fact.kind == "definedness"]
+    assert made.statement == (
+        "every cell of twice_plus_one.f that twice_plus_one reads, "
+        "twice_plus_one.doubled has stored by the time it is read, so "
+        "twice_plus_one runs without the zeros twice_plus_one.f is made with"
+    )
+    assert made.where == where(twice_plus_one, "f = Arr.zeros_like(x)")
+    loop = twice_plus_one.doubled.i
+    split = fused.split(loop, 4).tag({loop.outer: "g.0", loop.inner: "l.0"})
+    assert set(casts(split)) == {"decided"}
+    assert split.buildable == (True, "")
+    with lp_quiet(plain_opencl):
+        code = plain_opencl.generate_code_v2(split.kernel).device_code()
+    assert "(0.0)" not in code, code
+    assert "f[4 * gid(0) + lid(0)] = 2.0 * x[4 * gid(0) + lid(0)];" in code, code
+
+
+def test_zeros_a_read_sees_on_a_split_loop_are_refused_saying_why(plain_opencl):
+    # Split, doubled_inside stores f[4*i_outer + i_inner], along no loop of
+    # its own, so the zeros, which plus_one reads at f[0], stay on every work
+    # item, and the refusal says why they are there, and how they go.
+    loop = padded_plus_one.doubled_inside.i
+    fused = Schedule(padded_plus_one, target="opencl").fuse(
+        loop, padded_plus_one.plus_one.i
+    )
     with pytest.raises(IllegalCast) as caught:
-        loop = twice_plus_one.doubled.i
         fused.split(loop, 4).tag({loop.outer: "g.0", loop.inner: "l.0"})
     message = str(caught.value)
     # the zeros, which no line of the file stores, by the array they zero
-    made = where(twice_plus_one, "f = Arr.zeros_like")
+    made = where(padded_plus_one, "f = Arr.zeros_like")
     assert message.startswith(
-        "tag({twice_plus_one.doubled.i.outer: 'g.0', "
-        "twice_plus_one.doubled.i.inner: 'l.0'}) illegal: the zeros of "
-        f"twice_plus_one.f ({made}) at f[0] writes f[0]"
-    )
+        "tag({padded_plus_one.doubled_inside.i.outer: 'g.0', "
+        "padded_plus_one.doubled_inside.i.inner: 'l.0'}) illegal: the zeros of "
+        f"padded_plus_one.f ({made}) at f["
+    ), message
     assert (
         "the first write is in no loop on g.0, so on every work item of it"
     ) in message
     assert message.endswith(
         "nothing in a kernel orders two work items through global memory. The "
-        "zeros twice_plus_one.f is made with run on the work item that stores "
-        "each cell only where every statement that stores twice_plus_one.f "
-        "stores it along a loop of its own on g.0, and none does here; keep "
-        "twice_plus_one.f in a window (contract) or compute it where it is read "
-        "(substitute), which drops them"
-    )
-    # substituted, f has no zeros, and the split is legal
-    computed = (
-        Schedule(twice_plus_one, target="opencl")
-        .substitute(twice_plus_one.f)
-        .split(twice_plus_one.plus_one.i, 4)
-        .tag(
-            {
-                twice_plus_one.plus_one.i.outer: "g.0",
-                twice_plus_one.plus_one.i.inner: "l.0",
-            }
-        )
-    )
-    assert set(casts(computed)) == {"decided"}
+        "zeros padded_plus_one.f is made with run on the work item that stores "
+        "each cell only where every statement that stores padded_plus_one.f "
+        "stores it along a loop of its own on g.0, and none does here; and "
+        "padded_plus_one.plus_one reads f[0], which padded_plus_one.doubled_inside "
+        "does not store (at n=1), so the read would see the zeros the array was "
+        "made with, and they are kept: store every cell a call reads in a call "
+        "before it, and they are dropped"
+    ), message
 
 
 def test_a_call_that_runs_on_every_work_item_is_named_before_the_zeros(
@@ -795,8 +835,8 @@ def test_one_launch_of_the_hexahedra_passes_is_refused_for_its_reads(plain_openc
 
 def test_sumpys_gpu_schedule_of_l2p_names_only_the_files_loops() -> None:
     # sumpy's own schedule for a GPU, each box a work group, as the file
-    # writes it: no generated loop names, each box's cells of C and R zeroed
-    # on its work item, and the fusions' facts those of fused, on C.
+    # writes it: no generated loop names, and the fusions' facts those of
+    # fused, on C.
     l2p = example("l2p")
     schedule = l2p.on_a_gpu
     assert schedule.target == "opencl"
@@ -806,11 +846,10 @@ def test_sumpys_gpu_schedule_of_l2p_names_only_the_files_loops() -> None:
     )
     assert set(casts(schedule)) == {"decided"}
     assert schedule.buildable == (True, "")
-    zeros = {
-        stmt.id: stmt.inames[0] for stmt in schedule.term.stmts if ".zeros" in stmt.id
-    }
-    assert set(zeros) == {"C.zeros", "R.zeros"}
-    assert {schedule.tags[loop] for loop in zeros.values()} == {"g.0"}
+    # no read sees the zeros C and R are made with, so the program runs
+    # without them (#290), and the box loop is the one loop on an axis
+    assert not zeros_of(schedule, "C") and not zeros_of(schedule, "R")
+    assert list(schedule.tags.values()) == ["g.0"]
     fused = {fact.id for fact in l2p.fused.facts()}
     mine = [fact for fact in schedule.facts() if fact.id not in fused]
     assert [fact.statement for fact in mine] == [

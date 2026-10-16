@@ -383,7 +383,8 @@ def test_a_fusion_of_three_calls_is_one_step_and_names_them_after() -> None:
     assert fused.history == (
         "fuse(three.flux.j, three.divergence.i, three.scale.k, shift=1)",
     )
-    assert [fact.status.value for fact in fused.facts()] == ["decided"] * 2
+    # the program's f, which no read sees zeroed (#290), and the fusion's two
+    assert [fact.status.value for fact in fused.facts()] == ["decided"] * 3
     # one loop now, by any of the three
     for loop in (three.flux.j, three.divergence.i, three.scale.k):
         assert fused.split(loop, 4).nest[-2:] == (
@@ -541,9 +542,11 @@ def test_the_steps_and_the_facts_name_loops_and_arrays_by_their_paths() -> None:
         "no read of burgers.f sees its slot overwritten after contract(burgers.f, "
         "lambda j: j % 3): burgers.f kept in 3 cells, f[j] in slot j % 3"
     )
-    assert statements[-2] == (
-        "for contract(burgers.f), every cell of burgers.f that burgers reads, "
-        "burgers.flux has stored by the time it is read"
+    # the window rests on the fact the schedule was made with (#290)
+    assert statements[0] == (
+        "every cell of burgers.f that burgers reads, burgers.flux has stored by "
+        "the time it is read, so burgers runs without the zeros burgers.f is "
+        "made with"
     )
     assert schedule.key == (
         "burgers[c].fuse(burgers.flux.j, burgers.divergence.i, shift=1)"

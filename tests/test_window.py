@@ -106,10 +106,10 @@ def test_the_window_after_the_fusion_is_three_cells_found_along_the_loop() -> No
     assert repr(window.placement) == "lambda j: j % 3"
     assert window.extents == (3,)
     assert windowed.history[-1] == "contract(burgers.f, lambda j: j % 3)"
-    assert facts(windowed)[-2:] == [
-        ("definedness", "decided"),
-        ("no-clobber", "decided"),
-    ]
+    # the definedness the window needs is the fact the schedule is made with,
+    # without the zeros of f (#290)
+    assert facts(windowed)[0] == ("definedness", "decided")
+    assert facts(windowed)[-1:] == [("no-clobber", "decided")]
     (no_clobber,) = [f for f in windowed.facts() if f.kind == "no-clobber"]
     assert no_clobber.statement == (
         "no read of burgers.f sees its slot overwritten after contract(burgers.f, "
@@ -394,6 +394,151 @@ def test_a_shift_register_inside_an_outer_loop_shifts_in_each_of_its_steps() -> 
     assert "f_window[0] = f_window[1];" in code
     assert code.count("for (") == 2
     agrees(WINDOWS.rows, schedule, row_inputs())
+
+
+# }}}
+
+
+# {{{ the zeros no read sees (#290)
+
+
+@kernel
+def halving(x: Arr[Fin[n], Real], f: Arr[Fin[n], Real]):  # noqa: F821
+    """``f[i]`` from ``f[i // 2]``, which at ``i = 0`` is ``f[0]`` itself."""
+    for i in f.dom:
+        f[i] = x[i] + f[i // 2]
+
+
+@kernel
+def copied(f: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+    """Every cell as it is."""
+    for i in y.dom:
+        y[i] = f[i]
+
+
+@program
+def halved(x, y):
+    """``halving`` reads ``f[0]`` before it stores it: the zero ``f`` is made with."""
+    f = Arr.zeros_like(x)
+    halving(x, f)
+    copied(f, y)
+
+
+@kernel
+def lagging(
+    x: Arr[Fin[n], Real],  # noqa: F821
+    w: Arr[Fin[k], Real],  # noqa: F821
+    f: Arr[Fin[n], Real],  # noqa: F821
+):
+    """The first ``k`` cells of ``x``, then each cell twice the one ``k`` before."""
+    for i in f.dom:
+        with when(i < w.dom.size):
+            f[i] = x[i] + 0.0 * w[i]
+        with when(i >= w.dom.size):
+            f[i] = 2.0 * f[i - w.dom.size]
+
+
+@program
+def lag(x, w, y):
+    """``f[i - k]`` was stored before ``f[i]`` is, where ``k`` is at least one."""
+    f = Arr.zeros_like(x)
+    lagging(x, w, f)
+    copied(f, y)
+
+
+def zeroed(schedule: Schedule, array: str) -> bool:
+    """Whether the schedule's kernel zeroes the array where the program makes it."""
+    insn = schedule.lowering.insn_ids[f"{array}.zeros"]
+    return insn in {i.id for i in schedule.kernel.default_entrypoint.instructions}
+
+
+def test_a_schedule_runs_without_the_zeros_no_read_sees() -> None:
+    # Every cell divergence reads, flux stored before it, so the zeros burgers
+    # makes f with are work and nothing else: a schedule drops them before
+    # any step, on the fact a window and a substitution ask, which is its
+    # first, at the line that makes f.
+    schedule = Schedule(WINDOWS.burgers, sizes={"n": 16})
+    assert not zeroed(schedule, "f")
+    (made,) = schedule.facts()
+    assert (made.kind, made.status, made.decided_by) == (
+        "definedness",
+        Status.DECIDED,
+        "isl",
+    )
+    assert made.statement == (
+        "every cell of burgers.f that burgers reads, burgers.flux has stored by "
+        "the time it is read, so burgers runs without the zeros burgers.f is "
+        "made with"
+    )
+    assert made.where == where(WINDOWS.burgers, "f = Arr.zeros_like(u)")
+    assert made.id.endswith(":zeros:f") and made.provenance["array"] == "f"
+    # the same on every target, and after every step
+    device = Schedule(WINDOWS.burgers, target="opencl")
+    assert [fact.id for fact in device.facts()] == [made.id]
+    assert WINDOWS.fused.facts()[0].id == made.id
+    agrees(WINDOWS.burgers, schedule, burgers_inputs())
+    agrees(WINDOWS.burgers, WINDOWS.fused, burgers_inputs())
+
+
+def test_a_window_and_a_substitution_rest_on_the_fact_the_schedule_is_made_with():
+    made = WINDOWS.fused.facts()[0]
+    for schedule in (WINDOWS.windowed, WINDOWS.fused.substitute(WINDOWS.burgers.f)):
+        defined = [fact for fact in schedule.facts() if fact.kind == "definedness"]
+        assert defined == [made]
+    (no_clobber,) = [f for f in WINDOWS.windowed.facts() if f.kind == "no-clobber"]
+    assert no_clobber.rests_on == (made.id,)
+
+
+def test_the_zeros_a_read_sees_are_kept() -> None:
+    # shifted reads f[0] and f[n - 1], which interior_flux leaves as made: the
+    # zeros are the program's boundary, and every schedule keeps them.
+    schedule = Schedule(padded, sizes={"n": 8})
+    assert zeroed(schedule, "f")
+    assert schedule.facts() == ()
+    fused = schedule.fuse(padded.interior_flux.j, padded.shifted.i)
+    assert zeroed(fused, "f")
+    agrees(padded, fused, {"u": Arr.from_numpy(velocity(8)), "y": Arr.zeros(8)})
+
+
+def test_a_read_of_the_cell_its_own_instance_stores_sees_the_zeros() -> None:
+    # halving reads f[i // 2], which an earlier instance stored, except at
+    # i = 0, where it reads f[0] before it stores it: the zero. No dependence
+    # pairs an instance with itself, and a window that dropped the zeros was
+    # taken (and the definedness fact decided) all the same.
+    assert zeroed(Schedule(halved), "f")
+    halving_line = where(halving, "f[i] = x[i] + f[i // 2]")
+    with pytest.raises(IllegalCast) as caught:
+        Schedule(halved).contract(halved.f, lambda i: i)
+    assert str(caught.value) == (
+        f"contract(halved.f, lambda i: i) illegal: f[i] = x[i] + f[i // 2] "
+        f"({halving_line}) at i=0 reads f[0], the cell it stores, before it "
+        "stores it (at n=1, isl's choice), so the read sees the zeros the array "
+        "was made with, and a window would not"
+    )
+    fact = caught.value.fact
+    assert (fact.kind, fact.status) == ("definedness", Status.REFUTED)
+
+
+def test_a_read_before_a_later_store_is_asked_where_the_sizes_are_as_assumed():
+    # f[i - k] for i >= k reads a cell stored k steps before, where k >= 1;
+    # where k < 0 it reads one stored after it. Assumed k >= 1, the window
+    # is taken; the read after the store used to be looked for outside the
+    # assumption, and its witness was empty (a ValueError).
+    assumed = Schedule(lag).assume(lag.k >= 1)
+    windowed = assumed.contract(lag.f, lambda i: i)
+    defined = [fact for fact in windowed.facts() if fact.kind == "definedness"]
+    assert [fact.status for fact in defined] == [Status.DECIDED]
+    x = np.arange(1.0, 9.0)
+    agrees(lag, windowed, {"x": x, "w": np.zeros(3), "y": np.zeros(8)})
+    # assumed k >= 0 only, f[i - 0] is f[i] itself, at k = 0
+    lagged_line = where(lagging, "f[i] = 2.0 * f[i - w.dom.size]")
+    with pytest.raises(IllegalCast) as caught:
+        Schedule(lag).assume(lag.k >= 0).contract(lag.f, lambda i: i)
+    assert str(caught.value).startswith(
+        "contract(lag.f, lambda i: i) illegal: f[i] = 2.0 * f[i - w.dom.size] "
+        f"({lagged_line}) at i=0 reads f[0], the cell it stores, before it "
+        "stores it (at k=0, "
+    ), str(caught.value)
 
 
 # }}}
@@ -705,13 +850,16 @@ def test_a_window_of_a_triangle_its_recurrence_reads_keeps_one_box() -> None:
     assert window.extents == (5, 5) and window.private
     assert [stmt.id for stmt in window.producers] == ["triangle.S0", "triangle.S1"]
     assert [stmt.id for stmt in window.readers] == ["triangle.S1", "triangle_sums.S0"]
-    assert [(f.kind, f.status, f.statement) for f in windowed.facts()[-2:]] == [
+    assert [(f.kind, f.status, f.statement) for f in windowed.facts()[:1]] == [
         (
             "definedness",
             Status.DECIDED,
-            "for contract(triangles.R), every cell of triangles.R that triangles "
-            "reads, triangles.triangle has stored by the time it is read",
+            "every cell of triangles.R that triangles reads, triangles.triangle "
+            "has stored by the time it is read, so triangles runs without the "
+            "zeros triangles.R is made with",
         ),
+    ]
+    assert [(f.kind, f.status, f.statement) for f in windowed.facts()[-1:]] == [
         (
             "no-clobber",
             Status.DECIDED,

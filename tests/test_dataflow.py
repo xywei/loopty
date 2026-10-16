@@ -22,6 +22,7 @@ from lanky.plugins import registry
 from lanky.prelude import Fn, Int, Nat, Real
 from lanky.terms import render
 
+from lines import where
 from loopty import Arr, Fin, kernel
 from loopty.dataflow import APPLIED, KIND, stores
 from loopty.schedule import IllegalCast
@@ -733,27 +734,39 @@ def test_lanky_check_lists_a_layouts_facts_and_a_windows_casts_once() -> None:
     assert all(fact.owner == "differences" for fact in window)
 
 
-def test_a_substitutions_and_a_windows_definedness_read_apart_in_the_ledger() -> None:
-    """Both steps need every cell of ``f`` stored before it is read: two rows.
+def test_a_substitution_and_a_window_rest_on_one_definedness_row() -> None:
+    """Both steps need every cell of ``f`` stored before it is read: one row.
 
     ``examples/fusion.py`` substitutes ``f`` in one schedule and keeps it in a
-    window in another, after the same fusion. Each step's fact leads with the
-    step, so the two rows of ``lanky check`` read apart.
+    window in another, after the same fusion. Every schedule of the program
+    is made with that fact, where it runs without the zeros ``f`` is made
+    with, since no read sees them (#290), and both steps rest on it: one row
+    of ``lanky check``, at the line that makes ``f``, which the window's
+    ``no-clobber`` row names.
     """
     from lanky.check import check_path
 
     ledger = list(check_path(EXAMPLES / "fusion.py"))
-    rows = [
-        fact.statement
+    (row,) = [fact for fact in ledger if fact.id.endswith(":zeros:f")]
+    assert (row.kind, row.status, row.decided_by) == (
+        "definedness",
+        Status.DECIDED,
+        "isl",
+    )
+    assert row.statement == (
+        "every cell of burgers_rhs.f that burgers_rhs reads, burgers_rhs.flux "
+        "has stored by the time it is read, so burgers_rhs runs without the "
+        "zeros burgers_rhs.f is made with"
+    )
+    fusion = load(EXAMPLES / "fusion.py")
+    assert row.where == where(fusion.burgers_rhs, "f = Arr.zeros_like(u)")
+    assert not [
+        fact
         for fact in ledger
         if fact.kind == "definedness" and fact.statement.startswith("for ")
     ]
-    assert len(rows) == len(set(rows)) == 2
-    assert any(
-        row.startswith("for substitute(burgers_rhs.f), every cell of burgers_rhs.f")
-        for row in rows
-    )
-    assert any(row.startswith("for contract(burgers_rhs.f") for row in rows)
+    (clobber,) = [fact for fact in ledger if fact.kind == "no-clobber"]
+    assert clobber.rests_on == (row.id,)
 
 
 # }}}

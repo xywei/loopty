@@ -3264,6 +3264,22 @@ class Defined:
 
 
 @dataclass(frozen=True)
+class _Definedness:
+    """The answer of :meth:`Schedule._defined`, for a fact to be made of.
+
+    ``status`` is ``"decided"``, ``"refuted"`` or ``"assumed"``; ``why`` is
+    the refusal in words, after the step that is refused, and empty when
+    decided; ``term`` the claim for Lean.
+    """
+
+    status: str
+    witness: Any
+    detail: str
+    why: str
+    term: Any
+
+
+@dataclass(frozen=True)
 class _Settled:
     """isl's verdict on a fact a step decided when it was taken: ``ok``."""
 
@@ -3527,6 +3543,12 @@ class Schedule:
         self._reindex = isl.Map.identity(
             self._instances.get_space().map_from_set()
         ).intersect_domain(self._instances)
+        #: The arrays the program makes whose zeros no read sees, each with
+        #: the ``definedness`` fact that shows it, and the others' with why
+        #: a read may see them; the first are not zeroed (#290).
+        self._unseen: dict[str, Any] = {}
+        self._kept: dict[str, tuple[str, str]] = {}
+        self._drop_unseen_zeros()
 
     # {{{ plumbing
 
@@ -5701,7 +5723,12 @@ class Schedule:
                 "through two arrays is not done, so substitute only one of them"
             )
 
-        fact = self._definedness_fact([producer], readers, array, text, recipe)
+        # the zeros no read sees were dropped where the schedule was made, on
+        # the fact a substitution asks, which it rests on as it stands
+        unseen = self._unseen.get(array)
+        fact = unseen or self._definedness_fact(
+            [producer], readers, array, text, recipe
+        )
         if fact.status.value != "decided":
             raise IllegalCast(
                 fact.provenance["reason"],
@@ -5768,7 +5795,11 @@ class Schedule:
         draft = staged._draft()
         if draft.kernel is not None:
             ids = self._lowering.insn_ids
-            removed = [ids[stmt.id] for stmt in writers if stmt.id == zeros]
+            removed = [
+                ids[stmt.id]
+                for stmt in writers
+                if stmt.id == zeros and zeros not in self._gone
+            ]
             kernel, reason = _substituted_kernel(
                 draft.kernel,
                 array,
@@ -5784,7 +5815,7 @@ class Schedule:
             draft,
             text,
             recipe,
-            leading=(fact,),
+            leading=() if unseen is not None else (fact,),
             gone=frozenset(gone),
             substituted=(array, producer, tuple(readers)),
         )
@@ -5973,7 +6004,9 @@ class Schedule:
                 f"order; contract {handle!r} before prioritize"
             )
 
-        fact = self._definedness_fact(
+        # as for a substitution: the zeros dropped where the schedule was made
+        unseen = self._unseen.get(array)
+        fact = unseen or self._definedness_fact(
             producers, readers, array, text, recipe, losing="a window would not"
         )
         if fact.status.value != "decided":
@@ -6091,7 +6124,7 @@ class Schedule:
                 fix = ""
             k, triple, message = clobbered
             clobbered = (k, triple, message + fix)
-        facts = [fact]
+        facts = [] if unseen is not None else [fact]
         no_clobber = self._no_clobber_fact(window, clobbered, shown, recipe, fact)
         facts.append(no_clobber)
         if no_clobber.status.value != "decided":
@@ -6481,6 +6514,172 @@ class Schedule:
         other._facts = (*earlier, *facts)
         return other
 
+    def _drop_unseen_zeros(self) -> None:
+        """Take out the zeros of each array the program makes that no read sees.
+
+        A program zeroes every array it makes (``C = Arr.zeros(...)``, ``f =
+        Arr.zeros_like(u)``) in a statement of its own, ``C.zeros``, which
+        its code runs too. Where every cell a statement reads, a statement
+        that stores the array stored before the read, in the program's
+        order, no read sees those zeros, and they are work and nothing
+        else: a pass over every cell before the calls run, which a run on C
+        makes twice, since the executor allocates the array as zeros, and
+        which a device makes on every work item unless a tag can place it
+        (:func:`_zeros_tags`, #289). That is the ``definedness`` fact
+        :meth:`substitute` and :meth:`contract` ask before they drop the
+        zeros (:meth:`_definedness_fact`), asked here of the program as it
+        is, before any step; where isl decides it, the zeros are dropped as
+        those steps drop them, and the fact is the schedule's first, placed
+        at the line that makes the array, the same on every target and
+        after any step, which a later window or substitution rests on
+        (#290). Where a read may see the zeros (padding the program means,
+        an update that starts from them) or isl cannot tell, they are kept,
+        and why is kept for a refusal that meets them.
+        """
+        from lanky.ledger import Fact, Status
+
+        term = self._term
+        checks = dict(term.checks)
+        name = self._handles.name
+        gone: set[str] = set()
+        for array, _typ in term.temporaries:
+            zeros = f"{array}.zeros"
+            if array in checks or zeros not in self._layout.coords:
+                continue
+            producers = [
+                stmt
+                for stmt in term.stmts
+                if stmt.assignee.array == array and stmt.id != zeros
+            ]
+            readers = [
+                stmt
+                for stmt in term.stmts
+                if stmt.id != zeros
+                and any(
+                    kind == "read" and touched == array
+                    for kind, touched, _indices, _part in _accesses(stmt, term)
+                )
+            ]
+            if not producers or not readers:
+                continue
+            found = self._defined(producers, readers, array, "they are kept")
+            if found.status != "decided":
+                self._kept[array] = (found.status, found.why)
+                continue
+            shown = self._shown_array(array)
+            stored_by = self._stmts_shown(producer.id for producer in producers)
+            self._unseen[array] = Fact(
+                id=fact_id(
+                    "definedness", **self._definition, detail=f"zeros:{array}"
+                ),
+                kind="definedness",
+                statement=(
+                    f"every cell of {shown} that {name} reads, {stored_by} has "
+                    f"stored by the time it is read, so {name} runs without "
+                    f"the zeros {shown} is made with"
+                ),
+                term=found.term,
+                status=Status.DECIDED,
+                decided_by="isl",
+                provenance={
+                    "oracle": "isl",
+                    "detail": found.detail,
+                    "dependences": self._flow_note,
+                    "array": array,
+                },
+                where=term.stmt(zeros).where or self._kernel_where(),
+                owner=term.name,
+            )
+            gone.add(zeros)
+        if not gone:
+            return
+        layout = self._layout
+        origin = self._origin
+        for stmt_id in sorted(gone):
+            instances = _embed(self._domains[stmt_id], layout.index(stmt_id), layout)
+            instances = instances.align_params(origin.get_space())
+            origin = origin.align_params(instances.get_space()).subtract(instances)
+        self._gone = frozenset(gone)
+        self._origin = origin.coalesce()
+        self._instances = self._origin
+        self._reindex = self._reindex.intersect_domain(self._origin)
+        self._deps = tuple(
+            dep for dep in self._deps if dep.source not in gone and dep.sink not in gone
+        )
+        self._updates = tuple(
+            dep
+            for dep in self._updates
+            if dep.source not in gone and dep.sink not in gone
+        )
+        self._within = tuple(dep for dep in self._within if dep.source not in gone)
+        if self._deps_total is not None:
+            self._deps_total = self._deps_total.intersect_domain(
+                self._origin
+            ).intersect_range(self._origin)
+        arrays = _joined(sorted(self._shown_array(array) for array in self._unseen))
+        self._flow_note = (
+            f"{self._flow_note}; without the zeros of {arrays}, which no read sees"
+        )
+        live = {
+            loop
+            for stmt_id, coords in layout.coords.items()
+            if stmt_id not in gone
+            for loop in coords
+        }
+        self._order = [loop for loop in self._order if loop in live]
+        ids = self._lowering.insn_ids
+        removed = {ids[stmt_id] for stmt_id in gone}
+        entry = self._kernel.default_entrypoint
+        loops = {
+            loop
+            for insn in entry.instructions
+            if insn.id in removed
+            for loop in insn.within_inames
+        }
+        kernel = lp.remove_instructions(self._kernel, removed)
+        kernel = lp.remove_unused_inames(kernel, loops)
+        # and the zeros' nest from the lowering's priorities, which loopy
+        # refuses with a loop it does not know
+        entry = kernel.default_entrypoint
+        left = entry.all_inames()
+        self._kernel = _with_priority(
+            kernel,
+            [
+                [loop for loop in nest if loop in left]
+                for nest in entry.loop_priority
+            ],
+        )
+        self._code = self._kernel
+        self._facts = tuple(self._unseen.values())
+
+    def _kept_zeros_hint(self, array: str, axis: str) -> str:
+        """Why the zeros of ``array`` run on every work item of ``axis``, and the fix.
+
+        The zeros go on the work item that stores each cell where the
+        statements that store the array store it along a loop of their own
+        on the axis (:func:`_zeros_tags`), and they are there at all only
+        where a read may see them (:meth:`_drop_unseen_zeros`), which the
+        hint says, with the read.
+        """
+        shown = self._shown_array(array)
+        placed = (
+            f". The zeros {shown} is made with run on the work item that stores "
+            f"each cell only where every statement that stores {shown} stores "
+            f"it along a loop of its own on {axis}, and none does here"
+        )
+        status, why = self._kept.get(array, ("", ""))
+        if status == "refuted":
+            return (
+                f"{placed}; and {why}: store every cell a call reads in a call "
+                "before it, and they are dropped"
+            )
+        if status == "assumed":
+            return (
+                f"{placed}; and they are kept, since isl cannot tell that no "
+                f"read sees them: {why}"
+            )
+        return placed
+
     def _definedness_fact(
         self,
         producers: Sequence[Stmt],
@@ -6492,17 +6691,22 @@ class Schedule:
     ) -> Any:
         """The ``definedness`` fact of :meth:`substitute`, decided or refuted.
 
-        Two questions about the reads of ``array``: are their cells cells
+        Three questions about the reads of ``array``: are their cells cells
         ``producers`` write (:func:`loopty.flow.definedness`, asked without
-        the zeros, which the substitution takes away), and does any read
-        come before the write of its cell, a dependence from the read to a
-        producer, which would read the zeros. The first refutation is the
-        fact's. A read isl cannot list (an index that is not affine, a guard
-        it cannot state) leaves the first question open: the step is refused
-        all the same, and the fact is ``assumed``, not refuted. ``losing``
-        says what the step does without the zeros, for the message:
-        ``computing it again would not`` (see them) for a substitution, ``a
-        window would not`` for a contraction.
+        the zeros, which the substitution takes away); does any read come
+        before the write of its cell, a dependence from the read to a
+        producer, which would read the zeros; and does a producer read a
+        cell it stores itself, at the same instance, which it reads before
+        it stores it: ``f[i] = 2 * f[i - k]`` at ``k = 0``. The first
+        refutation is the fact's, under what the schedule assumes of the
+        sizes (:meth:`assume`). A read isl cannot list (an index that is not
+        affine, a guard it cannot state) leaves the first question open: the
+        step is refused all the same, and the fact is ``assumed``, not
+        refuted. ``losing`` says what the step does without the zeros, for
+        the message: ``computing it again would not`` (see them) for a
+        substitution, ``a window would not`` for a contraction, and ``they
+        are kept`` where the schedule asks it of the zeros as the program
+        makes them (:meth:`_drop_unseen_zeros`).
 
         Lean states a decided one from loopty's description (:class:`Defined`):
         every read is of a cell a producer stored before it, in the
@@ -6510,8 +6714,6 @@ class Schedule:
         before some store of its cell is refused by the second question, so
         that is the claim isl decided as two questions.
         """
-        from loopty.flow import definedness
-
         # led by the step, so that two steps' facts, a substitution's and a
         # window's after one fusion, read apart in a ledger that lists both
         stored_by = self._stmts_shown(producer.id for producer in producers)
@@ -6520,8 +6722,31 @@ class Schedule:
             f"{self._handles.name} reads, {stored_by} has stored by the time it "
             "is read"
         )
+        found = self._defined(producers, readers, array, losing)
+        return self._fact(
+            "definedness",
+            statement,
+            status=found.status,
+            witness=found.witness,
+            detail=found.detail,
+            step=recipe,
+            reason=f"{text} illegal: {found.why}" if found.why else "",
+            about=array,
+            term=found.term,
+        )
+
+    def _defined(
+        self,
+        producers: Sequence[Stmt],
+        readers: Sequence[Stmt],
+        array: str,
+        losing: str,
+    ) -> _Definedness:
+        """The three questions of :meth:`_definedness_fact`, answered."""
+        from loopty.flow import definedness
+
         verdict = definedness(self._term, array, list(producers), readers)
-        message = ""
+        why = ""
         witness: Any = None
         detail = "every read of the array is of a cell the statement stores, after it"
         if verdict.ok is not True:
@@ -6535,11 +6760,11 @@ class Schedule:
                     self._stmts_shown([stmt.id]),
                     said,
                 )
-            message = (
-                f"{text} illegal: {said}, so the read would see the "
-                f"zeros the array was made with, and {losing}"
+            why = (
+                f"{said}, so the read would see the zeros the array was made "
+                f"with, and {losing}"
                 if verdict.ok is False
-                else f"{text} illegal: {said}"
+                else said
             )
         else:
             ids = {producer.id for producer in producers}
@@ -6551,6 +6776,8 @@ class Schedule:
                     and dep.array == array
                     and dep.sink in ids
                     and dep.window is None
+                    # none where the sizes are as assumed
+                    and not dep.relation.is_empty()
                 ),
                 None,
             )
@@ -6560,38 +6787,82 @@ class Schedule:
                 cell = _cell_text(early.source_indices, coords, params)
                 detail = f"{reader} reads {array} before {writer} stores it"
                 reading, storing = self._named((reader, coords), (writer, stored))
-                message = (
-                    f"{text} illegal: {reading} reads {array}[{cell}] before "
-                    f"{storing} stores it"
-                    f"{self._sizes_shown(params)}, so the read sees the "
-                    f"zeros the array was made with, and {losing}"
+                why = (
+                    f"{reading} reads {array}[{cell}] before {storing} stores it"
+                    f"{self._sizes_shown(params)}, so the read sees the zeros "
+                    f"the array was made with, and {losing}"
                 )
-        return self._fact(
-            "definedness",
-            statement,
+            else:
+                own = self._read_before_own_store(producers, readers, array)
+                if own is not None:
+                    witness, indices = own
+                    (reader, coords), _same, params = witness
+                    cell = _cell_text(indices, coords, params)
+                    detail = f"{reader} reads {array} at the cell it stores"
+                    (reading,) = self._named((reader, coords))
+                    why = (
+                        f"{reading} reads {array}[{cell}], the cell it stores, "
+                        f"before it stores it{self._sizes_shown(params)}, so "
+                        f"the read sees the zeros the array was made with, and "
+                        f"{losing}"
+                    )
+        return _Definedness(
             status=(
-                "decided"
-                if not message
-                else "assumed"
-                if verdict.ok is None
-                else "refuted"
+                "decided" if not why else "assumed" if verdict.ok is None else "refuted"
             ),
             witness=witness,
             detail=detail,
-            step=recipe,
-            reason=message,
-            about=array,
+            why=why,
             term=(
                 None
                 if verdict.ok is None
                 else Defined(self._term, array, tuple(producers), tuple(readers))
-                if not message
+                if not why
                 else IslOnly(
                     "isl refuted it with a read, which a counterexample of a "
                     "∀∃ claim cannot name for Lean"
                 )
             ),
         )
+
+    def _read_before_own_store(
+        self, producers: Sequence[Stmt], readers: Sequence[Stmt], array: str
+    ) -> tuple[tuple, tuple[Any, ...]] | None:
+        """A producer's read of a cell its own instance stores, and the read's indices.
+
+        One instance reads before it stores, so the read sees what an earlier
+        instance stored there or the zeros, and no dependence pairs it with
+        its own store, since a dependence joins two instances. ``None`` where
+        no producer among ``readers`` reads so; otherwise the instance, as
+        :meth:`_pair_in` names a pair (the instance twice), and the indices
+        of its read.
+        """
+        term = self._term
+        layout = self._origin_layout
+        ids = {producer.id for producer in producers}
+        for stmt in readers:
+            if stmt.id not in ids:
+                continue
+            accesses = [
+                (kind, indices)
+                for kind, name, indices, _part in _accesses(stmt, term)
+                if name == array
+            ]
+            for kind, read in accesses:
+                if kind != "read":
+                    continue
+                for other, stored in accesses:
+                    if other != "write" or len(stored) != len(read):
+                        continue
+                    pairs = _same_cell(stmt, stmt, read, stored, layout, self._params)
+                    pairs = pairs.intersect(isl.Map.identity(pairs.get_space()))
+                    origin = self._origin.align_params(pairs.get_space())
+                    pairs = pairs.align_params(origin.get_space()).intersect_domain(
+                        origin
+                    )
+                    if not pairs.is_empty():
+                        return self._pair_in(pairs), read
+        return None
 
     def _computed_from_inputs(self, array: str) -> bool:
         """Whether ``array``, computed where it is read, reads only what nothing writes.
@@ -8136,19 +8407,11 @@ class Schedule:
                     f"loop on {axis}, so on every work item of it"
                 )
                 # zeros the tag could not place (see _zeros_tags): why, and
-                # the steps that drop them
+                # why they are there at all (see _drop_unseen_zeros)
                 zeros = _zeros_ids(self._term)
                 for stmt_id in dict.fromkeys(everywhere_ids):
                     if stmt_id in zeros:
-                        array = self._shown_array(zeros[stmt_id])
-                        hints.append(
-                            f". The zeros {array} is made with run on the work "
-                            "item that stores each cell only where every "
-                            f"statement that stores {array} stores it along a "
-                            f"loop of its own on {axis}, and none does here; "
-                            f"keep {array} in a window (contract) or compute it "
-                            "where it is read (substitute), which drops them"
-                        )
+                        hints.append(self._kept_zeros_hint(zeros[stmt_id], axis))
             how = "; ".join(parts)
         else:
             one = source_loop == sink_loop

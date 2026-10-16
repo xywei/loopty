@@ -120,10 +120,14 @@ def test_a_window_of_an_array_over_a_domain_keeps_one_row_of_it() -> None:
     window = windowed.windows["f"]
     assert repr(window.placement) == "lambda i, j: j"
     assert [str(extent) for extent in window.extents] == ["n"]
-    assert [(f.kind, f.status) for f in windowed.facts()[-2:]] == [
-        ("definedness", Status.DECIDED),
+    # the window rests on the fact the schedule is made with, that no read
+    # sees the zeros f is made with (#290)
+    made = windowed.facts()[0]
+    assert (made.kind, made.status) == ("definedness", Status.DECIDED)
+    assert [(f.kind, f.status) for f in windowed.facts()[-1:]] == [
         ("no-clobber", Status.DECIDED),
     ]
+    assert windowed.facts()[-1].rests_on == (made.id,)
     assert windowed.facts()[-1].statement == (
         "no read of declared.f sees its slot overwritten after "
         "contract(declared.f, lambda i, j: j): declared.f kept in n cells, "
