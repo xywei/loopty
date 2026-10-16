@@ -7869,8 +7869,16 @@ class Schedule:
         From the example input it was found on, with what the subscript read
         there, when there is one (:meth:`_real_pair`); from isl's pair at the
         sizes otherwise, and then, when the subscript is one isl cannot read,
-        a note for the end of the message that says the pair is isl's.
+        a note for the end of the message that says the pair is isl's. The
+        flag a checked point sets is the check's flag, a name no line of the
+        source wrote.
         """
+        if dep.array in dict(self._term.checks):
+            # the flag a checked point sets, which no line of the source names
+            cell = "the check's flag"
+            if found is not None:
+                return cell, f" on {found.at}{found.where}", ""
+            return cell, self._sizes_shown(params), ""
         if found is not None:
             return found.cell_text, f" on {found.at}{found.where}", ""
         cell = f"{dep.array}[{_cell_text(dep.source_indices, coords, params)}]"
@@ -8420,11 +8428,13 @@ def _sizes_text(
 def _no_update_text(stmt: Stmt, named: Named) -> str:
     """What a statement that writes an array does instead of updating it.
 
-    ``y[cell[c, k]] *= yl[c, k] (f.py:12) writes y[cell[c, k]] = y[cell[c,
-    k]] * yl[c, k], which is not y[cell[c, k]] plus a value that reads
-    nothing else of y``, for :meth:`Schedule.atomic`, the statement named as
-    ``named`` names it; the sum of a value that is not an integer into an
-    integer array is named as such (see :func:`loopty.trace.update_exactness`).
+    ``y[cell[c, k]] = y[cell[c, k]] * yl[c, k] (f.py:12), which is not
+    y[cell[c, k]] plus a value that reads nothing else of y``, for
+    :meth:`Schedule.atomic`, the statement named as ``named`` names it, with
+    what it writes where its text is shortened (``y[cell[c, k]] = ... (f.py:12)
+    writes y[cell[c, k]] = ...``) or where it has none; the sum of a value
+    that is not an integer into an integer array is named as such (see
+    :func:`loopty.trace.update_exactness`).
     """
     from lanky.terms import render
 
@@ -8434,7 +8444,9 @@ def _no_update_text(stmt: Stmt, named: Named) -> str:
     indices = as_spelled(stmt, *stmt.assignee.indices)
     (value,) = as_spelled(stmt, stmt.expr)
     cell = f"{array}[{', '.join(render(i) for i in indices)}]"
-    written = f"{named(stmt.id)} writes {cell} = {render(value)}"
+    written = named(stmt.id)
+    if not stmt.text or "..." in stmt.text:
+        written = f"{written} writes {cell} = {render(value)}"
     if stmt.kind != "accumulate":
         return f"{written}, which replaces the cell's value"
     if update_operands(stmt.expr, stmt.assignee, stmt.guard) is not None:

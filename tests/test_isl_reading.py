@@ -892,7 +892,8 @@ def test_loopys_refusal_under_a_guard_it_does_not_read_names_the_fix() -> None:
         assert "could not establish" in message
     with pytest.raises(GuardNotRead) as refused:
         emit_code(half_guard)
-    assert "S0 of half_guard at test_isl_reading.py:" in str(refused.value)
+    assert "an access of y[i] = x[i + 4] (test_isl_reading.py:" in str(refused.value)
+    assert ") in half_guard: it reads" in str(refused.value)
     assert "'with when(i <= y.dom.size - 5):'" in str(refused.value)
     with pytest.raises(GuardNotRead, match=r"under the guard 'm\[i\] > 0.5'"):
         LoopyExecutor().run(entry_guard, m=np.zeros(9), **inputs(9)())

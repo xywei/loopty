@@ -93,6 +93,7 @@ from loopty.description import (
 )
 from loopty.handles import statement_names
 from loopty.oracle import Empty
+from loopty.source import as_spelled
 from loopty.term import ArrType, Hypothesis, Stmt, Term
 
 __all__ = [
@@ -322,11 +323,13 @@ def _single_assignment(term: Term, array: str) -> tuple[Any, list[Stmt], list] |
             continue
         if stmt.exactness is None:
             # y[i] = 2 * y[i]: the store reads the cell it stores, first
-            return f"{named(stmt.id)} stores a cell of {array} that it reads before"
+            return f"{named(stmt.id)} reads a cell of {array} before it stores it"
         # an update, y[i] += v or a scatter-add y[cell[c, k]] += v: the cell
         # holds what it held on entry and every update, which is no one
         # statement's value
-        shown = ", ".join(str(index) for index in stmt.assignee.indices)
+        shown = ", ".join(
+            str(index) for index in as_spelled(stmt, *stmt.assignee.indices)
+        )
         return (
             f"{named(stmt.id)} updates {array}[{shown}] in place, so a cell of {array} "
             "holds what it held on entry plus every update, not what one "
@@ -393,9 +396,14 @@ def _single_assignment(term: Term, array: str) -> tuple[Any, list[Stmt], list] |
             after = after.apply_range(_time_map(writer, writer.inames, depth).reverse())
             same, after = _both(same, after)
             if not keep(same.intersect(after), f"read{len(pieces)}"):
+                if writer is stmt:
+                    return (
+                        f"{named(stmt.id)} reads a cell of {array} before it "
+                        "stores it"
+                    )
                 return (
-                    f"{named(writer.id)} stores a cell of {array} that "
-                    f"{named(stmt.id)} reads before it"
+                    f"{named(stmt.id)} reads a cell of {array} before "
+                    f"{named(writer.id)} stores it"
                 )
     question = None
     for piece in pieces:

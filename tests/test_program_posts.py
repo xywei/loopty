@@ -111,8 +111,9 @@ def test_what_a_later_call_writes_over_is_no_equation() -> None:
     values, compared at the class of ``c``.
     """
     stored = program_stores(programs.last_wins.term, "last_wins")
-    assert [hypothesis.source.split(" at ")[0] for hypothesis in stored.equations] == [
-        "what plus.S0 stores in c"
+    plus = programs.last_wins.term.stmt("plus.S0")
+    assert [hypothesis.source for hypothesis in stored.equations] == [
+        f"what {plus.text} ({plus.where}) stores in c"
     ]
     (post,) = facts(programs.last_wins, "postcondition")
     assert (post.status, post.decided_by) == (Status.DECIDED, "isl")

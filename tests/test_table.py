@@ -234,12 +234,19 @@ def test_every_read_of_a_table_is_decided_in_bounds_over_its_shape() -> None:
     oracle = IslOracle()
     facts = [f for f in mass.facts() if f.kind == "in-bounds"]
     statements = {f.statement: oracle.establish(f).status for f in facts}
-    assert statements["W[q] is in bounds for every instance of S0"] is Status.DECIDED
-    assert statements["PHI[q, k] is in bounds for every instance of S0"] is (
+    (stmt,) = mass.term.stmts
+    applied = f"{stmt.text} ({stmt.where})"
+    assert applied.startswith("y[c, j] = reduce_sum(...) (test_table.py:")
+    assert statements[f"W[q] is in bounds for every instance of {applied}"] is (
+        Status.DECIDED
+    )
+    assert statements[f"PHI[q, k] is in bounds for every instance of {applied}"] is (
         Status.DECIDED
     )
     (beyond,) = [
-        f for f in past_the_end.facts() if f.kind == "in-bounds" and "W[" in f.statement
+        f
+        for f in past_the_end.facts()
+        if f.kind == "in-bounds" and f.statement.startswith("W[")
     ]
     refuted = oracle.establish(beyond)
     assert refuted.status is Status.REFUTED

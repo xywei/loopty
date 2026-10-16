@@ -73,6 +73,7 @@ from loopty.description import (
     disjunction,
 )
 from loopty.hypotheses import _sort_terms, substitute
+from loopty.source import as_spelled
 from loopty.term import Stmt, Term
 
 __all__ = [
@@ -824,17 +825,17 @@ def _footprint_place(
 def _access_label(
     term: Term, a: Stmt, first: tuple, b: Stmt, second: tuple
 ) -> str:
-    """``u[t + 1, i] = ... (f.py:3) writes u[t + 1, i] before ... reads u[t, i - 1]``.
-
-    One pair of accesses, each statement named as a message names it.
-    """
+    """``u[t + 1, i] = ... (f.py:3) writes u[t + 1, i] before the same statement
+    reads u[t, i - 1]``: one pair of accesses, each statement named as a
+    message names it."""
     verbs = {"write": "writes", "read": "reads", "acc": "updates"}
 
-    def said(stmt: Stmt, access: tuple) -> str:
+    def said(stmt: Stmt, access: tuple, name: str) -> str:
         cell = f"{access[0]}[{', '.join(render(i) for i in access[1])}]"
-        return f"{_said(term, stmt.id)} {verbs.get(access[2], access[2])} {cell}"
+        return f"{name} {verbs.get(access[2], access[2])} {cell}"
 
-    return f"{said(a, first)} before {said(b, second)}"
+    other = "the same statement" if a.id == b.id else _said(term, b.id)
+    return f"{said(a, first, _said(term, a.id))} before {said(b, second, other)}"
 
 
 def ordering_obligation(term: Term, verdict: Any) -> Any:
@@ -1873,12 +1874,17 @@ def _time(
 
 
 def _relation(
-    step: Any, stmt_id: str, before: Mapping[str, Any], after: Mapping[str, Any]
+    step: Any,
+    stmt_id: str,
+    before: Mapping[str, Any],
+    after: Mapping[str, Any],
+    term: Term | None = None,
 ) -> Any:
     """One step's map of one statement, as a proposition between its coordinates.
 
     The statement's map as the step wrote it, and every coordinate the map
     does not take kept as it was, as :func:`loopty.schedule._step_map` keeps it.
+    ``term`` is the statement's, which names it in a reason.
 
     Raises:
         Unstatable: For a map isl computed (the part of a tile over one of its
@@ -1889,9 +1895,10 @@ def _relation(
     if stmt_id in step.isl_maps:
         written = step.maps.get(stmt_id)
         if written is None:
+            said = stmt_id if term is None else _said(term, stmt_id)
             raise Unstatable(
-                f"{step.text} moves {stmt_id} by the part of its map over the loops "
-                f"{stmt_id} runs in, which isl computed"
+                f"{step.text} moves {said} by the part of its map over the loops "
+                "it runs in, which isl computed"
             )
         inputs = written.inputs
         parts.append(written.relation(before, after))
@@ -1928,7 +1935,9 @@ def _chain(
                 strict=True,
             )
         )
-        claim.hypotheses.append(_relation(step, stmt.id, stages[-1], after))
+        claim.hypotheses.append(
+            _relation(step, stmt.id, stages[-1], after, origin._term)
+        )
         stages.append(after)
     return stages
 
@@ -2018,10 +2027,8 @@ _VERBS = {
 
 
 def _class_label(term: Term, a: Stmt, b: Stmt, first: tuple, second: tuple) -> str:
-    """``u[t, i - 1] read by ... (f.py:3) after u[t + 1, i] is written by ...``.
-
-    Each statement named as a message names it, by its text and line.
-    """
+    """``u[t, i - 1] read by ... (f.py:3) after u[t + 1, i] is written by the
+    same statement``: each statement named as a message names it."""
     from lanky.terms import render
 
     def cell(access: tuple) -> str:
@@ -2034,7 +2041,8 @@ def _class_label(term: Term, a: Stmt, b: Stmt, first: tuple, second: tuple) -> s
     }[first[0], second[0]]
     return (
         f"{cell(second)} {verb[0]} by {_said(term, b.id)} after {cell(first)} is "
-        f"{verb[1]} by {_said(term, a.id)}"
+        f"{verb[1]} by "
+        + ("the same statement" if a.id == b.id else _said(term, a.id))
     )
 
 
@@ -2347,7 +2355,8 @@ def _within_parts(origin: Any, steps: Sequence[Any], work: Any) -> list[Any]:
         chain = _chain(claim, origin, stmt, steps, "a")
         same = _same_cell(origin, stmt, stmt, cell, write[2], chain[0], chain[0])
         claim.hypotheses.append(same)
-        written = f"{write[1]}[{', '.join(render(i) for i in write[2])}]"
+        indices = as_spelled(stmt, *write[2])
+        written = f"{write[1]}[{', '.join(render(i) for i in indices)}]"
         parts.append(
             lanky.Part(
                 f"within_{count}",
@@ -2546,7 +2555,7 @@ def _bijective_parts(origin: Any, steps: Sequence[Any]) -> list[Any]:
         claim.hypotheses.extend(assumed)
         before = _chain(claim, origin, stmt, earlier, "a")[-1]
         images = claim.fresh_all(new, "image")
-        relation = _relation(step, stmt.id, before, images)
+        relation = _relation(step, stmt.id, before, images, term)
         params = {name: Var(name) for name in mapping.get_var_names(isl.dim_type.param)}
         form = _functional_form(mapping, [before[name] for name in inputs], params)
         witness = []
@@ -2575,8 +2584,8 @@ def _bijective_parts(origin: Any, steps: Sequence[Any]) -> list[Any]:
         before = _chain(claim, origin, stmt, earlier, "a")[-1]
         first = dict(zip(new, claim.coordinates(new, "c"), strict=True))
         second = dict(zip(new, claim.coordinates(new, "d"), strict=True))
-        claim.hypotheses.append(_relation(step, stmt.id, before, first))
-        claim.hypotheses.append(_relation(step, stmt.id, before, second))
+        claim.hypotheses.append(_relation(step, stmt.id, before, first, term))
+        claim.hypotheses.append(_relation(step, stmt.id, before, second, term))
         goal = _equal([first[n] for n in new], [second[n] for n in new])
         parts.append(
             lanky.Part(
@@ -2592,8 +2601,8 @@ def _bijective_parts(origin: Any, steps: Sequence[Any]) -> list[Any]:
         one = _chain(claim, origin, stmt, earlier, "a")[-1]
         other = _chain(claim, origin, stmt, earlier, "b")[-1]
         image = dict(zip(new, claim.coordinates(new, "c"), strict=True))
-        claim.hypotheses.append(_relation(step, stmt.id, one, image))
-        claim.hypotheses.append(_relation(step, stmt.id, other, image))
+        claim.hypotheses.append(_relation(step, stmt.id, one, image, term))
+        claim.hypotheses.append(_relation(step, stmt.id, other, image, term))
         goal = _equal([one[n] for n in old], [other[n] for n in old])
         parts.append(
             lanky.Part(

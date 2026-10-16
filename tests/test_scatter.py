@@ -588,9 +588,9 @@ def test_atomic_refuses_an_exact_accumulation_and_what_is_not_updated() -> None:
     with pytest.raises(ValueError) as caught:
         Schedule(overwrite).atomic(overwrite.y)
     assert str(caught.value) == (
-        "atomic(overwrite.y): overwrite does not update overwrite.y: S0 writes "
-        "y[cell[c, k]] = "
-        "yl[c, k], which replaces the cell's value. An update adds to the cell "
+        "atomic(overwrite.y): overwrite does not update overwrite.y: "
+        f"y[cell[c, k]] = yl[c, k] ({where(overwrite, 'y[cell[c, k]] =')}), which "
+        "replaces the cell's value. An update adds to the cell "
         "it writes a value that reads nothing else of y, y[...] += v, and "
         "atomic makes two such updates safe to run at the same time"
     )
@@ -703,21 +703,21 @@ def test_a_writer_that_reads_an_atomic_array_reads_it_as_its_dtype(
         (
             scaled,
             "y",
-            "S0 writes y[cell[c, k]] = y[cell[c, k]]*yl[c, k], which is not "
-            "y[cell[c, k]] plus a value that reads nothing else of y",
+            f"y[cell[c, k]] = y[cell[c, k]] * yl[c, k] ({where(scaled, '=')}), "
+            "which is not y[cell[c, k]] plus a value that reads nothing else of y",
             f"y[cell[c, k]] = y[cell[c, k]] * yl[c, k] ({where(scaled, '=')})",
         ),
         (
             reflected,
             "y",
-            "S0 writes y[cell[c, k]] = yl[c, k] - y[cell[c, k]], which is not "
-            "y[cell[c, k]] plus a value that reads nothing else of y",
+            f"y[cell[c, k]] = yl[c, k] - y[cell[c, k]] ({where(reflected, '=')}), "
+            "which is not y[cell[c, k]] plus a value that reads nothing else of y",
             f"y[cell[c, k]] = yl[c, k] - y[cell[c, k]] ({where(reflected, '=')})",
         ),
         (
             halves,
             "m",
-            "S0 writes m[cell[c, k]] = m[cell[c, k]] + 0.5, which adds a value "
+            f"m[cell[c, k]] += 0.5 ({where(halves, '+=')}), which adds a value "
             "that is not an integer to an integer array: each partial sum is "
             "truncated when it is stored, so the order of the updates changes "
             "the result",

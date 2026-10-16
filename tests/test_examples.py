@@ -27,7 +27,7 @@ import islpy as isl
 import numpy as np
 import pytest
 
-from lines import where
+from lines import said, where
 
 pytest.importorskip("loopy")
 
@@ -793,7 +793,12 @@ def test_every_in_bounds_obligation_of_the_pairs_is_decided_by_isl() -> None:
     assert {fact["status"] for fact in in_bounds} == {"decided"}
     assert {fact["decided_by"] for fact in in_bounds} == {"isl"}
     statements = {fact["statement"] for fact in in_bounds}
-    assert "f[k, p] is in bounds for every instance of S1" in statements
+    summed = said(
+        _module("pairs").pairs,
+        "e[p] = reduce_sum(...) + reduce_sum(...)",
+        "e[p] = reduce_sum(",
+    )
+    assert f"f[k, p] is in bounds for every instance of {summed}" in statements
 
 
 def test_the_pairs_run_in_both_layouts_and_both_agree() -> None:
@@ -1052,9 +1057,15 @@ def test_the_hexahedra_demo_decides_its_layouts_and_its_programs() -> None:
     along_t = [
         fact["statement"] for fact in facts if fact["owner"] == "gradient_along_t"
     ]
+    module = _module("hexahedra")
+    summed = said(
+        module.gradient_along_t,
+        "grad[x, e, k, j, i] = reduce_sum(...)",
+        "grad[x, e, k, j, i] = reduce_sum(",
+    )
     assert (
         "Ft[3*x + d, k, c] is in bounds for every d in Fin(3) and every instance "
-        "of S0"
+        f"of {summed}"
     ) in along_t
     assert not [line for line in along_t if "3*x + 0" in line]
     assert [line for line in along_t if line.startswith("the accumulation")] == [
@@ -1064,9 +1075,14 @@ def test_the_hexahedra_demo_decides_its_layouts_and_its_programs() -> None:
     contravariant = [
         fact["statement"] for fact in facts if fact["owner"] == "contravariant"
     ]
+    summed = said(
+        module.contravariant,
+        "w[d, e, k, j, i] = reduce_sum(...)",
+        "w[d, e, k, j, i] = reduce_sum(",
+    )
     assert (
         "G[3*x + d, e, k, j, i] is in bounds for every x in Fin(3) and every "
-        "instance of S0"
+        f"instance of {summed}"
     ) in contravariant
 
 
@@ -1195,10 +1211,18 @@ def test_the_advection_demo_decides_every_access_and_every_launch() -> None:
         for fact in facts
         if fact["owner"] == "upwind" and fact["statement"].startswith("u[")
     }
+    flux = said(
+        _module("advection").upwind,
+        "flux[e, f, a, b] = upwind_flux(...)",
+        "flux[e, f, a, b] = upwind_flux(",
+    )
     assert gathers == {
         "u[e, inside[f, a, b, 0], inside[f, a, b, 1], inside[f, a, b, 2]] is in "
-        "bounds for every instance of S0 (inside[f, a, b, 0] : Fin(n), inside[f, "
-        "a, b, 1] : Fin(n), inside[f, a, b, 2] : Fin(n), by type)": ("decided", "isl"),
+        f"bounds for every instance of {flux} (inside[f, a, b, 0] : Fin(n), "
+        "inside[f, a, b, 1] : Fin(n), inside[f, a, b, 2] : Fin(n), by type)": (
+            "decided",
+            "isl",
+        ),
         "u[nbr[e, f], outside[f, a, b, 0], outside[f, a, b, 1], outside[f, a, b, "
         "2]] is in bounds by type (nbr[e, f] : Fin(ne), outside[f, a, b, 0] : "
         "Fin(n), outside[f, a, b, 1] : Fin(n), outside[f, a, b, 2] : Fin(n))": (
@@ -1754,8 +1778,10 @@ def test_the_qbx_demo_states_the_fact_sumpy_silences_for_both_layers() -> None:
             for fact in facts
             if fact["owner"] == owner and fact["kind"] == "disjoint-writes"
         ]
+        kernel = getattr(_module("layer_potential"), owner)
+        summed = said(kernel, "out[t] = SCALE * reduce_sum(...)", "out[t] =")
         assert writes["statement"] == (
-            "distinct instances of S0 write distinct cells of out"
+            f"distinct instances of {summed} write distinct cells of out"
         )
         assert writes["status"] in ("decided", "proved"), writes
         assert writes["decided_by"] in ("isl", "lean"), writes
@@ -1889,7 +1915,14 @@ def test_the_qbx_demo_prints_the_tile_the_fact_and_the_rows() -> None:
         "decided  isl  prioritize(single_layer.s.outer, single_layer.t.inner) "
         "renames the instances of single_layer one for one"
     ) in out
-    assert "decided  isl  distinct instances of S0 write distinct cells of out" in out
+    summed = said(
+        _module("layer_potential").single_layer,
+        "out[t] = SCALE * reduce_sum(...)",
+        "out[t] =",
+    )
+    assert (
+        f"decided  isl  distinct instances of {summed} write distinct cells of out"
+    ) in out
     # the tile is shown as sumpy writes it, without the target its casts were
     # decided on, which cannot build its hardware axes
     assert (

@@ -122,8 +122,9 @@ def main() -> int:
     for name, typ in term.temporaries:
         print(f"  temporary {name}: {len(typ.axes)} axis, element {typ.dtype}")
     for stmt in term.stmts:
-        loops = ", ".join(stmt.inames)
-        print(f"  {stmt.id:14} over {loops:3} from {stmt.where}")
+        # the zeros the program made f with are a statement no line writes
+        said = stmt.text or f"the zeros of {stmt.assignee.array}"
+        print(f"  {said:36} from {stmt.where}")
 
     print()
     print(emit_code(burgers_rhs))

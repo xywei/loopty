@@ -22,3 +22,19 @@ def where(fn: Any, text: str) -> str:
     lines, start = inspect.getsourcelines(body)
     (found,) = [k for k, line in enumerate(lines) if text in line]
     return f"{os.path.basename(inspect.getsourcefile(body))}:{start + found}"
+
+
+def said(fn: Any, text: str, line: str | None = None) -> str:
+    """A statement of ``fn`` as a message names it: ``y[r] = ... (f.py:12)``.
+
+    ``text`` is the statement's text, shortened as messages shorten it
+    (:mod:`loopty.source`), and ``line`` a piece of the one line it starts
+    on, ``text`` itself by default.
+    """
+    return f"{text} ({where(fn, text if line is None else line)})"
+
+
+def named(term: Any, stmt_id: str) -> str:
+    """A statement of ``term`` by its text and line, as a message names it."""
+    stmt = term.stmt(stmt_id)
+    return f"{stmt.text} ({stmt.where})"

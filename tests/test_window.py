@@ -587,7 +587,8 @@ def test_a_loop_run_backwards_takes_its_window_and_a_window_refuses_it() -> None
         "statement at j=3 would now overwrite with f[3] first"
     )
     # a shift register shifts along a loop over increasing cells
-    with pytest.raises(ValueError, match="flux.S0 stores f at no index"):
+    flux = rf"f\[j\] = 0\.5 \* u\[j\] \* u\[j\] \({where(WINDOWS.flux, 'f[j] =')}\)"
+    with pytest.raises(ValueError, match=f"{flux} stores f at no index"):
         WINDOWS.fused.affine(WINDOWS.REVERSED).contract(
             WINDOWS.burgers.f, registers=True
         )
@@ -826,7 +827,8 @@ def test_a_window_of_an_array_that_is_updated_is_refused_with_the_fix() -> None:
         with pytest.raises(WindowError) as caught:
             fused.contract(added.f, placement)
         assert str(caught.value).endswith(
-            "added.added_flux updates f[j] in place, starting from the zeros f was "
+            f"f[j] += 0.5 * u[j] * u[j] ({where(added_flux, 'f[j] +=')}) updates "
+            "f[j] in place, starting from the zeros f was "
             "made with, and a window keeps a value stored once, without them; "
             "store each cell once, f[j] = ... (a reduce_sum where the updates run "
             "over a loop), or keep f whole"
@@ -835,7 +837,8 @@ def test_a_window_of_an_array_that_is_updated_is_refused_with_the_fix() -> None:
     with pytest.raises(WindowError) as caught:
         Schedule(scattered, sizes={"n": 16}).contract(scattered.f)
     assert str(caught.value) == (
-        "contract(scattered.f): scattered.scattered_flux updates f[node[j]] in "
+        "contract(scattered.f): f[node[j]] += 0.5 * u[j] * u[j] "
+        f"({where(scattered_flux, 'f[node[j]] +=')}) updates f[node[j]] in "
         "place, starting from the zeros f was made with, and a window keeps a "
         "value stored once, without them; keep f whole"
     )
@@ -932,7 +935,7 @@ def test_the_casts_after_a_window_state_its_slots() -> None:
     names = [part.name for part in cast_obligation(monotone.term).parts]
     assert any(name.startswith("window_") for name in names)
     assert not any(
-        part.name.startswith("dependence_") and "f.zeros" in part.label
+        part.name.startswith("dependence_") and "the zeros of" in part.label
         for part in cast_obligation(monotone.term).parts
     )
 
@@ -944,8 +947,9 @@ def test_the_casts_after_a_window_read_by_updates_order_no_two_updates() -> None
     assert monotone.kind == "monotone"
     parts = cast_obligation(monotone.term).parts
     assert any(part.name.startswith("window_") for part in parts)
-    # two updates of a node need no order, and are no class
-    assert not any("y[" in part.label for part in parts)
+    # two updates of a node need no order, and are no class; a class's
+    # label starts with its cell
+    assert not any(part.label.startswith("y[") for part in parts)
 
 
 # }}}

@@ -256,7 +256,7 @@ def main() -> int:
     print()
     print(f"the term of matvec, with {call.callee} inlined at {call.where}:")
     print(
-        f"  {stmt.id} over {', '.join(stmt.inames)}: y[i] = sum over "
+        f"  for every {', '.join(stmt.spelled)}: y[i] = sum over "
         f"{', '.join(stmt.expr.inames)} of {stmt.expr.body}"
     )
     for argument in call.arguments:
