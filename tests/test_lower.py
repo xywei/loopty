@@ -472,7 +472,7 @@ def test_a_program_whose_intermediate_is_larger_than_the_stack_runs(tmp_path):
             import numpy as np
             from lanky.prelude import Real
 
-            from loopty import Arr, Fin, kernel, program, when
+            from loopty import Arr, Fin, kernel, program
             from loopty.executor import LoopyExecutor
 
             @kernel
@@ -483,7 +483,7 @@ def test_a_program_whose_intermediate_is_larger_than_the_stack_runs(tmp_path):
             @kernel
             def divergence(f: Arr[Fin[n], Real], rhs: Arr[Fin[n], Real]):
                 for i in rhs.dom:
-                    with when((i > 0) & (i + 1 < rhs.dom.size)):
+                    if (i > 0) & (i + 1 < rhs.dom.size):
                         rhs[i] = -(f[i + 1] - f[i - 1]) / 2
 
             @program

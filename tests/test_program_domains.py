@@ -21,7 +21,7 @@ from lanky.ledger import Status
 from lanky.prelude import Fin, Real
 
 from lines import where
-from loopty import Arr, Schedule, TraceError, kernel, program, reduce_sum, when
+from loopty import Arr, Schedule, TraceError, kernel, program, reduce_sum
 from loopty.executor import LoopyExecutor
 from loopty.faithful import KIND
 from loopty.oracle import IslOracle
@@ -179,7 +179,7 @@ def test_a_declared_length_the_sizes_make_negative_is_refused_both_ways() -> Non
     @kernel
     def head(x: Arr[Fin[n], Real], y: Arr[Fin[k], Real]):  # noqa: F821
         for p in y.dom:
-            with when(p + 3 < x.dom.size):
+            if p + 3 < x.dom.size:
                 y[p] = x[p + 3]
 
     @kernel

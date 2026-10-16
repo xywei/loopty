@@ -19,7 +19,7 @@ from __future__ import annotations
 from lanky import axiom, theorem
 from lanky.prelude import Fn, Int, Nat, Real
 
-from loopty import Arr, Fin, kernel, program, reduce_sum, when
+from loopty import Arr, Fin, kernel, program, reduce_sum
 
 # {{{ an index array, and the reads through it
 
@@ -176,7 +176,7 @@ def clear_some(perm: Arr[Fin[n], Fin[n]], lim: Arr[Fin[1], Nat]) -> all(
     """Clear the first ``lim[0]`` cells, and put ``n`` in the others."""
     for i in perm.dom:
         perm[i] = perm.dom.size
-        with when(i < lim[0]):
+        if i < lim[0]:
             perm[i] = 0
 
 
@@ -410,7 +410,7 @@ def clamp(
     """Copies the naturals below ``n``: a point of ``Fin[n]`` for a natural."""
     for i in perm.dom:
         perm[i] = perm.dom.size - 1
-        with when(src[i] < perm.dom.size):
+        if src[i] < perm.dom.size:
             perm[i] = src[i]
 
 

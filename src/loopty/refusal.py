@@ -6,8 +6,8 @@ name an instruction of its own and no fix:
 * its bounds check reads a guard into isl only where the guard is an affine
   comparison of integers, and under any other guard it checks an access at
   every point of the loop, so it refuses one the guard keeps in bounds:
-  ``x[i + 4]`` under ``when(i * 0.5 < 2)``, ``when(i * i < 16)`` or
-  ``when(m[i] > 0.5)`` fails with ``LoopyIndexError: 'x[i + 4]' in
+  ``x[i + 4]`` under ``if i * 0.5 < 2:``, ``if i * i < 16:`` or
+  ``if m[i] > 0.5:`` fails with ``LoopyIndexError: 'x[i + 4]' in
   instruction 'S0' ... could not establish ...`` (#148, note 23 in
   ``docs/loopy-notes.md``);
 * its type inference visits an instruction's value and never its guard, so a
@@ -127,12 +127,12 @@ def _unread_guard(error: LoopyIndexError, lowering: Lowering) -> GuardNotRead | 
         fix = (
             "Write the guard as a comparison of integers, which loopy reads, "
             "or add one that keeps the access in bounds, which it reads too: "
-            + " and ".join(f"'with when({condition}):'" for condition in suggested)
+            + " and ".join(f"'if {condition}:'" for condition in suggested)
         )
     else:
         fix = (
             "Write the guard as a comparison of integers, which loopy reads "
-            "('when(i < 4)' for 'when(i * 0.5 < 2)'), or add one that keeps "
+            "('if i < 4:' for 'if i * 0.5 < 2:'), or add one that keeps "
             "the access in bounds"
         )
     plural = "s" if len(conjuncts) > 1 else ""
@@ -359,19 +359,21 @@ def refuse_where_native_does(
 
     * an operation, ``+``, ``*``, ``//``, ``%``, ``**``, ``^``, ``<<`` or
       ``>>``, of such arithmetic beside a numpy integer narrower than 64 bits
-      or an unsigned one, over the loops around the statement with no guard
-      applied, since a ``when`` masks the write and the body computes at
-      every point of its loops; inside a sum, over the sum's own, narrowed by
-      the generator's ``if`` clause, which skips the body
-      (:func:`_summed_points`). A point
-      where one of the integer's reads is out of bounds is left out: under a
-      false guard the native run reads such a cell as the Python int ``0``;
+      or an unsigned one, where the body computes it: a statement's value and
+      subscripts over its domain, which its path condition narrows, and each
+      condition of the path over the points it is asked at
+      (:attr:`loopty.term.Stmt.path`); a guard with no path, a program's
+      checked point, over the loops with no guard applied; inside a sum, over
+      the sum's own, narrowed by the generator's ``if`` clause, which skips
+      the body (:func:`_summed_points`). A point where one of the integer's
+      reads is out of bounds is left out, since the native run stops at the
+      read;
     * a store of such arithmetic into an array stored so natively, over the
       points the statement stores at, when its guard narrows its domain
       whole, a program's checked points apart (:func:`_store`); and of a
-      literal the array's type does not hold under such a
-      guard, which the trace leaves here (:func:`loopty.trace.trace`), since
-      the guard may hold nowhere: ``with when(i < 0): y[i] = 300``;
+      literal the array's type does not hold on a branch, which the trace
+      leaves here (:func:`loopty.trace.trace`), since the branch may be taken
+      nowhere: ``if i < 0: y[i] = 300``;
     * such arithmetic a kernel called in a loop is given for a scalar of a
       numpy integer sort, which its contract converts into that type, over
       the points the call is made at (:func:`_converted`, #232).
@@ -402,9 +404,20 @@ def refuse_where_native_does(
         _converted(term, call, promotion, sizes)
     for stmt in term.stmts:
         loops = stmt.loop_domain if stmt.loop_domain is not None else stmt.domain
+        parts: tuple[tuple[Any, Any], ...] = (
+            (stmt.assignee.indices, loops),
+            (stmt.expr, loops),
+            (stmt.guard, loops),
+        )
+        if stmt.path:
+            parts = (
+                (stmt.assignee.indices, stmt.domain),
+                (stmt.expr, stmt.domain),
+                *stmt.path,
+            )
         try:
-            for part in (stmt.assignee.indices, stmt.expr, stmt.guard):
-                _operations(part, term, stmt, promotion, loops, sizes)
+            for part, points in parts:
+                _operations(part, term, stmt, promotion, points, sizes)
             _store(term, stmt, promotion, sizes, flags)
         except RefusedNatively as refusal:
             before = _checks_before(stmt, flags)

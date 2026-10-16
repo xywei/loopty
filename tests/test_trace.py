@@ -8,7 +8,7 @@ import pytest
 from lanky.prelude import Nat, Real
 from lanky.terms import evaluate_annotations, render
 
-from loopty import Arr, Fin, reduce_sum, when
+from loopty import Arr, Fin, reduce_sum
 from loopty.term import Reduction
 from loopty.trace import TraceError, accesses_in, reductions_in, trace
 
@@ -36,7 +36,7 @@ def spmv(
 
 def guarded(u: Arr[Fin[n], Real], v: Arr[Fin[n], Real]):  # noqa: F821
     for i in u.dom:
-        with when(i + 1 < u.dom.size):
+        if i + 1 < u.dom.size:
             v[i] = u[i + 1]
 
 
@@ -544,7 +544,7 @@ def test_a_loop_variable_escaping_into_a_guard_is_refused() -> None:
     def guarded_after(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
         for i in x.dom:
             y[i] = x[i]
-        with when(i > 0):
+        if i > 0:
             y[0] = 1.0
 
     with pytest.raises(TraceError, match="loop variable 'i'"):
@@ -747,26 +747,24 @@ def test_a_loop_written_on_one_line_keeps_its_source_name() -> None:
     assert "reduce_sum(... for i in x.dom)" in str(caught.value)
 
 
-def test_what_guards_and_reductions_bind_is_not_state() -> None:
-    # ``g`` is rebound to a new guard object each time (and read at the end, so
-    # it is live across the loops); the reduction's ``j`` lives in the
-    # generator's own frame, although it shares a name with an earlier loop's
-    # target; ``dx`` is a temporary bound inside a guard.
+def test_what_branches_and_reductions_bind_is_not_state() -> None:
+    # The reduction's ``j`` lives in the generator's own frame, although it
+    # shares a name with an earlier loop's target; ``dx`` is a temporary bound
+    # inside a branch.
     def binders(
         cnt: Arr[Fin[n], Nat],  # noqa: F821
         val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
         y: Arr[Fin[n], Real],  # noqa: F821
         z: Arr[Fin[n], Real],  # noqa: F821
     ):
-        with when(y.dom.size > 1) as g:
+        if y.dom.size > 1:
             z[0] = 0.0
         for j in z.dom:
-            with when(j > 0) as g:
+            if j > 0:
                 dx = y[j] - y[j - 1]
                 z[j] = dx
         for r in y.dom:
             y[r] = reduce_sum(val[r, j] for j in val.dom[r])
-        assert g is not None
 
     term = term_of(binders)
     assert [stmt.inames for stmt in term.stmts] == [(), ("j",), ("r",)]
@@ -1325,7 +1323,7 @@ def test_a_reduction_condition_that_reads_data_is_refused() -> None:
         message
     )
     assert "reads an array or is not affine" in message
-    assert "'with when(condition):'" in message
+    assert "'if condition:'" in message
 
 
 def test_a_reduction_condition_with_not_equal_is_refused() -> None:
@@ -1683,7 +1681,7 @@ def test_a_guard_against_a_real_scalar_leaves_the_domain_unnarrowed() -> None:
     # kernel then disagreed with the native run.
     def below(a: Real, y: Arr[Fin[n], Real]):  # noqa: F821
         for i in y.dom:
-            with when(i < a):
+            if i < a:
                 y[i] = 1.0
 
     (stmt,) = term_of(below).stmts
@@ -1700,7 +1698,7 @@ def test_a_guard_against_a_real_scalar_leaves_the_domain_unnarrowed() -> None:
 def test_the_same_guard_against_an_integral_scalar_still_narrows() -> None:
     def below(a: Nat, y: Arr[Fin[n], Real]):  # noqa: F821
         for i in y.dom:
-            with when(i < a):
+            if i < a:
                 y[i] = 1.0
 
     (stmt,) = term_of(below).stmts
@@ -1713,7 +1711,7 @@ def test_the_same_guard_against_an_integral_scalar_still_narrows() -> None:
 def test_only_the_conjuncts_isl_cannot_state_are_left_out() -> None:
     def clipped(a: Real, y: Arr[Fin[n], Real]):  # noqa: F821
         for i in y.dom:
-            with when((i < a) & (i + 1 < y.dom.size)):
+            if (i < a) & (i + 1 < y.dom.size):
                 y[i] = 1.0
 
     (stmt,) = term_of(clipped).stmts
@@ -1726,7 +1724,7 @@ def test_only_the_conjuncts_isl_cannot_state_are_left_out() -> None:
 def test_a_data_guard_is_recorded_as_unnarrowed_too() -> None:
     def positive(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
         for i in y.dom:
-            with when(x[i] > 0.0):
+            if x[i] > 0.0:
                 y[i] = x[i]
 
     (stmt,) = term_of(positive).stmts
@@ -1741,12 +1739,12 @@ def test_a_guard_the_trace_can_evaluate_is_a_constant() -> None:
 
     def higher(y: Arr[Fin[n], Real]):  # noqa: F821
         for i in y.dom:
-            with when((order > 1) & (i + 1 < y.dom.size)):
+            if (order > 1) & (i + 1 < y.dom.size):
                 y[i] = 1.0
 
     def never(y: Arr[Fin[n], Real]):  # noqa: F821
         for i in y.dom:
-            with when(order > 3):
+            if order > 3:
                 y[i] = 1.0
 
     (stmt,) = term_of(higher).stmts
@@ -1791,7 +1789,7 @@ def test_a_reduction_condition_against_an_integral_scalar_is_its_domain() -> Non
 def flipped(y: Arr[Fin[n], Real]):  # noqa: F821
     """``~`` on a Python bool is bitwise: the guard is -2 or -1, always true."""
     for i in y.dom:
-        with when(~(i > 0)):
+        if ~(i > 0):
             y[i] = 1.0
 
 
@@ -1819,7 +1817,7 @@ def test_a_numpy_integer_guard_is_refused_natively_as_well() -> None:
     # & with an integer operand is bitwise too: True & 2 is 0.
     def masked(m: Arr[Fin[n], Nat], y: Arr[Fin[n], Real]):  # noqa: F821
         for i in y.dom:
-            with when((i >= 0) & m[i]):
+            if (i >= 0) & m[i]:
                 y[i] = 1.0
 
     from loopty.kernel import Kernel
@@ -1833,7 +1831,7 @@ def test_a_guard_that_is_a_bool_runs_natively() -> None:
     # loop variables is a Python bool.
     def complement(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
         for i in y.dom:
-            with when(~(x[i] > 0.0) & (i + 1 < y.dom.size)):
+            if ~(x[i] > 0.0) & (i + 1 < y.dom.size):
                 y[i] = 1.0
 
     from loopty.kernel import Kernel
@@ -1851,8 +1849,8 @@ def test_a_guard_under_a_false_guard_is_not_asked_natively() -> None:
 
     def weighted(w: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
         for i in y.dom:
-            with when(i + 1 < y.dom.size):
-                with when(w[i + 1]):
+            if i + 1 < y.dom.size:
+                if w[i + 1]:
                     y[i] = 1.0
 
     y = Arr.zeros(3)
@@ -1865,7 +1863,7 @@ def test_a_concrete_integer_guard_is_refused_while_tracing() -> None:
 
     def constant(y: Arr[Fin[n], Real]):  # noqa: F821
         for i in y.dom:
-            with when(flag):
+            if flag:
                 y[i] = 1.0
 
     with pytest.raises(TraceError, match="is the integer 1, not a truth value"):

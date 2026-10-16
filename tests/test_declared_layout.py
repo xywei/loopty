@@ -20,7 +20,7 @@ import pytest
 from lanky.prelude import Nat, Real
 from lanky.terms import evaluate_annotations
 
-from loopty import Arr, Fin, reduce_sum, when
+from loopty import Arr, Fin, reduce_sum
 from loopty.faithful import KIND, SAMPLES, sample_arguments
 from loopty.handles import scope
 from loopty.interpret import interpret
@@ -49,7 +49,7 @@ def row_sums_then_next_count(
     """Sum row ``r``, then clear the length of row ``r + 1``."""
     for r in y.dom:
         y[r] = reduce_sum(val[r, j] for j in val.dom[r])
-        with when(r + 1 < y.dom.size):
+        if r + 1 < y.dom.size:
             cnt[r + 1] = 0
 
 
@@ -301,7 +301,7 @@ def sums_then_next_count_in_a_loop_of_the_row(
     for r in y.dom:
         for i in x.dom:
             y[r] = y[r] + x[i] + reduce_sum(val[r, j] for j in val.dom[r])
-            with when(r + 1 < y.dom.size):
+            if r + 1 < y.dom.size:
                 cnt[r + 1] = 0
 
 
@@ -562,7 +562,7 @@ def diagonal_recounted(
     for r in y.dom:
         for j in val.dom[r]:
             for k in val.dom[r]:
-                with when(k == j):
+                if k == j:
                     y[r] = y[r] + val[r, k]
             cnt[r] = 1
 
@@ -576,7 +576,7 @@ def lower_triangle_recounted(
     for r in y.dom:
         for j in val.dom[r]:
             for k in val.dom[r]:
-                with when(k <= j):
+                if k <= j:
                     y[r] = y[r] + val[r, k]
             cnt[r] = 1
 
@@ -591,7 +591,7 @@ def next_entry_recounted(
         for j in val.dom[r]:
             cnt[r] = 3
             for k in val.dom[r]:
-                with when(k == j + 1):
+                if k == j + 1:
                     y[r] = y[r] + val[r, k]
 
 
@@ -995,7 +995,7 @@ def counts_cleared_where_flagged(
 ):
     """A row's length cleared under a guard isl cannot state."""
     for r in y.dom:
-        with when(flag[r] != 0):
+        if flag[r] != 0:
             cnt[r] = 0
         y[r] = reduce_sum(val[r, j] for j in val.dom[r])
 
@@ -1009,7 +1009,7 @@ def start_within_its_slack(
 ):
     """A start moved on by ``s[r]`` where the moved row ends before the next."""
     for r in y.dom:
-        with when(
+        if (
             (r + 1 < y.dom.size) & (off[r] + cnt[r] + s[r] <= off[r + 1] - cnt[r])
         ):
             off[r] = off[r] + s[r]
@@ -1060,7 +1060,7 @@ def start_moved_by_a_bit(
 ):
     """A start moved on by 0 or 1 where its row leaves a cell of room."""
     for r in y.dom:
-        with when((r + 1 < y.dom.size) & (off[r] + cnt[r] + 1 <= off[r + 1])):
+        if (r + 1 < y.dom.size) & (off[r] + cnt[r] + 1 <= off[r + 1]):
             off[r] = off[r] + bit[r]
         y[r] = reduce_sum(val[r, j] for j in val.dom[r])
 
@@ -1210,7 +1210,7 @@ def next_row_emptied_in_a_loop_of_the_row(
     for r in y.dom:
         for j in val.dom[r]:
             y[r] = y[r] + val[r, j]
-            with when(r + 1 < y.dom.size):
+            if r + 1 < y.dom.size:
                 cnt[r + 1] = 0
 
 
@@ -1271,7 +1271,7 @@ def emptied_then_moved_onto(
         for j in val.dom[r]:
             val[r, j] = val[r, j] + 1.0
         cnt[r] = 0
-        with when(r + 1 < cnt.dom.size):
+        if r + 1 < cnt.dom.size:
             off[r + 1] = off[r] + cnt[r]
 
 

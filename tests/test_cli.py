@@ -1034,7 +1034,7 @@ from __future__ import annotations
 import numpy as np
 from lanky.prelude import Nat, Real
 
-from loopty import Arr, Fin, Schedule, kernel, reduce_sum, when
+from loopty import Arr, Fin, Schedule, kernel, reduce_sum
 
 
 @kernel
@@ -1045,7 +1045,7 @@ def clear_next(
 ):
     for r in y.dom:
         y[r] = reduce_sum(val[r, j] for j in val.dom[r])
-        with when(r + 1 < y.dom.size):
+        if r + 1 < y.dom.size:
             cnt[r + 1] = 0
 
 
@@ -1148,7 +1148,7 @@ MOVES_ROWS = (
         "    val:",
     )
     .replace(
-        "        with when(r + 1 < y.dom.size):\n            cnt[r + 1] = 0\n",
+        "        if r + 1 < y.dom.size:\n            cnt[r + 1] = 0\n",
         "        off[r] = s[r]\n",
     )
     .replace(
@@ -1248,13 +1248,13 @@ from __future__ import annotations
 import numpy as np
 from lanky.prelude import Real
 
-from loopty import Arr, Fin, kernel, when
+from loopty import Arr, Fin, kernel
 
 
 @kernel
 def flipped(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):
     for i in y.dom:
-        with when(~(i > 0)):
+        if ~(i > 0):
             y[i] = x[i]
 
 
@@ -1302,20 +1302,20 @@ from __future__ import annotations
 
 from lanky.prelude import Real
 
-from loopty import Arr, Fin, kernel, when
+from loopty import Arr, Fin, kernel
 
 
 @kernel
 def clipped(a: Real, x: Arr[Fin[m], Real], y: Arr[Fin[n], Real]):
     for i in y.dom:
-        with when((i < a) & (a < x.dom.size)):
+        if (i < a) & (a < x.dom.size):
             y[i] = x[i]
 
 
 @kernel
 def stated(u: Arr[Fin[n], Real], v: Arr[Fin[n], Real]):
     for i in u.dom:
-        with when(i + 1 <= u.dom.size):
+        if i + 1 <= u.dom.size:
             v[i] = u[i + 1]
 '''
 

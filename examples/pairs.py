@@ -71,11 +71,10 @@ def pairs(
     e: Arr[Fin[n], Real],
 ):
     """The interaction of every pair, then every particle's share of them."""
-    for i in f.dom:
-        for j in f.dom[i]:
-            dx = x[i] - x[j]
-            dy = y[i] - y[j]
-            f[i, j] = q[i] * q[j] / (1.0 + dx * dx + dy * dy)
+    for i, j in f.dom:
+        dx = x[i] - x[j]
+        dy = y[i] - y[j]
+        f[i, j] = q[i] * q[j] / (1.0 + dx * dx + dy * dy)
     for p in e.dom:
         e[p] = reduce_sum(f[p, j] for j in f.dom[p]) + reduce_sum(
             f[k, p] for k in e.dom if k > p

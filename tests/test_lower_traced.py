@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 from lanky.prelude import Bool, Nat, Real
 
-from loopty import Arr, Fin, kernel, when
+from loopty import Arr, Fin, kernel
 from loopty import sum as reduce_sum
 from loopty.isl_reading import declining
 
@@ -679,7 +679,7 @@ def guarded_inner(
     """The statement inside the inner loop skips the first row; the other not."""
     for r in y.dom:
         for j in a.dom[r]:
-            with when(r > 0):
+            if r > 0:
                 y[r] = y[r] + a[r, j]
         z[r] = 1.0
 
@@ -1419,7 +1419,7 @@ def added_up(m: Nat, x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
 def first_rows(x: Arr[Fin[n], Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
     """The first three rows summed, under a guard on the row."""
     for i in y.dom:
-        with when(i < 3):
+        if i < 3:
             y[i] = reduce_sum(x[i, j] for j in x.dom[i])
 
 
@@ -1450,7 +1450,7 @@ def test_a_sum_bounded_by_a_scalar_or_under_a_guard_names_no_loop() -> None:
 def never_summed(x: Arr[Fin[n], Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
     """A sum under a guard that holds nowhere."""
     for i in y.dom:
-        with when(i < 0):
+        if i < 0:
             y[i] = reduce_sum(x[i, j] for j in x.dom[i])
 
 
@@ -1648,7 +1648,7 @@ def test_an_equality_guard_and_an_equality_condition_lower_and_run() -> None:
     @kernel
     def first(y: Arr[Fin[n], Real]):  # noqa: F821
         for i in y.dom:
-            with when(i == 0):
+            if i == 0:
                 y[i] = 1.0
 
     @kernel
@@ -1680,7 +1680,7 @@ def test_a_guard_against_a_real_scalar_agrees_on_the_c_target() -> None:
     @kernel
     def below(a: Real, y: Arr[Fin[n], Real]):  # noqa: F821
         for i in y.dom:
-            with when(i < a):
+            if i < a:
                 y[i] = 1.0
 
     fact = LoopyExecutor().differential(
@@ -1723,32 +1723,32 @@ def test_a_guard_that_reads_only_scalars_is_kept_in_the_compiled_kernel() -> Non
     @kernel
     def g_flag(flag: Bool, y: Arr[Fin[n], Real]):  # noqa: F821
         for i in y.dom:
-            with when(flag):
+            if flag:
                 y[i] = 1.0
 
     @kernel
     def g_real(a: Real, y: Arr[Fin[n], Real]):  # noqa: F821
         for i in y.dom:
-            with when(a > 0.5):
+            if a > 0.5:
                 y[i] = 1.0
 
     @kernel
     def g_cell(flag: Bool, y: Arr[Fin[n + 1], Real]):  # noqa: F821
-        with when(flag):
+        if flag:
             y[0] = 1.0
 
     @kernel
     def g_two(flag: Bool, x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
         for i in x.dom:
-            with when(flag):
+            if flag:
                 x[i] = 1.0
         for i in y.dom:
-            with when(flag):
+            if flag:
                 y[i] = 2.0
 
     @kernel
     def g_nest(flag: Bool, y: Arr[Fin[n], Fin[m], Real]):  # noqa: F821
-        with when(flag):
+        if flag:
             for i in y.dom:
                 for j in y.dom[i]:
                     y[i, j] = 1.0
@@ -1757,7 +1757,7 @@ def test_a_guard_that_reads_only_scalars_is_kept_in_the_compiled_kernel() -> Non
     def g_read(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
         # One cell of an array names no loop variable either.
         for i in y.dom:
-            with when(x[0] > 0.5):
+            if x[0] > 0.5:
                 y[i] = 1.0
 
     cases = (

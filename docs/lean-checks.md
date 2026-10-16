@@ -89,8 +89,8 @@ LEAN jacobi at stencil_skew.py:62: u[t, i - 1] is in bounds for every instance o
       omega
 ```
 
-`h2` to `h4` are the guard the kernel wrote, `with when((t + 1 < steps.size) &
-(i > 0) & (i + 1 < row.size))`, and `h5` to `h8` its two loops. The file the
+`h2` to `h4` are the condition the kernel wrote, `if t + 1 < steps.size and
+i > 0 and i + 1 < row.size:`, and `h5` to `h8` its two loops. The file the
 source is part of replays with `lean` alone. `loopty run --show-lean` does the
 same for the casts.
 

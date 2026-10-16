@@ -26,7 +26,6 @@ from loopty import (
     kernel,
     program,
     reduce_sum,
-    when,
 )
 from loopty.executor import LoopyExecutor, emit_code
 from loopty.flow import dependences
@@ -95,7 +94,7 @@ def flux(u: Arr[Fin[n], Real], f: Arr[Fin[n], Real]):  # noqa: F821
 def divergence(f: Arr[Fin[n], Real], rhs: Arr[Fin[n], Real]):  # noqa: F821
     """Centred divergence of the flux, inside the boundary."""
     for i in rhs.dom:
-        with when((i > 0) & (i + 1 < rhs.dom.size)):
+        if (i > 0) & (i + 1 < rhs.dom.size):
             rhs[i] = -(f[i + 1] - f[i - 1]) / 2
 
 
@@ -249,7 +248,7 @@ def keep_unmarked(
 ):
     """Copy the entries ``mark`` did not mark."""
     for i in u.dom:
-        with when(~b[i]):
+        if ~b[i]:
             y[i] = u[i]
 
 
@@ -1583,7 +1582,7 @@ def clear_next(
     """Sum a row, then clear the length of the next one."""
     for r in y.dom:
         y[r] = reduce_sum(val[r, j] for j in val.dom[r])
-        with when(r + 1 < y.dom.size):
+        if r + 1 < y.dom.size:
             cnt[r + 1] = 0
 
 

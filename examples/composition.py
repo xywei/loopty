@@ -52,7 +52,7 @@ from __future__ import annotations
 import numpy as np
 from lanky.prelude import Real
 
-from loopty import Arr, Fin, Schedule, kernel, program, when
+from loopty import Arr, Fin, Schedule, kernel, program
 
 #: Sixteen points: enough for the boundary to be visible, small enough that the
 #: three commands each take about a second.
@@ -70,7 +70,7 @@ def flux(u: Arr[Fin[n], Real], f: Arr[Fin[n], Real]):
 def divergence(f: Arr[Fin[n], Real], rhs: Arr[Fin[n], Real]):
     """The centred divergence of the flux, at the interior points."""
     for i in rhs.dom:
-        with when((i > 0) & (i + 1 < rhs.dom.size)):
+        if i > 0 and i + 1 < rhs.dom.size:
             rhs[i] = -(f[i + 1] - f[i - 1]) / 2
 
 

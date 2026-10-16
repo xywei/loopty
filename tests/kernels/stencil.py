@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from lanky.prelude import Real
 
-from loopty import Arr, Fin, kernel, when
+from loopty import Arr, Fin, kernel
 
 
 @kernel
@@ -31,7 +31,7 @@ def jacobi(u: Arr[Fin[nt], Fin[nx], Real]):
     for t in steps:
         row = u.dom[t]
         for i in row:
-            with when((t + 1 < steps.size) & (i > 0) & (i + 1 < row.size)):
+            if (t + 1 < steps.size) & (i > 0) & (i + 1 < row.size):
                 u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2
 
 

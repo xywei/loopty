@@ -16,7 +16,7 @@ import pytest
 from lanky.prelude import Nat, Real
 
 import hand_terms as ht
-from loopty import Arr, Fin, kernel, when
+from loopty import Arr, Fin, kernel
 from loopty import sum as reduce_sum
 from loopty.executor import (
     TOLERANCE,
@@ -192,7 +192,7 @@ def test_a_disagreement_is_refuted_rather_than_raised() -> None:
 def flipped(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
     """``~`` on a Python bool is bitwise, so natively this guard is an integer."""
     for i in y.dom:
-        with when(~(i > 0)):
+        if ~(i > 0):
             y[i] = x[i]
 
 

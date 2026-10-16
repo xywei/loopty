@@ -17,7 +17,7 @@ import pymbolic.primitives as prim
 import pytest
 from lanky.prelude import Nat, Real
 
-from loopty import Arr, Fin, kernel, reduce_sum, when
+from loopty import Arr, Fin, kernel, reduce_sum
 from loopty.interpret import InterpretError, TooLarge, interpret
 from loopty.term import Access, ArrType, Stmt, Term
 
@@ -96,7 +96,7 @@ def test_the_result_names_the_arrays_the_term_writes() -> None:
 @kernel
 def interleaved(a: Arr[Fin[n], Real], b: Arr[Fin[n], Real]):  # noqa: F821
     for i in a.dom:
-        with when(i > 0):
+        if i > 0:
             a[i] = b[i - 1] + 1.0
         b[i] = a[i] * 2.0
 
@@ -217,7 +217,7 @@ def masked(
     for t in out.dom:
         for j in lst.dom[t]:
             contribution[t, j] = 0.0
-            with when(lst[t, j] != t):
+            if lst[t, j] != t:
                 contribution[t, j] = 1.0 / (x[t] - x[lst[t, j]])
         out[t] = reduce_sum(contribution[t, j] for j in lst.dom[t])
 

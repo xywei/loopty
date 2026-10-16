@@ -248,11 +248,10 @@ def mass_ffc(x: Arr[Fin[3], Fin[2], Real], A: Arr[Fin[3], Fin[3], Real]) -> all(
     compared with its native one.
     """
     det = abs(jacobian(x))
-    for j in A.dom:
-        for k in A.dom[j]:
-            A[j, k] = reduce_sum(
-                FE0[ip, j] * FE0[ip, k] * W3[ip] * det for ip in W3.dom
-            )
+    for j, k in A.dom:
+        A[j, k] = reduce_sum(
+            FE0[ip, j] * FE0[ip, k] * W3[ip] * det for ip in W3.dom
+        )
 
 
 @kernel

@@ -11,22 +11,25 @@ import pytest
 from lanky.ledger import Ledger, Status
 from lanky.plugins import registry
 from lanky.prelude import Nat, Real
+from lanky.terms import render
 
-from loopty import Arr, Fin, kernel, program, when
+import loopty
+from loopty import Arr, Fin, kernel, program
 from loopty.faithful import KIND
 from loopty.kernel import Kernel, KernelTheory, Program
+from loopty.trace import TraceError
 
 KERNELS = Path(__file__).parent / "kernels"
 
-#: A module that re-exports the guard under another name, so that a body can
-#: reach it as an attribute without the identifier ``when`` appearing anywhere.
+#: A module that re-exports loopty 0.3's guard under another name, so that a
+#: body can reach it as an attribute without the identifier ``when`` anywhere.
 guards = ModuleType("guards")
-guards.mask = when
+guards.mask = loopty.when
 
 
 def shift_guarded(v, i, u, size) -> None:
-    """Write ``u[i + 1]`` into ``v[i]``, under a guard the *caller* never names."""
-    with when(i + 1 < size):
+    """Write ``u[i + 1]`` into ``v[i]``, on a branch the *caller* never names."""
+    if i + 1 < size:
         v[i] = u[i + 1]
 
 
@@ -389,11 +392,9 @@ def test_a_restatement_rests_on_the_callees_fact_and_not_a_namesake(
     assert post["id"] == theirs
 
 
-def test_a_guard_is_found_under_an_aliased_import() -> None:
-    # ``guards_writes`` used to be ``"when" in co_names``, so importing the
-    # guard under another name ran the native body unmasked: the write under a
-    # false condition was performed, and ``python file.py`` computed something
-    # the lowered kernel does not.
+def test_when_is_refused_with_the_if_to_write_under_an_aliased_import() -> None:
+    # loopty 0.4 removed ``with when(...)``: whatever name it is reached by,
+    # using it raises, natively and traced, and shows the ``if`` to write.
     from loopty import when as guard
 
     @kernel
@@ -402,30 +403,18 @@ def test_a_guard_is_found_under_an_aliased_import() -> None:
             with guard(i + 1 < u.dom.size):
                 v[i] = u[i + 1]
 
-    assert aliased.guards_writes
     out = Arr.zeros(3)
-    aliased(Arr.from_numpy(np.array([1.0, 2.0, 3.0])), out)
-    assert list(out.numpy()) == [2.0, 3.0, 0.0]
+    with pytest.raises(TraceError, match="removed") as native:
+        aliased(Arr.from_numpy(np.array([1.0, 2.0, 3.0])), out)
+    assert "    if i + 1 < u.dom.size:\n        ..." in str(native.value)
+    with pytest.raises(TraceError, match="removed") as traced:
+        aliased.trace()
+    assert "    if i + 1 < u.dom.size:\n        ..." in str(traced.value)
 
 
-def test_a_guard_is_found_through_a_module_attribute() -> None:
-    import loopty
-
-    @kernel
-    def qualified(u: Arr[Fin[n], Real], v: Arr[Fin[n], Real]):  # noqa: F821
-        for i in u.dom:
-            with loopty.when(i + 1 < u.dom.size):
-                v[i] = u[i + 1]
-
-    assert qualified.guards_writes
-    out = Arr.zeros(3)
-    qualified(Arr.from_numpy(np.array([1.0, 2.0, 3.0])), out)
-    assert list(out.numpy()) == [2.0, 3.0, 0.0]
-
-
-def test_a_guard_is_found_through_a_renamed_module_attribute() -> None:
+def test_when_is_refused_through_a_renamed_module_attribute() -> None:
     # Neither the name ``when`` nor a global bound to it appears: the body
-    # reaches the guard as ``guards.mask``. Identity is what finds it.
+    # reaches loopty 0.3's guard as ``guards.mask``.
     @kernel
     def renamed(u: Arr[Fin[n], Real], v: Arr[Fin[n], Real]):  # noqa: F821
         for i in u.dom:
@@ -433,17 +422,26 @@ def test_a_guard_is_found_through_a_renamed_module_attribute() -> None:
                 v[i] = u[i + 1]
 
     assert "when" not in renamed.fn.__code__.co_names
-    assert renamed.guards_writes
+    with pytest.raises(TraceError, match="if i \\+ 1 < u.dom.size:"):
+        renamed(Arr.from_numpy(np.array([1.0, 2.0, 3.0])), Arr.zeros(3))
+
+
+def test_an_if_through_a_module_attribute_runs_as_python_runs_it() -> None:
+    @kernel
+    def qualified(u: Arr[Fin[n], Real], v: Arr[Fin[n], Real]):  # noqa: F821
+        for i in u.dom:
+            if i + 1 < u.dom.size:
+                v[i] = u[i + 1]
+
     out = Arr.zeros(3)
-    renamed(Arr.from_numpy(np.array([1.0, 2.0, 3.0])), out)
+    qualified(Arr.from_numpy(np.array([1.0, 2.0, 3.0])), out)
     assert list(out.numpy()) == [2.0, 3.0, 0.0]
+    (stmt,) = qualified.term.stmts
+    assert render(stmt.guard) == "i + 1 < n"
 
 
-def test_every_native_run_sees_a_masking_view_that_shares_the_buffer() -> None:
-    # The contract used to be "an unguarded kernel is called with exactly the
-    # objects it was given", which made masking depend on a static guess about
-    # the body. It is now "every array argument is a masking view", because no
-    # inspection can decide whether a helper opens a guard. The view shares the
+def test_every_native_run_sees_a_view_that_shares_the_buffer() -> None:
+    # Every array argument is the native run's view, which shares the
     # buffer, so the results are still written in place.
     given = Arr.from_numpy(np.array([3.0, 4.0]))
     seen = []
@@ -455,56 +453,49 @@ def test_every_native_run_sees_a_masking_view_that_shares_the_buffer() -> None:
             x[i] = 2.0 * x[i]
 
     peek(given)
-    assert not scale.guards_writes
     assert seen[0] is not given
     assert isinstance(seen[0], Arr)
     assert seen[0].numpy() is given.numpy()
     assert list(given.numpy()) == [6.0, 8.0]
 
 
-def test_a_guard_opened_by_a_global_helper_masks_the_native_write() -> None:
-    # The body names no guard at all: ``shift_guarded`` opens it. The guard
-    # detection used to compare the helper with ``when`` and never look inside
-    # it, so the native run performed the guarded write unmasked and computed
-    # something the lowered kernel does not.
+def test_a_branch_in_a_global_helper_is_traced_and_runs_natively() -> None:
+    # The body names no condition at all: ``shift_guarded`` branches. The
+    # trace follows the helper's if into both of its branches, and the native
+    # run takes the one each point takes.
     @kernel
     def via_helper(u: Arr[Fin[n], Real], v: Arr[Fin[n], Real]):  # noqa: F821
         for i in u.dom:
             shift_guarded(v, i, u, u.dom.size)
 
-    assert "when" not in via_helper.fn.__code__.co_names
-    assert via_helper.guards_writes
     out = Arr.zeros(3)
     via_helper(Arr.from_numpy(np.array([1.0, 2.0, 3.0])), out)
     assert list(out.numpy()) == [2.0, 3.0, 0.0]
+    (stmt,) = via_helper.term.stmts
+    assert render(stmt.guard) == "i + 1 < n"
 
 
-def test_a_guard_opened_through_a_bound_method_masks_the_native_write() -> None:
-    @kernel
-    def via_method(u: Arr[Fin[n], Real], v: Arr[Fin[n], Real]):  # noqa: F821
-        for i in u.dom:
-            bound_shift(v, i, u, u.dom.size)
+@pytest.mark.parametrize("helper", ["bound_shift", "shifter.shift"])
+def test_a_branch_in_a_method_is_traced_and_runs_natively(helper: str) -> None:
+    if helper == "bound_shift":
 
-    assert via_method.guards_writes
+        @kernel
+        def via(u: Arr[Fin[n], Real], v: Arr[Fin[n], Real]):  # noqa: F821
+            for i in u.dom:
+                bound_shift(v, i, u, u.dom.size)
+
+    else:
+
+        @kernel
+        def via(u: Arr[Fin[n], Real], v: Arr[Fin[n], Real]):  # noqa: F821
+            for i in u.dom:
+                shifter.shift(v, i, u, u.dom.size)
+
     out = Arr.zeros(3)
-    via_method(Arr.from_numpy(np.array([1.0, 2.0, 3.0])), out)
+    via(Arr.from_numpy(np.array([1.0, 2.0, 3.0])), out)
     assert list(out.numpy()) == [2.0, 3.0, 0.0]
-
-
-def test_a_guard_no_static_walk_can_see_still_masks_the_native_write() -> None:
-    # The helper is reached as an attribute of an ordinary object, which
-    # ``opens_a_guard`` deliberately does not follow (reading attributes off an
-    # arbitrary object can run a property). The flag is therefore False and the
-    # write is masked anyway, which is the point of masking every run.
-    @kernel
-    def via_attribute(u: Arr[Fin[n], Real], v: Arr[Fin[n], Real]):  # noqa: F821
-        for i in u.dom:
-            shifter.shift(v, i, u, u.dom.size)
-
-    assert not via_attribute.guards_writes
-    out = Arr.zeros(3)
-    via_attribute(Arr.from_numpy(np.array([1.0, 2.0, 3.0])), out)
-    assert list(out.numpy()) == [2.0, 3.0, 0.0]
+    (stmt,) = via.term.stmts
+    assert render(stmt.guard) == "i + 1 < n"
 
 
 def test_a_helper_that_iterates_dom_accepts_a_bare_numpy_argument() -> None:
@@ -575,7 +566,7 @@ def test_a_negative_read_under_a_false_guard_still_answers_zero() -> None:
     @kernel
     def guarded_lag(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
         for i in y.dom:
-            with when(i > 0):
+            if i > 0:
                 y[i] = x[i - 1]
 
     y = np.full(3, -1.0)

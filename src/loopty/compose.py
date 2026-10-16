@@ -1617,6 +1617,13 @@ class _Composer:
                     text=stmt.text,
                     spelled=stmt.spelled or stmt.inames,
                     unrolled=stmt.unrolled,
+                    path=tuple(
+                        (
+                            rename_expr(condition, names, exprs),
+                            rename_set(points, names, exprs),
+                        )
+                        for condition, points in stmt.path
+                    ),
                 )
             )
         self.blocks += top
@@ -3109,12 +3116,18 @@ class _Composer:
         oks = [Comparison(Subscript(Var(flag), 0), "==", 0) for flag in flags]
         parts = [*oks, *([stmt.guard] if stmt.guard is not None else [])]
         guard = parts[0] if len(parts) == 1 else LogicalAnd(tuple(parts))
+        loops = stmt.loop_domain if stmt.loop_domain is not None else stmt.domain
         return dataclasses.replace(
             stmt,
             guard=guard,
             unnarrowed=(
                 *((render(ok), _NOT_AFFINE) for ok in oks),
                 *stmt.unnarrowed,
+            ),
+            # A flag is read at every point of the loops, before the
+            # statement's own conditions are asked (Stmt.path).
+            path=(
+                ((*((ok, loops) for ok in oks), *stmt.path)) if stmt.path else ()
             ),
         )
 
@@ -3194,6 +3207,10 @@ class _Composer:
                 None
                 if stmt.loop_domain is None
                 else rename_set(stmt.loop_domain, {}, exprs)
+            ),
+            path=tuple(
+                (rename_expr(condition, {}, exprs), rename_set(points, {}, exprs))
+                for condition, points in stmt.path
             ),
         )
 

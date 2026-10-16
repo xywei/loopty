@@ -1752,9 +1752,9 @@ node, the normal and the area element `sJ` at every face node. The program
 `normal_velocity`), computes the upwind flux at every face node (`upwind`),
 the weak divergence (`volume`) and the lift (`lift`). The flux reads the
 neighbor's value through the face maps, `u[nbr[e, f], outside[f, a, b, 0],
-...]`, in bounds by type, and is written as libParanumal writes it, the
-average and half the jump, which is grudge's `where(v.n > 0, ...)` with no
-branch. The inverse mass is pushed inward, as grudge PR #362 rewrites it:
+...]`, in bounds by type, and is grudge's `where(v.n > 0, ...)` written as
+Python writes it, `vn * (inside if vn > 0 else outside)`: one statement,
+whose value the condition chooses, `?:` in C. The inverse mass is pushed inward, as grudge PR #362 rewrites it:
 the volume term is one pass of `D = M^-1 S^T` along each axis and a face's
 term the column `M^-1 e` of its end, and the two theorems
 `inverse_mass_inward` and `lift_inward` state that rearrangement for every

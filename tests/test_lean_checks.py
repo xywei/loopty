@@ -729,13 +729,13 @@ GUARDED = """
 from __future__ import annotations
 
 from lanky.prelude import Real
-from loopty import Arr, Fin, kernel, when
+from loopty import Arr, Fin, kernel
 
 
 @kernel
 def guarded(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real], z: Arr[Fin[n], Real]):
     for i in y.dom:
-        with when(x[i] > 0):
+        if x[i] > 0:
             y[i] = 1.0
     for j in z.dom:
         z[j] = y[j]
@@ -1360,7 +1360,7 @@ VARIANT = """
 from __future__ import annotations
 
 from lanky.prelude import Real
-from loopty import Arr, Fin, kernel, when
+from loopty import Arr, Fin, kernel
 
 
 @kernel
@@ -1369,7 +1369,7 @@ def variant(u: Arr[Fin[nt], Fin[nx], Real]):
     for t in steps:
         row = u.dom[t]
         for i in row:
-            with when({guard}):
+            if {guard}:
                 u[{write}] = (u[{first}] + u[{second}]) / 2
 """
 
@@ -1532,7 +1532,7 @@ MUTANT = """
 from __future__ import annotations
 
 from lanky.prelude import Real
-from loopty import Arr, Fin, kernel, when
+from loopty import Arr, Fin, kernel
 
 
 @kernel
@@ -1549,12 +1549,12 @@ def mutant(u: Arr[Fin[nt], Fin[nx], Real]):
     "body",
     [
         # the stencil as written: every access in bounds
-        "with when((t + 1 < steps.size) & (i > 0) & (i + 1 < row.size)):\n"
+        "if (t + 1 < steps.size) & (i > 0) & (i + 1 < row.size):\n"
         "                u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2",
         # its guard dropped: u[t + 1, i] and u[t, i - 1] leave the array
         "u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2",
         # one subscript moved a cell further than the guard allows
-        "with when((t + 1 < steps.size) & (i > 0) & (i + 1 < row.size)):\n"
+        "if (t + 1 < steps.size) & (i > 0) & (i + 1 < row.size):\n"
         "                u[t + 1, i] = (u[t, i - 1] + u[t, i + 2]) / 2",
     ],
     ids=["as written", "guard dropped", "subscript moved"],
