@@ -118,8 +118,10 @@ for box, a, b in R.dom:
   and against loopy main's current head. Every example's ledger is unchanged.
   The generated code differs in the order of an affine expression's terms, in
   a division of a size (below), in the pieces of the tiled diamond's inner
-  bounds, which visit the same iterations, and in constants loopy main leaves
-  unfolded in an unrolled loop's subscripts, `cell[3 * 2 + 12 * c_outer]`. A
+  bounds, which visit the same iterations, and in a subscript simplified
+  before a loop's value is put in: constants loopy main leaves unfolded in an
+  unrolled loop's subscripts, `cell[3 * 2 + 12 * c_outer]`, and a subscript
+  over a group axis it folds, `R[-20 + 11 * a_0 + b_0 + 121 * gid(0)]`. A
   loop over a product of sizes, `Fin[n * m]`, which does not run compiled on
   loopy 2025.2 either (#197), stops earlier on loopy main, in loopy's bounds
   check, which cannot read the shape `n * m` (#245).
@@ -224,6 +226,10 @@ for box, a, b in R.dom:
   outermost first, `2*b_inner_step - a_outer - b_outer - a_inner` for the
   tiled diamond, rather than in the order of the domain's dimensions, which
   loopy main keeps in namedisl's order.
+- The hoisting of a sum's invariant operands (`loopty.hoist`) reads loopy
+  main's domains and assumptions through `loopty.named`, and builds an
+  array's box itself, since loopy main has no `make_slab`: the same operands
+  move on both loopys.
 - **A schedule runs without the zeros no read sees** (#290). Where isl
   decides that every cell a program's calls read of an array it makes, an
   earlier call stored, the definedness `substitute` and `contract` ask, the

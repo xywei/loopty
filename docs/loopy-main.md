@@ -72,8 +72,9 @@ Each takes an object already on its side as it is. A domain comes back as an
    a raw islpy set (to stop working in 2028). loopty crosses at
    `loopty.named`, in `lower.lower_generic` (the kernel's domains, its
    assumptions, a narrowed statement's predicate), in the affine rewrite and
-   the counted loops of `schedule`, and in the buildability checks that read a
-   kernel's domains.
+   the counted loops of `schedule`, in the buildability checks that read a
+   kernel's domains, and in the hoisting of a sum's invariant operands
+   (`loopty.hoist`, item 10).
 2. **loopy's reader takes a mapping of names**, `aff_from_expr(vars_to_aff,
    expr)` where 2025.2 took a space, and its guard,
    `with_aff_conversion_guard`, no longer catches a `TypeError`. The readings
@@ -128,6 +129,16 @@ Each takes an object already on its side as it is. A domain comes back as an
    when it is called (#197). An access at an affine index inside loops that
    bring both sizes in fails in the same place on both (#245). loopty's own
    in-bounds fact for such an access is decided as before.
+10. **`loopy.isl_helpers.make_slab` is gone**, and `get_access_map` takes
+    and gives namedisl. The hoisting of a sum's invariant operands asks
+    loopy's own question of its bounds check, whether every cell an operand
+    reads is in its array at every instance of the statement (note 33 of
+    [loopy-notes.md](loopy-notes.md)). It reads the instruction's domain,
+    the kernel's assumptions and the loops' domains with `as_isl`, gives
+    the instances to `get_access_map` with `to_named_set`, and builds the
+    array's box itself, `0 <= cell < extent` on each axis, reading the
+    extent with `loopty.named.aff_from_expr`, which declines `n * m` as
+    `make_slab`'s reading did. The same operands move on both loopys.
 
 ## What differs in the generated code
 
@@ -143,8 +154,7 @@ Each takes an object already on its side as it is. A domain comes back as an
     `cnt[4 * t_out + t_in]` and `R[11 * a + b + 121 * i]` for
     `R[121 * i + 11 * a + b]`, which is how loopy main prints an affine
     expression over namedisl's order of names. It is the only difference in
-    `advection` (`L[n + k_0]` for `L[k_0 + n]`), `l2p` and
-    `storage_layouts`;
+    `advection` (`L[n + k_0]` for `L[k_0 + n]`) and `storage_layouts`;
   - and, where a split or a tile divides a size, plain division in place of
     loopy's floor-division helper, `(3 + n) / 4` for
     `loopy_floor_div_pos_b_int32(3 + n, 4)`, with the helper's definition
@@ -158,19 +168,27 @@ Each takes an object already on its side as it is. A domain comes back as an
     >= 0)`). This is loopy main's code generation, with or without the
     sizes' assumption. Compiled and run, the two loop nests visit the same
     iterations in the same order for every `nt` and `nx` up to 40;
-  - and, in `assembly` only, constants left unfolded in the subscripts of
-    the unrolled loop, `cell[1 + 3 + 12 * c_outer]` and `cell[3 * 2 + 12 *
-    c_outer]` for `cell[4 + 12 * c_outer]` and `cell[6 + 12 * c_outer]`.
-    loopy main's C code generator simplifies a subscript before it puts in
-    an unrolled loop's value, where 2025.2 put the value in first. The
-    values are the same.
+  - and, in `assembly` and `l2p`, a subscript simplified before a loop's
+    value is put in: loopy main's C code generator simplifies a subscript
+    and then puts in the value of an unrolled loop or the name of a
+    hardware axis, where 2025.2 put it in first and then simplified. In
+    `assembly`, constants are left unfolded in the subscripts of the
+    unrolled loop, `cell[1 + 3 + 12 * c_outer]` and `cell[3 * 2 + 12 *
+    c_outer]` for `cell[4 + 12 * c_outer]` and `cell[6 + 12 * c_outer]`. In
+    `l2p`'s schedule for a GPU, whose loop over boxes is the group axis,
+    loopy main folds a subscript 2025.2 left as written, `R[-20 + 11 * a_0
+    + b_0 + 121 * gid(0)]` for `R[121 * gid(0) + 11 * (-2 + a_0) + 2 +
+    b_0]`: 2025.2's reader declines `gid(0)`, a call, and so the whole
+    subscript. The values are the same.
 
 The ledgers (`lanky check --json`, `loopty run --json`) are the same for all
 nineteen examples, and so is everything `python FILE`, `lanky check FILE` and
-`loopty run FILE` print, on standard output and on standard error. (The JSON
-of `l2p` prints a set inside a program's term in the order of the process's
-hash seed, on either loopy: #298.) Every transcript in the documentation is
-the same on both.
+`loopty run FILE` print, on standard output and on standard error, and what
+`loopty run FILE --target opencl` prints on PoCL's CPU device. Every
+transcript in the documentation is the same on both. The hoisting moves the
+same operands out of the same sums on both: `assembly`, `l2p` and
+`layer_potential` assign their `invariant_` temporaries in 5, 8 and 32
+statements, on each loopy.
 
 ## Keeping the branch
 
@@ -207,6 +225,40 @@ domains came with the tests and a benchmark: the tests of #264 read a lowered
 kernel's domains through `domains_of`, as the other tests do, and
 `benchmarks/assembly.py`'s `nested` takes them as islpy and gives them back
 as namedisl sets itself, since `--baseline-only` imports no loopty.
+
+Of what 0.4 brought, the hoisting of a sum's invariant operands
+(`loopty.hoist`, #309) read loopy's domains, and was ported (item 10). The
+rest crossed nothing new:
+
+- the handles (#304) name loops, arrays, sizes and statements, and reach
+  loopy as the inames and variables they resolve to;
+- the branches (#319) are traced into loopty's own islpy sets: a path's
+  conditions narrow its statement's domain, which reaches `lp.make_kernel`
+  through `to_named_set` with the others; two branches whose union is not
+  convex run over its hull, still loopty's set; and the predicate that cuts
+  a statement back to its own points reaches loopy through
+  `set_to_cond_expr` and `to_named`, as before;
+- a select is pymbolic's `If` in the instruction, whose condition loopy
+  main's bounds check reads itself;
+- the statements' names (#316) are instruction ids;
+- a schedule runs without the zeros no read sees (#318) by removing their
+  instructions and loops with `lp.remove_instructions` and
+  `lp.remove_unused_inames`;
+- `CheckedOpenCLTarget`'s types (#291) are loopy's OpenCL registry, whose
+  names loopy main keeps;
+- the paths of a call (#326) are loopty's own sets.
+
+Outside `src/`, `test_loopy_main`'s kernel with a guarded conversion branches
+with `if`, since `with when(...)` is gone, and splits by a handle; and #318's
+test of a device schedule's code reads its subscripts in namedisl's order,
+`f[lid(0) + 4 * gid(0)]`.
+
+This branch is where loopty runs on Python 3.14, and 0.4's reading of a
+body's bytecode (`loopty.bytecode`, for `for box, a, b in R.dom:` and for a
+`while` on a traced condition) did not know two of 3.14's layouts: a
+`FOR_ITER` behind an `EXTENDED_ARG`, which `advection`'s long lift has on
+3.14, and a `while` tested at the top of its loop. #332 fixes both on `main`,
+and is merged here ahead of it.
 
 When loopy releases with namedisl, the branch drops the Git sources, sets the
 floors to the releases, and merges.
