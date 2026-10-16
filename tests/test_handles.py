@@ -9,6 +9,7 @@ names loops and arrays by these paths.
 
 from __future__ import annotations
 
+import sys
 import warnings
 
 import numpy as np
@@ -355,6 +356,26 @@ def test_a_handle_of_another_kernel_is_refused_with_the_path_to_write() -> None:
     )
 
 
+def test_a_handle_of_a_namesake_says_which_kernel_is_which() -> None:
+    # two kernels of one name, as a factory makes them or a file loaded twice
+    def make() -> object:
+        @kernel
+        def twin(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+            for i in x.dom:
+                y[i] = x[i]
+
+        return twin
+
+    first, second = make(), make()
+    with pytest.raises(ValueError) as caught:
+        Schedule(first).split(second.i, 2)
+    defined = f"defined at {first.where}"
+    assert (
+        f"twin.i names something of another twin ({defined}), and this schedule "
+        f"is of the twin ({defined})"
+    ) in str(caught.value)
+
+
 def test_a_fusion_of_three_calls_is_one_step_and_names_them_after() -> None:
     fused = Schedule(three, sizes={"n": 16}).fuse(
         three.flux.j, three.divergence.i, three.scale.k, shift=1
@@ -393,6 +414,10 @@ def test_tag_and_on_groups_and_on_items_are_one_step() -> None:
     )
     with pytest.raises(ValueError, match="an axis is a whole number from 0"):
         split.on_items(doubled.i.inner, axis=-1)
+    # each step's facts are at the line that asked for it, through on_groups too
+    line = f"test_handles.py:{sys._getframe().f_lineno + 1}"
+    grouped = split.on_groups(doubled.i.outer)
+    assert {fact.where for fact in grouped.facts()[-2:]} == {line}
 
 
 def test_a_condition_of_sizes_is_written_with_their_handles() -> None:

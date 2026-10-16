@@ -373,6 +373,10 @@ def _called_at() -> str:
         frame = frame.f_back
     while frame is not None:
         module = str(frame.f_globals.get("__name__", ""))
+        if module == __name__:
+            # a step taking another through a decorator: on_groups is a tag
+            frame = frame.f_back
+            continue
         if module.split(".", 1)[0] in ("loopty", "lanky"):
             return ""
         filename = frame.f_code.co_filename
@@ -3009,6 +3013,12 @@ class _Gone:
     why: str = ""
 
 
+def _defined_at(root: Any) -> str:
+    """`` (defined at spmv.py:102)`` for a kernel or a program, or ``""``."""
+    where = getattr(root, "where", None) or getattr(_term_of(root), "where", "")
+    return f" (defined at {where})" if where else ""
+
+
 def _first_loops(
     index: _Index,
     term: Term,
@@ -3918,9 +3928,13 @@ class Schedule:
             ]
             if same:
                 suggestion = f"; write {same[0]}"
+        theirs = getattr(root, "__name__", None) or _term_of(root).name
+        if theirs == mine:
+            # two kernels of one name: a file loaded twice, or a factory's
+            theirs = f"another {theirs}{_defined_at(root)}"
+            mine = f"the {mine}{_defined_at(self._source)}"
         raise ValueError(
-            f"{text}: {handle!r} names something of "
-            f"{getattr(root, '__name__', None) or _term_of(root).name}, and this "
+            f"{text}: {handle!r} names something of {theirs}, and this "
             f"schedule is of {mine}: a handle is a path from what is scheduled"
             f"{suggestion}"
         )

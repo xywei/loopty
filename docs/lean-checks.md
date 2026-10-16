@@ -19,22 +19,27 @@ one question.
 
 ## What it looks like
 
-Nothing to turn on. With Lean installed, the stencil's ledger reads:
+Nothing to turn on. With Lean installed, the stencil's ledger, with the casts of
+its schedule, reads:
 
 ```console
 $ lanky check examples/stencil_skew.py
-STATUS  BY           WHERE               OWNER   STATEMENT
-------  -----------  ------------------  ------  ------------------------------------------------------
-proved  lean         stencil_skew.py:62  jacobi  u[t + 1, i] is in bounds for every instance of S0
-proved  lean         stencil_skew.py:62  jacobi  u[t, i - 1] is in bounds for every instance of S0
-proved  lean         stencil_skew.py:62  jacobi  u[t, i + 1] is in bounds for every instance of S0
-proved  lean         stencil_skew.py:62  jacobi  distinct instances of S0 write distinct cells of u
-proved  lean         stencil_skew.py:54  jacobi  the source order runs every dependence forward in time
-tested  interpreter  stencil_skew.py:54  jacobi  the traced term computes what the body computes
+STATUS  BY           WHERE                OWNER   STATEMENT
+------  -----------  -------------------  ------  --------------------------------------------------------------------------------------
+proved  lean         stencil_skew.py:62   jacobi  u[t + 1, i] is in bounds for every instance of S0
+proved  lean         stencil_skew.py:62   jacobi  u[t, i - 1] is in bounds for every instance of S0
+proved  lean         stencil_skew.py:62   jacobi  u[t, i + 1] is in bounds for every instance of S0
+proved  lean         stencil_skew.py:62   jacobi  distinct instances of S0 write distinct cells of u
+proved  lean         stencil_skew.py:54   jacobi  the source order runs every dependence forward in time
+tested  interpreter  stencil_skew.py:54   jacobi  the traced term computes what the body computes
+proved  lean         stencil_skew.py:116  jacobi  skew(jacobi.i, by=jacobi.t) renames the instances of jacobi one for one
+proved  lean         stencil_skew.py:116  jacobi  the order after skew(jacobi.i, by=jacobi.t) runs every dependence of jacobi forward
+proved  lean         stencil_skew.py:117  jacobi  tile(jacobi.t, jacobi.i, 8, 8) renames the instances of jacobi one for one
+proved  lean         stencil_skew.py:117  jacobi  the order after tile(jacobi.t, jacobi.i, 8, 8) runs every dependence of jacobi forward
 
-6 facts: 5 proved, 1 tested
+10 facts: 9 proved, 1 tested
 
-LEAN proved all 5 facts isl decided. Lean's statements are loopty's, from its own description, not isl's results, and isl's hints were checked, not trusted. --show-lean prints the Lean.
+LEAN proved all 9 facts isl decided. Lean's statements are loopty's, from its own description, not isl's results, and isl's hints were checked, not trusted. --show-lean prints the Lean.
 ```
 
 and `loopty run` proves the casts of every schedule it runs:
@@ -42,10 +47,10 @@ and `loopty run` proves the casts of every schedule it runs:
 ```console
 $ loopty run examples/stencil_skew.py
 ...
-proved  lean   stencil_skew.py:116  jacobi  skew(i, by='t') renames the instances of jacobi one for one
-proved  lean   stencil_skew.py:116  jacobi  the order after skew(i, by='t') runs every dependence of jacobi forward
-proved  lean   stencil_skew.py:117  jacobi  tile(t,i,8,8) renames the instances of jacobi one for one
-proved  lean   stencil_skew.py:117  jacobi  the order after tile(t,i,8,8) runs every dependence of jacobi forward
+proved  lean   stencil_skew.py:116  jacobi  skew(jacobi.i, by=jacobi.t) renames the instances of jacobi one for one
+proved  lean   stencil_skew.py:116  jacobi  the order after skew(jacobi.i, by=jacobi.t) runs every dependence of jacobi forward
+proved  lean   stencil_skew.py:117  jacobi  tile(jacobi.t, jacobi.i, 8, 8) renames the instances of jacobi one for one
+proved  lean   stencil_skew.py:117  jacobi  the order after tile(jacobi.t, jacobi.i, 8, 8) runs every dependence of jacobi forward
 tested  loopy  stencil_skew.py:117  jacobi  the scheduled run of jacobi agrees with the native run to the accurac...
 
 5 facts: 4 proved, 1 tested

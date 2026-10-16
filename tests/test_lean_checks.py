@@ -1121,7 +1121,11 @@ def test_run_proves_the_casts_and_shows_their_lean(
     path = EXAMPLES / "stencil_skew.py"
     assert main(["run", str(path), "--show-lean", "tile("]) == 0
     out = capsys.readouterr().out
-    rows = [line for line in out.splitlines() if "tile(t,i,8,8)" in line]
+    rows = [
+        line
+        for line in out.splitlines()
+        if "tile(jacobi.t, jacobi.i, 8, 8)" in line
+    ]
     assert any(line.startswith("proved") and " lean " in line for line in rows)
     assert not any(line.startswith("decided") for line in rows)
     assert "LEAN proved" in out
@@ -1150,8 +1154,8 @@ def scale_rows(a: Arr[Fin[n], Fin[m], Real], s: Arr[Fin[n], Real]):
 
 tiled = (
     Schedule(scale_rows, sizes={"n": 4, "m": 4})
-    .tile("i", "j", 2, 2)
-    .interchange("i_inner", "j_outer")
+    .tile(scale_rows.i, scale_rows.j, 2, 2)
+    .interchange(scale_rows.i.inner, scale_rows.j.outer)
 )
 """
 
@@ -1177,8 +1181,9 @@ def test_run_names_a_cast_lean_was_not_asked_about_when_verbose(
     out = capsys.readouterr().out
     assert "NOT PROVED scale_rows" in out
     assert (
-        "isl decided it; Lean was not asked: tile(i,j,2,2) moves S0 by the part "
-        "of its map over the loops S0 runs in, which isl computed"
+        "isl decided it; Lean was not asked: tile(scale_rows.i, scale_rows.j, 2, "
+        "2) moves S0 by the part of its map over the loops S0 runs in, which isl "
+        "computed"
     ) in out
 
 
@@ -1238,10 +1243,9 @@ def test_lean_fails_where_a_dependence_joins_two_work_items(lean: Any) -> None:
 
     from lanky.ledger import Fact
 
+    jacobi = stencil().jacobi
     with pytest.raises(IllegalCast) as refused:
-        Schedule(stencil().jacobi, sizes={"nt": 8, "nx": 8}).tag(
-            scope(stencil().jacobi).i, "g.0"
-        )
+        Schedule(jacobi, sizes={"nt": 8, "nx": 8}).tag(jacobi.i, "g.0")
     planted = replace(refused.value.fact.term, refuted=False, refusal=None)
     parts = planted.lean_obligation().parts
     result = lean.establish(
@@ -1299,7 +1303,7 @@ def test_a_substituted_sum_reading_its_own_write_is_caught_apart(lean: Any) -> N
         doubled_then_scaled.w
     )
     with pytest.raises(IllegalCast) as refused:
-        substituted.tag(doubled_then_scaled.j, "l.0")
+        substituted.tag(doubled_then_scaled.scaled_in_place.j, "l.0")
     planted = replace(refused.value.fact.term, refuted=False, refusal=None)
     parts = planted.lean_obligation().parts
     assert parts[-1].label == (

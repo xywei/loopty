@@ -1422,9 +1422,9 @@ interface can change in a minor release; the CHANGELOG says when one does.
   whose binder another statement already uses (as a loop variable or a binder),
   or that its own statement binds over another domain, is lowered under a
   fresh iname (`j_0`), and the binders nested in it follow. The name in the
-  term is unchanged, and so is every message, but a `Schedule` step names such
-  a reduction by its iname in the kernel (`split("j_0", 2)`), which
-  `Lowering.reduction_inames` lists.
+  term is unchanged, and so is every message, and a `Schedule` step names such
+  a reduction by its handle, `split(k.j, 2)`, which reaches the iname
+  `Lowering.reduction_inames` lists; the generated code has the fresh one.
 - The trace-time refusals of hidden state look one level below a name: into
   the containers and the objects it holds (their `__dict__` and their slots),
   the buffers of the arrays it holds (both of a ragged one), and the containers
