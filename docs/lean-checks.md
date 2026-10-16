@@ -187,8 +187,8 @@ LEAN matvec at calls.py:100: A[i], the row passed to dot as a, is in bounds wher
       omega
 ```
 
-A class two statements never form, `S1` before `S0` in a program whose `S0`
-runs first, has a hypothesis that is `False` as written, and is closed by
+A class two statements never form, the second statement of a program before
+the first, which runs first, has a hypothesis that is `False` as written, and is closed by
 `contradiction`: that a class is empty is isl's verdict too, and Lean proves
 it again.
 
@@ -227,7 +227,8 @@ LEAN scan at spmv.py:69: off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[
       omega
 ```
 
-`h3` is `S1`'s value equation: what it stores at `r` is `off[r] + cnt[r]`,
+`h3` is the value equation of the statement `off[r + 1] = off[r] + cnt[r]`:
+what it stores at `r` is `off[r] + cnt[r]`,
 and isl's discharge took it at `r`, the hint `have hi0 := h3 r`.
 
 That the equations are what the kernel does is the reading of a kernel's
