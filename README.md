@@ -44,6 +44,18 @@ def compressed_taylor(
 ) -> all(R[a, b] == D[a, b] for a in Nat for b in Nat):
     """What sumpy stores of a harmonic table, reconstructed, is the table."""
 
+    def claim(a, b):
+        if a < 2:
+            return stored
+        return (
+            R[a, b]
+            .equals(-R[a - 2, b + 2], by=recurrence)
+            .equals(-D[a - 2, b + 2], by=claim(a - 2, b + 2))
+            .equals(D[a, b], by=pde)
+        )
+
+    return claim
+
 
 @kernel(uses=[on_every_triangle])  # compressed_taylor, box by box on a + b <= P
 def reconstruct(
@@ -81,9 +93,9 @@ one box's triangle, and runs the schedule compiled:
 ```console
 $ python examples/l2p.py
 ...
-refused: interchange(reconstruct.b, reconstruct.a) illegal: R[box, a, b] = C[box, a, b] (l2p.py:271) at box=0, a=1, b=9 writes R[0, 1, 9], read by R[box, a, b] = -R[box, a - 2, b + 2] (l2p.py:273) at box=0, a=3, b=7, scheduled earlier (at nb=1, isl's choice)
+refused: interchange(reconstruct.b, reconstruct.a) illegal: R[box, a, b] = C[box, a, b] (l2p.py:288) at box=0, a=1, b=9 writes R[0, 1, 9], read by R[box, a, b] = -R[box, a - 2, b + 2] (l2p.py:290) at box=0, a=3, b=7, scheduled earlier (at nb=1, isl's choice)
 
-refused: contract(l2p.R, lambda box, a, b: b) illegal: R[box, a, b] = -R[box, a - 2, b + 2] (l2p.py:273) at box=0, a=9, b=0 reads R[0, 7, 2], which the same statement at box=0, a=7, b=2 stored in slot 2, after the same statement at box=0, a=8, b=2 stored R[0, 8, 2] there (at nb=1, isl's choice); contract(l2p.R) finds the smallest window that keeps every read, lambda box, a, b: (a, b)
+refused: contract(l2p.R, lambda box, a, b: b) illegal: R[box, a, b] = -R[box, a - 2, b + 2] (l2p.py:290) at box=0, a=9, b=0 reads R[0, 7, 2], which the same statement at box=0, a=7, b=2 stored in slot 2, after the same statement at box=0, a=8, b=2 stored R[0, 8, 2] there (at nb=1, isl's choice); contract(l2p.R) finds the smallest window that keeps every read, lambda box, a, b: (a, b)
 
 schedule: Schedule(l2p, target='c').fuse(l2p.unpack.box, l2p.reconstruct.box, l2p.evaluate.box).contract(l2p.R, lambda box, a, b: (a, b)).contract(l2p.C, lambda box, a, b: (a, b))
 ...
@@ -100,22 +112,22 @@ how each claim is known and who settled it. Six of its 56 rows:
 $ lanky check examples/l2p.py
 STATUS   EFFECTIVE  BY           WHERE       OWNER              STATEMENT
 -------  ---------  -----------  ----------  -----------------  ----------------------------------------------------------------------------------------------------
-proved   tested     lean         l2p.py:129  compressed_taylor  D : Fn[Nat, Nat, Real], R : Fn[Nat, Nat, Real]
+proved   tested     lean         l2p.py:135  compressed_taylor  D : Fn[Nat, Nat, Real], R : Fn[Nat, Nat, Real]
                                                                 | pde: forall a in Nat, b in Nat. D[a + 2, b] + D[a, b + 2] == 0
                                                                 | stored: forall a in Nat, b in Nat where a < 2. R[a, b] == D[a, b]
                                                                 | recurrence: forall a in Nat, b in Nat. R[a + 2, b] == -R[a, b + 2]
                                                                 |- forall a in Nat, b in Nat. R[a, b] == D[a, b]
 ...
-proved   proved     lean         l2p.py:198  storage_index      storage_index stores a cell at every address of Fin(21)
+proved   proved     lean         l2p.py:215  storage_index      storage_index stores a cell at every address of Fin(21)
 ...
-proved   tested     lean         l2p.py:246  reconstruct        by on_every_triangle, for every D with pde and stored:
+proved   tested     lean         l2p.py:263  reconstruct        by on_every_triangle, for every D with pde and stored:
                                                                   forall i in Fin(nb), a in Nat, b in Nat where a + b <= 10. R[i, a, b] == D[i, a, b]
 ...
-proved   proved     lean         l2p.py:334  l2p                no read of l2p.R sees its slot overwritten after contract(l2p.R, lambda box, a, b: (a, b)):
+proved   proved     lean         l2p.py:351  l2p                no read of l2p.R sees its slot overwritten after contract(l2p.R, lambda box, a, b: (a, b)):
                                                                   l2p.R kept in 121 cells, R[box, a, b] in slot (a, b)
 ...
-proved   proved     lean         l2p.py:342  l2p                the order after on_groups(l2p.unpack.box) runs every dependence of l2p forward, within one work item
-tested   tested     upstream     l2p.py:464  l2p                the native run of l2p agrees with sumpy_l2p in pot within 1e-14 of the largest value,
+proved   proved     lean         l2p.py:359  l2p                the order after on_groups(l2p.unpack.box) runs every dependence of l2p forward, within one work item
+tested   tested     upstream     l2p.py:481  l2p                the native run of l2p agrees with sumpy_l2p in pot within 1e-14 of the largest value,
                                                                   on its example inputs
 
 56 facts: 3 decided, 46 proved, 7 tested
@@ -874,8 +886,8 @@ interface can change in a minor release; the CHANGELOG says when one does.
   `R` in `E` into `L` first, the kernel's way of computing it.
   `examples/layer_potential.py`'s `single_layer` cites `line_taylor` and
   `by_the_conjugate`, `ratio(alpha, beta) == -beta / alpha`, and reads
-  `single_layer adds line_taylor's c(n) for n in 1..5, for every c with
-  away, first and ode, read over the complex numbers`: about the term it
+  `single_layer adds line_taylor's a(n) for n in 1..5, for every a with
+  nonzero, first_term and ode, read over the complex numbers`: about the term it
   evaluates, read over the complex numbers, and not about the floats it
   produces. With Mathlib, Lean checks it a term at a time, the identity
   rewritten and the theorem applied.
