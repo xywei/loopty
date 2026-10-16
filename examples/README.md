@@ -1200,13 +1200,16 @@ log|alpha| + Re( c(1) + ... + c(5) ),   c(k) = -(-beta / alpha)**k / k
   what `(alpha + tau * beta) f'(tau) == beta` says about its coefficients is
   `c(k)`; that the Taylor coefficients of `log(alpha + tau * beta)` satisfy
   that equation is cited, not proved. With Mathlib, Lean proves it; without,
-  it is `assumed`, since the property tester draws no table over `Nat`. The
+  it is `assumed`, since the property tester draws no table over `Nat`. Its
+  body is its proof, as a reader says it: the claim at `n` is `first_term`
+  where `n` is 1, and otherwise the recurrence `a[n] == (n - 1) / n * ratio *
+  a[n - 1]`, by the ODE, with the claim at `n - 1`. The
   kernels add `coefficient(ratio(alpha, beta), k)`, the same function the
   theorem's conclusion is written with, at the ratio computed by the
   conjugate, `-beta * conj(alpha) / |alpha|**2`. `by_the_conjugate` says
   that is `-beta / alpha`, and `single_layer` cites both: its row
-  `single_layer adds line_taylor's c(n) for n in 1..5, for every c with
-  away, first and ode, read over the complex numbers` ties the theorem to the
+  `single_layer adds line_taylor's a(n) for n in 1..5, for every a with
+  nonzero, first_term and ode, read over the complex numbers` ties the theorem to the
   terms the kernel evaluates, `decided` by `theorem` and, with Mathlib,
   proved by Lean, the identity rewritten and the theorem applied a term at a
   time. It is about the term read over the complex numbers, not about the
@@ -1249,7 +1252,7 @@ pytential's starfish, QBX order 5, at 4 panels: 36 targets, 132 sources
   double_layer: compiled on C agrees with native to the approx tolerance: True -> tested
   single_layer: agrees with sumpy's own kernel, as pytential calls it, within 1e-12 of the largest value -> tested
   double_layer: agrees with sumpy's own kernel, as pytential calls it, within 1e-12 of the largest value -> tested
-  single_layer adds line_taylor's c(n) for n in 1..5, for every c with away, first and ode, read over the complex numbers -> decided
+  single_layer adds line_taylor's a(n) for n in 1..5, for every a with nonzero, first_term and ode, read over the complex numbers -> decided
 
 sumpy's tile, get_optimized_kernel(is_cpu=True): split(single_layer.t, 16).tag({single_layer.t.outer: 'g.0', single_layer.t.inner: 'l.0'}).split(single_layer.s, 256).prioritize(single_layer.s.outer, single_layer.t.inner)
   decided  isl  split(single_layer.t, 16) renames the instances of single_layer one for one
@@ -1260,7 +1263,7 @@ sumpy's tile, get_optimized_kernel(is_cpu=True): split(single_layer.t, 16).tag({
   decided  isl  the order after split(single_layer.s, 256) runs every dependence of single_layer forward, within one work item
   decided  isl  prioritize(single_layer.s.outer, single_layer.t.inner) renames the instances of single_layer one for one
   decided  isl  the order after prioritize(single_layer.s.outer, single_layer.t.inner) runs every dependence of single_layer forward, within one work item
-  decided  isl  distinct instances of out[t] = SCALE * reduce_sum(...) (layer_potential.py:237) write distinct cells of out
+  decided  isl  distinct instances of out[t] = SCALE * reduce_sum(...) (layer_potential.py:244) write distinct cells of out
   on C, an ilp loop for the work items: split(single_layer.t, 16).tag(single_layer.t.inner, 'ilp').split(single_layer.s, 256).prioritize(single_layer.s.outer, single_layer.t.inner)
 
 accuracy at 30, 50, 70, 90 panels:
@@ -1275,66 +1278,66 @@ accuracy at 30, 50, 70, 90 panels:
 $ uv run lanky check examples/layer_potential.py
 STATUS                     EFFECTIVE  BY             WHERE                   OWNER             STATEMENT
 -------------------------  ---------  -------------  ----------------------  ----------------  ---------------------------------------------------------------------------------------------------
-assumed                    assumed    -              layer_potential.py:145  line_taylor       alpha : Complex, beta : Complex, c : Fn[Nat, Complex]
-                                                                                               | away: alpha != 0
-                                                                                               | first: alpha*c(1) == beta
-                                                                                               | ode: forall n in Nat where n >= 1. (n + 1)*alpha*c(n + 1) + n*beta*c(n) == 0
-                                                                                               |- forall n in Nat where n >= 1. c(n) == -(-beta / alpha)**n / n
+assumed                    assumed    -              layer_potential.py:145  line_taylor       alpha : Complex, beta : Complex, a : Fn[Nat, Complex]
+                                                                                               | nonzero: alpha != 0
+                                                                                               | first_term: alpha*a[1] == beta
+                                                                                               | ode: forall n in Nat where n >= 1. (n + 1)*alpha*a[n + 1] + n*beta*a[n] == 0
+                                                                                               |- forall n in Nat where n >= 1. a[n] == -(-beta / alpha)**n / n
 tested                     tested     python         layer_potential.py:145  line_taylor       the term computes what the annotations compute
-tested                     tested     property-test  layer_potential.py:175  by_the_conjugate  alpha : Complex, beta : Complex
+tested                     tested     property-test  layer_potential.py:182  by_the_conjugate  alpha : Complex, beta : Complex
                                                                                                | away: alpha != 0
                                                                                                |- -beta*conj(alpha)*(1 / real(alpha*conj(alpha))) == -beta / alpha
-tested                     tested     python         layer_potential.py:175  by_the_conjugate  the term computes what the annotations compute
-decided                    decided    isl            layer_potential.py:237  single_layer      out[t] is in bounds for every instance of out[t] = SCALE * reduce_sum(...) (layer_potential.py:237)
-decided                    decided    isl            layer_potential.py:237  single_layer      w[s] is in bounds for every instance of out[t] = SCALE * reduce_sum(...) (layer_potential.py:237)
-decided                    decided    isl            layer_potential.py:237  single_layer      c[t] is in bounds for every instance of out[t] = SCALE * reduce_sum(...) (layer_potential.py:237)
-decided                    decided    isl            layer_potential.py:237  single_layer      y[s] is in bounds for every instance of out[t] = SCALE * reduce_sum(...) (layer_potential.py:237)
-decided                    decided    isl            layer_potential.py:237  single_layer      z[t] is in bounds for every instance of out[t] = SCALE * reduce_sum(...) (layer_potential.py:237)
-decided                    decided    isl            layer_potential.py:237  single_layer      distinct instances of out[t] = SCALE * reduce_sum(...) (layer_potential.py:237) write
+tested                     tested     python         layer_potential.py:182  by_the_conjugate  the term computes what the annotations compute
+decided                    decided    isl            layer_potential.py:244  single_layer      out[t] is in bounds for every instance of out[t] = SCALE * reduce_sum(...) (layer_potential.py:244)
+decided                    decided    isl            layer_potential.py:244  single_layer      w[s] is in bounds for every instance of out[t] = SCALE * reduce_sum(...) (layer_potential.py:244)
+decided                    decided    isl            layer_potential.py:244  single_layer      c[t] is in bounds for every instance of out[t] = SCALE * reduce_sum(...) (layer_potential.py:244)
+decided                    decided    isl            layer_potential.py:244  single_layer      y[s] is in bounds for every instance of out[t] = SCALE * reduce_sum(...) (layer_potential.py:244)
+decided                    decided    isl            layer_potential.py:244  single_layer      z[t] is in bounds for every instance of out[t] = SCALE * reduce_sum(...) (layer_potential.py:244)
+decided                    decided    isl            layer_potential.py:244  single_layer      distinct instances of out[t] = SCALE * reduce_sum(...) (layer_potential.py:244) write
                                                                                                  distinct cells of out
-decided                    decided    isl            layer_potential.py:221  single_layer      the source order runs every dependence forward in time
-decided                    decided    type           layer_potential.py:237  single_layer      the accumulation into out[t] over s is approx
-decided under line_taylor  assumed    theorem        layer_potential.py:237  single_layer      single_layer adds line_taylor's c(n) for n in 1..5, for every c with away, first
+decided                    decided    isl            layer_potential.py:228  single_layer      the source order runs every dependence forward in time
+decided                    decided    type           layer_potential.py:244  single_layer      the accumulation into out[t] over s is approx
+decided under line_taylor  assumed    theorem        layer_potential.py:244  single_layer      single_layer adds line_taylor's a(n) for n in 1..5, for every a with nonzero, first_term
                                                                                                  and ode, read over the complex numbers
-tested                     tested     interpreter    layer_potential.py:221  single_layer      the traced term computes what the body computes
-decided                    decided    isl            layer_potential.py:389  single_layer      split(single_layer.t, 16) renames the instances of single_layer one for one
-decided                    decided    isl            layer_potential.py:389  single_layer      the order after split(single_layer.t, 16) runs every dependence of single_layer forward
-decided                    decided    isl            layer_potential.py:390  single_layer      tag(single_layer.t.inner, 'ilp') renames the instances of single_layer one for one
-decided                    decided    isl            layer_potential.py:390  single_layer      the order after tag(single_layer.t.inner, 'ilp') runs every dependence of single_layer forward
-decided                    decided    isl            layer_potential.py:391  single_layer      split(single_layer.s, 256) renames the instances of single_layer one for one
-decided                    decided    isl            layer_potential.py:391  single_layer      the order after split(single_layer.s, 256) runs every dependence of single_layer forward
-decided                    decided    isl            layer_potential.py:392  single_layer      prioritize(single_layer.s.outer, single_layer.t.inner) renames the instances of
+tested                     tested     interpreter    layer_potential.py:228  single_layer      the traced term computes what the body computes
+decided                    decided    isl            layer_potential.py:396  single_layer      split(single_layer.t, 16) renames the instances of single_layer one for one
+decided                    decided    isl            layer_potential.py:396  single_layer      the order after split(single_layer.t, 16) runs every dependence of single_layer forward
+decided                    decided    isl            layer_potential.py:397  single_layer      tag(single_layer.t.inner, 'ilp') renames the instances of single_layer one for one
+decided                    decided    isl            layer_potential.py:397  single_layer      the order after tag(single_layer.t.inner, 'ilp') runs every dependence of single_layer forward
+decided                    decided    isl            layer_potential.py:398  single_layer      split(single_layer.s, 256) renames the instances of single_layer one for one
+decided                    decided    isl            layer_potential.py:398  single_layer      the order after split(single_layer.s, 256) runs every dependence of single_layer forward
+decided                    decided    isl            layer_potential.py:399  single_layer      prioritize(single_layer.s.outer, single_layer.t.inner) renames the instances of
                                                                                                  single_layer one for one
-decided                    decided    isl            layer_potential.py:392  single_layer      the order after prioritize(single_layer.s.outer, single_layer.t.inner) runs every dependence of
+decided                    decided    isl            layer_potential.py:399  single_layer      the order after prioritize(single_layer.s.outer, single_layer.t.inner) runs every dependence of
                                                                                                  single_layer forward
-decided                    decided    isl            layer_potential.py:253  double_layer      out[t] is in bounds for every instance of out[t] = SCALE * reduce_sum(...) (layer_potential.py:253)
-decided                    decided    isl            layer_potential.py:253  double_layer      w[s] is in bounds for every instance of out[t] = SCALE * reduce_sum(...) (layer_potential.py:253)
-decided                    decided    isl            layer_potential.py:253  double_layer      n[s] is in bounds for every instance of out[t] = SCALE * reduce_sum(...) (layer_potential.py:253)
-decided                    decided    isl            layer_potential.py:253  double_layer      c[t] is in bounds for every instance of out[t] = SCALE * reduce_sum(...) (layer_potential.py:253)
-decided                    decided    isl            layer_potential.py:253  double_layer      y[s] is in bounds for every instance of out[t] = SCALE * reduce_sum(...) (layer_potential.py:253)
-decided                    decided    isl            layer_potential.py:253  double_layer      z[t] is in bounds for every instance of out[t] = SCALE * reduce_sum(...) (layer_potential.py:253)
-decided                    decided    isl            layer_potential.py:253  double_layer      distinct instances of out[t] = SCALE * reduce_sum(...) (layer_potential.py:253) write
+decided                    decided    isl            layer_potential.py:260  double_layer      out[t] is in bounds for every instance of out[t] = SCALE * reduce_sum(...) (layer_potential.py:260)
+decided                    decided    isl            layer_potential.py:260  double_layer      w[s] is in bounds for every instance of out[t] = SCALE * reduce_sum(...) (layer_potential.py:260)
+decided                    decided    isl            layer_potential.py:260  double_layer      n[s] is in bounds for every instance of out[t] = SCALE * reduce_sum(...) (layer_potential.py:260)
+decided                    decided    isl            layer_potential.py:260  double_layer      c[t] is in bounds for every instance of out[t] = SCALE * reduce_sum(...) (layer_potential.py:260)
+decided                    decided    isl            layer_potential.py:260  double_layer      y[s] is in bounds for every instance of out[t] = SCALE * reduce_sum(...) (layer_potential.py:260)
+decided                    decided    isl            layer_potential.py:260  double_layer      z[t] is in bounds for every instance of out[t] = SCALE * reduce_sum(...) (layer_potential.py:260)
+decided                    decided    isl            layer_potential.py:260  double_layer      distinct instances of out[t] = SCALE * reduce_sum(...) (layer_potential.py:260) write
                                                                                                  distinct cells of out
-decided                    decided    isl            layer_potential.py:242  double_layer      the source order runs every dependence forward in time
-decided                    decided    type           layer_potential.py:253  double_layer      the accumulation into out[t] over s is approx
-tested                     tested     interpreter    layer_potential.py:242  double_layer      the traced term computes what the body computes
-decided                    decided    isl            layer_potential.py:399  double_layer      split(double_layer.t, 16) renames the instances of double_layer one for one
-decided                    decided    isl            layer_potential.py:399  double_layer      the order after split(double_layer.t, 16) runs every dependence of double_layer forward
-decided                    decided    isl            layer_potential.py:400  double_layer      tag(double_layer.t.inner, 'ilp') renames the instances of double_layer one for one
-decided                    decided    isl            layer_potential.py:400  double_layer      the order after tag(double_layer.t.inner, 'ilp') runs every dependence of double_layer forward
-decided                    decided    isl            layer_potential.py:401  double_layer      split(double_layer.s, 256) renames the instances of double_layer one for one
-decided                    decided    isl            layer_potential.py:401  double_layer      the order after split(double_layer.s, 256) runs every dependence of double_layer forward
-decided                    decided    isl            layer_potential.py:402  double_layer      prioritize(double_layer.s.outer, double_layer.t.inner) renames the instances of
+decided                    decided    isl            layer_potential.py:249  double_layer      the source order runs every dependence forward in time
+decided                    decided    type           layer_potential.py:260  double_layer      the accumulation into out[t] over s is approx
+tested                     tested     interpreter    layer_potential.py:249  double_layer      the traced term computes what the body computes
+decided                    decided    isl            layer_potential.py:406  double_layer      split(double_layer.t, 16) renames the instances of double_layer one for one
+decided                    decided    isl            layer_potential.py:406  double_layer      the order after split(double_layer.t, 16) runs every dependence of double_layer forward
+decided                    decided    isl            layer_potential.py:407  double_layer      tag(double_layer.t.inner, 'ilp') renames the instances of double_layer one for one
+decided                    decided    isl            layer_potential.py:407  double_layer      the order after tag(double_layer.t.inner, 'ilp') runs every dependence of double_layer forward
+decided                    decided    isl            layer_potential.py:408  double_layer      split(double_layer.s, 256) renames the instances of double_layer one for one
+decided                    decided    isl            layer_potential.py:408  double_layer      the order after split(double_layer.s, 256) runs every dependence of double_layer forward
+decided                    decided    isl            layer_potential.py:409  double_layer      prioritize(double_layer.s.outer, double_layer.t.inner) renames the instances of
                                                                                                  double_layer one for one
-decided                    decided    isl            layer_potential.py:402  double_layer      the order after prioritize(double_layer.s.outer, double_layer.t.inner) runs every dependence of
+decided                    decided    isl            layer_potential.py:409  double_layer      the order after prioritize(double_layer.s.outer, double_layer.t.inner) runs every dependence of
                                                                                                  double_layer forward
-tested                     tested     upstream       layer_potential.py:422  single_layer      the native run of single_layer agrees with sumpy_single_layer in out within 1e-12 of the largest
+tested                     tested     upstream       layer_potential.py:429  single_layer      the native run of single_layer agrees with sumpy_single_layer in out within 1e-12 of the largest
                                                                                                  value, on its example inputs
-tested                     tested     upstream       layer_potential.py:428  double_layer      the native run of double_layer agrees with sumpy_double_layer in out within 1e-12 of the largest
+tested                     tested     upstream       layer_potential.py:435  double_layer      the native run of double_layer agrees with sumpy_double_layer in out within 1e-12 of the largest
                                                                                                  value, on its example inputs
-tested                     tested     run            layer_potential.py:511  green_identity    S(du/dn) - D(u) = u/2, Green's identity, at order 5 - 1.6 or faster
-tested                     tested     run            layer_potential.py:517  jump_S            S(+) - S(-) = 0: S is continuous, at order 5 - 1.6 or faster
-tested                     tested     run            layer_potential.py:523  jump_D            D(+) - D(-) = sigma: D jumps by the density, at order 5 - 1.6 or faster
+tested                     tested     run            layer_potential.py:518  green_identity    S(du/dn) - D(u) = u/2, Green's identity, at order 5 - 1.6 or faster
+tested                     tested     run            layer_potential.py:524  jump_S            S(+) - S(-) = 0: S is continuous, at order 5 - 1.6 or faster
+tested                     tested     run            layer_potential.py:530  jump_D            D(+) - D(-) = sigma: D jumps by the density, at order 5 - 1.6 or faster
 
 45 facts: 1 assumed, 34 decided, 10 tested
 
@@ -2693,9 +2696,9 @@ $ uv run python examples/l2p.py
 order 10: 16 boxes, 97 targets, 21 coefficients stored per box, 66 on its triangle
 largest error against the charges' potential: 4.1e-13
 
-refused: interchange(reconstruct.b, reconstruct.a) illegal: R[box, a, b] = C[box, a, b] (l2p.py:271) at box=0, a=1, b=9 writes R[0, 1, 9], read by R[box, a, b] = -R[box, a - 2, b + 2] (l2p.py:273) at box=0, a=3, b=7, scheduled earlier (at nb=1, isl's choice)
+refused: interchange(reconstruct.b, reconstruct.a) illegal: R[box, a, b] = C[box, a, b] (l2p.py:288) at box=0, a=1, b=9 writes R[0, 1, 9], read by R[box, a, b] = -R[box, a - 2, b + 2] (l2p.py:290) at box=0, a=3, b=7, scheduled earlier (at nb=1, isl's choice)
 
-refused: contract(l2p.R, lambda box, a, b: b) illegal: R[box, a, b] = -R[box, a - 2, b + 2] (l2p.py:273) at box=0, a=9, b=0 reads R[0, 7, 2], which the same statement at box=0, a=7, b=2 stored in slot 2, after the same statement at box=0, a=8, b=2 stored R[0, 8, 2] there (at nb=1, isl's choice); contract(l2p.R) finds the smallest window that keeps every read, lambda box, a, b: (a, b)
+refused: contract(l2p.R, lambda box, a, b: b) illegal: R[box, a, b] = -R[box, a - 2, b + 2] (l2p.py:290) at box=0, a=9, b=0 reads R[0, 7, 2], which the same statement at box=0, a=7, b=2 stored in slot 2, after the same statement at box=0, a=8, b=2 stored R[0, 8, 2] there (at nb=1, isl's choice); contract(l2p.R) finds the smallest window that keeps every read, lambda box, a, b: (a, b)
 
 schedule: Schedule(l2p, target='c').fuse(l2p.unpack.box, l2p.reconstruct.box, l2p.evaluate.box).contract(l2p.R, lambda box, a, b: (a, b)).contract(l2p.C, lambda box, a, b: (a, b))
   decided  isl  every cell of l2p.C that l2p reads, l2p.unpack has stored by the time it is read, so l2p runs without the zeros l2p.C is made with
@@ -2735,13 +2738,13 @@ and the command that installs it.
 $ uv run lanky check examples/l2p.py
 STATUS                           EFFECTIVE  BY           WHERE       OWNER              STATEMENT
 -------------------------------  ---------  -----------  ----------  -----------------  ----------------------------------------------------------------------------------------------------
-assumed                          assumed    -            l2p.py:129  compressed_taylor  D : Fn[Nat, Nat, Real], R : Fn[Nat, Nat, Real]
+assumed                          assumed    -            l2p.py:135  compressed_taylor  D : Fn[Nat, Nat, Real], R : Fn[Nat, Nat, Real]
                                                                                         | pde: forall a in Nat, b in Nat. D[a + 2, b] + D[a, b + 2] == 0
                                                                                         | stored: forall a in Nat, b in Nat where a < 2. R[a, b] == D[a, b]
                                                                                         | recurrence: forall a in Nat, b in Nat. R[a + 2, b] == -R[a, b + 2]
                                                                                         |- forall a in Nat, b in Nat. R[a, b] == D[a, b]
-tested                           tested     python       l2p.py:129  compressed_taylor  the term computes what the annotations compute
-assumed                          assumed    -            l2p.py:147  on_every_triangle  n : Nat, p : Nat, c : Fn[Nat, Nat, Nat, Real], D : Fn[Nat, Nat, Nat, Real],
+tested                           tested     python       l2p.py:135  compressed_taylor  the term computes what the annotations compute
+assumed                          assumed    -            l2p.py:164  on_every_triangle  n : Nat, p : Nat, c : Fn[Nat, Nat, Nat, Real], D : Fn[Nat, Nat, Nat, Real],
                                                                                           R : Fn[Nat, Nat, Nat, Real]
                                                                                         | pde: forall i in Fin(n), a in Nat, b in Nat. D[i, a + 2, b] + D[i, a, b + 2] == 0
                                                                                         | stored: forall i in Fin(n), a in Nat, b in Nat where a < 2 and a + b <= p.
@@ -2751,90 +2754,90 @@ assumed                          assumed    -            l2p.py:147  on_every_tr
                                                                                         | recurrence: forall i in Fin(n), a in Nat, b in Nat where a + b + 2 <= p.
                                                                                             R[i, a + 2, b] == -R[i, a, b + 2]
                                                                                         |- forall i in Fin(n), a in Nat, b in Nat where a + b <= p. R[i, a, b] == D[i, a, b]
-tested                           tested     python       l2p.py:147  on_every_triangle  the term computes what the annotations compute
-decided                          decided    isl          l2p.py:198  storage_index      storage_index stores every cell at an address of Fin(21)
-decided                          decided    isl          l2p.py:198  storage_index      storage_index stores no two cells at one address
-decided                          decided    isl          l2p.py:198  storage_index      storage_index stores a cell at every address of Fin(21)
-decided                          decided    isl          l2p.py:241  unpack             C[box, a, b] is in bounds for every instance of C[box, a, b] =
-                                                                                          coeffs[box, centre(a, b)] (l2p.py:241)
-decided                          decided    isl          l2p.py:241  unpack             coeffs[box, 0] is in bounds for every instance of C[box, a, b] =
-                                                                                          coeffs[box, centre(a, b)] (l2p.py:241)
-decided                          decided    isl          l2p.py:243  unpack             C[box, a, b] is in bounds for every instance of C[box, a, b] =
-                                                                                          coeffs[box, derivatives((a, b))] (l2p.py:243)
-decided                          decided    isl          l2p.py:243  unpack             coeffs[box, 2*(a + b) - 1 + a] is in bounds
-                                                                                          for every instance of C[box, a, b] = coeffs[box, derivatives((a, b))] (l2p.py:243)
-decided                          decided    isl          l2p.py:241  unpack             distinct instances of C[box, a, b] = coeffs[box, centre(a, b)] (l2p.py:241) write
+tested                           tested     python       l2p.py:164  on_every_triangle  the term computes what the annotations compute
+decided                          decided    isl          l2p.py:215  storage_index      storage_index stores every cell at an address of Fin(21)
+decided                          decided    isl          l2p.py:215  storage_index      storage_index stores no two cells at one address
+decided                          decided    isl          l2p.py:215  storage_index      storage_index stores a cell at every address of Fin(21)
+decided                          decided    isl          l2p.py:258  unpack             C[box, a, b] is in bounds for every instance of C[box, a, b] =
+                                                                                          coeffs[box, centre(a, b)] (l2p.py:258)
+decided                          decided    isl          l2p.py:258  unpack             coeffs[box, 0] is in bounds for every instance of C[box, a, b] =
+                                                                                          coeffs[box, centre(a, b)] (l2p.py:258)
+decided                          decided    isl          l2p.py:260  unpack             C[box, a, b] is in bounds for every instance of C[box, a, b] =
+                                                                                          coeffs[box, derivatives((a, b))] (l2p.py:260)
+decided                          decided    isl          l2p.py:260  unpack             coeffs[box, 2*(a + b) - 1 + a] is in bounds
+                                                                                          for every instance of C[box, a, b] = coeffs[box, derivatives((a, b))] (l2p.py:260)
+decided                          decided    isl          l2p.py:258  unpack             distinct instances of C[box, a, b] = coeffs[box, centre(a, b)] (l2p.py:258) write
                                                                                           distinct cells of C
-decided                          decided    isl          l2p.py:243  unpack             distinct instances of C[box, a, b] = coeffs[box, derivatives((a, b))] (l2p.py:243) write
+decided                          decided    isl          l2p.py:260  unpack             distinct instances of C[box, a, b] = coeffs[box, derivatives((a, b))] (l2p.py:260) write
                                                                                           distinct cells of C
-decided                          decided    isl          l2p.py:221  unpack             the source order runs every dependence forward in time
-decided                          decided    isl          l2p.py:241  unpack             no cell of C is stored twice, or read before its store
-decided                          decided    isl          l2p.py:221  unpack             (forall i in Fin(nb). C[i, 0, 0] == coeffs[i, 0])
+decided                          decided    isl          l2p.py:238  unpack             the source order runs every dependence forward in time
+decided                          decided    isl          l2p.py:258  unpack             no cell of C is stored twice, or read before its store
+decided                          decided    isl          l2p.py:238  unpack             (forall i in Fin(nb). C[i, 0, 0] == coeffs[i, 0])
                                                                                           and (forall i in Fin(nb), a in Nat, b in Nat where a < 2 and a + b >= 1 and a + b <= 10.
                                                                                             C[i, a, b] == coeffs[i, 2*(a + b) - 1 + a])
-tested                           tested     interpreter  l2p.py:221  unpack             the traced term computes what the body computes
-decided                          decided    isl          l2p.py:271  reconstruct        R[box, a, b] is in bounds for every instance of R[box, a, b] = C[box, a, b] (l2p.py:271)
-decided                          decided    isl          l2p.py:271  reconstruct        C[box, a, b] is in bounds for every instance of R[box, a, b] = C[box, a, b] (l2p.py:271)
-decided                          decided    isl          l2p.py:273  reconstruct        R[box, a, b] is in bounds for every instance of R[box, a, b] = -R[box, a - 2, b + 2] (l2p.py:273)
-decided                          decided    isl          l2p.py:273  reconstruct        R[box, a - 2, b + 2] is in bounds
-                                                                                          for every instance of R[box, a, b] = -R[box, a - 2, b + 2] (l2p.py:273)
-decided                          decided    isl          l2p.py:271  reconstruct        distinct instances of R[box, a, b] = C[box, a, b] (l2p.py:271) write distinct cells of R
-decided                          decided    isl          l2p.py:273  reconstruct        distinct instances of R[box, a, b] = -R[box, a - 2, b + 2] (l2p.py:273) write distinct cells of R
-decided                          decided    isl          l2p.py:273  reconstruct        every cell of R that R[box, a, b] = -R[box, a - 2, b + 2] (l2p.py:273) reads was written before the
-                                                                                          read, by R[box, a, b] = C[box, a, b] (l2p.py:271) or itself
-decided                          decided    isl          l2p.py:246  reconstruct        the source order runs every dependence forward in time
-decided                          decided    isl          l2p.py:271  reconstruct        no cell of R is stored twice, or read before its store
-decided                          decided    isl          l2p.py:246  reconstruct        (forall i in Fin(nb), a in Nat, b in Nat where a < 2 and a + b <= 10. R[i, a, b] == C[i, a, b])
+tested                           tested     interpreter  l2p.py:238  unpack             the traced term computes what the body computes
+decided                          decided    isl          l2p.py:288  reconstruct        R[box, a, b] is in bounds for every instance of R[box, a, b] = C[box, a, b] (l2p.py:288)
+decided                          decided    isl          l2p.py:288  reconstruct        C[box, a, b] is in bounds for every instance of R[box, a, b] = C[box, a, b] (l2p.py:288)
+decided                          decided    isl          l2p.py:290  reconstruct        R[box, a, b] is in bounds for every instance of R[box, a, b] = -R[box, a - 2, b + 2] (l2p.py:290)
+decided                          decided    isl          l2p.py:290  reconstruct        R[box, a - 2, b + 2] is in bounds
+                                                                                          for every instance of R[box, a, b] = -R[box, a - 2, b + 2] (l2p.py:290)
+decided                          decided    isl          l2p.py:288  reconstruct        distinct instances of R[box, a, b] = C[box, a, b] (l2p.py:288) write distinct cells of R
+decided                          decided    isl          l2p.py:290  reconstruct        distinct instances of R[box, a, b] = -R[box, a - 2, b + 2] (l2p.py:290) write distinct cells of R
+decided                          decided    isl          l2p.py:290  reconstruct        every cell of R that R[box, a, b] = -R[box, a - 2, b + 2] (l2p.py:290) reads was written before the
+                                                                                          read, by R[box, a, b] = C[box, a, b] (l2p.py:288) or itself
+decided                          decided    isl          l2p.py:263  reconstruct        the source order runs every dependence forward in time
+decided                          decided    isl          l2p.py:288  reconstruct        no cell of R is stored twice, or read before its store
+decided                          decided    isl          l2p.py:263  reconstruct        (forall i in Fin(nb), a in Nat, b in Nat where a < 2 and a + b <= 10. R[i, a, b] == C[i, a, b])
                                                                                           and (forall i in Fin(nb), a in Nat, b in Nat where a + b + 2 <= 10.
                                                                                             R[i, a + 2, b] == -R[i, a, b + 2])
-decided under on_every_triangle  assumed    theorem      l2p.py:246  reconstruct        by on_every_triangle, for every D with pde and stored:
+decided under on_every_triangle  assumed    theorem      l2p.py:263  reconstruct        by on_every_triangle, for every D with pde and stored:
                                                                                           forall i in Fin(nb), a in Nat, b in Nat where a + b <= 10. R[i, a, b] == D[i, a, b]
-tested                           tested     interpreter  l2p.py:246  reconstruct        the traced term computes what the body computes
-decided                          decided    isl          l2p.py:303  evaluate           pot[box, target] is in bounds for every instance of pot[box, target] = SCALING *
-                                                                                          reduce_sum(...) (l2p.py:303)
-decided                          decided    isl          l2p.py:303  evaluate           R[box, a, b] is in bounds for every instance of pot[box, target] = SCALING *
-                                                                                          reduce_sum(...) (l2p.py:303)
-decided                          decided    isl          l2p.py:303  evaluate           tx[box, target] is in bounds for every instance of pot[box, target] = SCALING *
-                                                                                          reduce_sum(...) (l2p.py:303)
-decided                          decided    isl          l2p.py:303  evaluate           cx[box] is in bounds for every instance of pot[box, target] = SCALING * reduce_sum(...) (l2p.py:303)
-decided                          decided    isl          l2p.py:303  evaluate           ty[box, target] is in bounds for every instance of pot[box, target] = SCALING *
-                                                                                          reduce_sum(...) (l2p.py:303)
-decided                          decided    isl          l2p.py:303  evaluate           cy[box] is in bounds for every instance of pot[box, target] = SCALING * reduce_sum(...) (l2p.py:303)
-decided                          decided    isl          l2p.py:303  evaluate           INV_FACT[a] is in bounds for every instance of pot[box, target] = SCALING *
-                                                                                          reduce_sum(...) (l2p.py:303)
-decided                          decided    isl          l2p.py:303  evaluate           INV_FACT[b] is in bounds for every instance of pot[box, target] = SCALING *
-                                                                                          reduce_sum(...) (l2p.py:303)
-decided                          decided    isl          l2p.py:303  evaluate           cnt[box], the length of row box that bounds the loop over target, is in bounds
-                                                                                          for every instance of pot[box, target] = SCALING * reduce_sum(...) (l2p.py:303)
-decided                          decided    isl          l2p.py:303  evaluate           distinct instances of pot[box, target] = SCALING * reduce_sum(...) (l2p.py:303) write
+tested                           tested     interpreter  l2p.py:263  reconstruct        the traced term computes what the body computes
+decided                          decided    isl          l2p.py:320  evaluate           pot[box, target] is in bounds for every instance of pot[box, target] = SCALING *
+                                                                                          reduce_sum(...) (l2p.py:320)
+decided                          decided    isl          l2p.py:320  evaluate           R[box, a, b] is in bounds for every instance of pot[box, target] = SCALING *
+                                                                                          reduce_sum(...) (l2p.py:320)
+decided                          decided    isl          l2p.py:320  evaluate           tx[box, target] is in bounds for every instance of pot[box, target] = SCALING *
+                                                                                          reduce_sum(...) (l2p.py:320)
+decided                          decided    isl          l2p.py:320  evaluate           cx[box] is in bounds for every instance of pot[box, target] = SCALING * reduce_sum(...) (l2p.py:320)
+decided                          decided    isl          l2p.py:320  evaluate           ty[box, target] is in bounds for every instance of pot[box, target] = SCALING *
+                                                                                          reduce_sum(...) (l2p.py:320)
+decided                          decided    isl          l2p.py:320  evaluate           cy[box] is in bounds for every instance of pot[box, target] = SCALING * reduce_sum(...) (l2p.py:320)
+decided                          decided    isl          l2p.py:320  evaluate           INV_FACT[a] is in bounds for every instance of pot[box, target] = SCALING *
+                                                                                          reduce_sum(...) (l2p.py:320)
+decided                          decided    isl          l2p.py:320  evaluate           INV_FACT[b] is in bounds for every instance of pot[box, target] = SCALING *
+                                                                                          reduce_sum(...) (l2p.py:320)
+decided                          decided    isl          l2p.py:320  evaluate           cnt[box], the length of row box that bounds the loop over target, is in bounds
+                                                                                          for every instance of pot[box, target] = SCALING * reduce_sum(...) (l2p.py:320)
+decided                          decided    isl          l2p.py:320  evaluate           distinct instances of pot[box, target] = SCALING * reduce_sum(...) (l2p.py:320) write
                                                                                           distinct cells of pot
-decided                          decided    isl          l2p.py:283  evaluate           the source order runs every dependence forward in time
-decided                          decided    type         l2p.py:303  evaluate           the accumulation into pot[box, target] over a, b is approx
-tested                           tested     interpreter  l2p.py:283  evaluate           the traced term computes what the body computes
-decided                          decided    call         l2p.py:310  l2p                after unpack(...) in l2p: (forall i in Fin(nb). C[i, 0, 0] == coeffs[i, 0])
+decided                          decided    isl          l2p.py:300  evaluate           the source order runs every dependence forward in time
+decided                          decided    type         l2p.py:320  evaluate           the accumulation into pot[box, target] over a, b is approx
+tested                           tested     interpreter  l2p.py:300  evaluate           the traced term computes what the body computes
+decided                          decided    call         l2p.py:327  l2p                after unpack(...) in l2p: (forall i in Fin(nb). C[i, 0, 0] == coeffs[i, 0])
                                                                                           and (forall i in Fin(nb), a in Nat, b in Nat where a < 2 and a + b >= 1 and a + b <= 10.
                                                                                             C[i, a, b] == coeffs[i, 2*(a + b) - 1 + a])
-decided                          decided    call         l2p.py:310  l2p                after reconstruct(...) in l2p:
+decided                          decided    call         l2p.py:327  l2p                after reconstruct(...) in l2p:
                                                                                           (forall i in Fin(nb), a in Nat, b in Nat where a < 2 and a + b <= 10. R[i, a, b] == C[i, a, b])
                                                                                           and (forall i in Fin(nb), a in Nat, b in Nat where a + b + 2 <= 10.
                                                                                             R[i, a + 2, b] == -R[i, a, b + 2])
-decided                          decided    isl          l2p.py:316  l2p                every cell of C that reconstruct reads, unpack stored before it
-decided                          decided    isl          l2p.py:317  l2p                every cell of R that evaluate reads, reconstruct stored before it
-tested                           tested     interpreter  l2p.py:310  l2p                the traced term computes what the body computes
-decided                          decided    isl          l2p.py:313  l2p                every cell of l2p.C that l2p reads, l2p.unpack has stored by the time it is read,
+decided                          decided    isl          l2p.py:333  l2p                every cell of C that reconstruct reads, unpack stored before it
+decided                          decided    isl          l2p.py:334  l2p                every cell of R that evaluate reads, reconstruct stored before it
+tested                           tested     interpreter  l2p.py:327  l2p                the traced term computes what the body computes
+decided                          decided    isl          l2p.py:330  l2p                every cell of l2p.C that l2p reads, l2p.unpack has stored by the time it is read,
                                                                                           so l2p runs without the zeros l2p.C is made with
-decided                          decided    isl          l2p.py:314  l2p                every cell of l2p.R that l2p reads, l2p.reconstruct has stored by the time it is read,
+decided                          decided    isl          l2p.py:331  l2p                every cell of l2p.R that l2p reads, l2p.reconstruct has stored by the time it is read,
                                                                                           so l2p runs without the zeros l2p.R is made with
-decided                          decided    isl          l2p.py:328  l2p                fuse(l2p.unpack.box, l2p.reconstruct.box, l2p.evaluate.box) renames the instances of l2p one for one
-decided                          decided    isl          l2p.py:328  l2p                the order after fuse(l2p.unpack.box, l2p.reconstruct.box, l2p.evaluate.box) runs every
+decided                          decided    isl          l2p.py:345  l2p                fuse(l2p.unpack.box, l2p.reconstruct.box, l2p.evaluate.box) renames the instances of l2p one for one
+decided                          decided    isl          l2p.py:345  l2p                the order after fuse(l2p.unpack.box, l2p.reconstruct.box, l2p.evaluate.box) runs every
                                                                                           dependence of l2p forward
-decided                          decided    isl          l2p.py:334  l2p                no read of l2p.R sees its slot overwritten after contract(l2p.R, lambda box, a, b: (a, b)):
+decided                          decided    isl          l2p.py:351  l2p                no read of l2p.R sees its slot overwritten after contract(l2p.R, lambda box, a, b: (a, b)):
                                                                                           l2p.R kept in 121 cells, R[box, a, b] in slot (a, b)
-decided                          decided    isl          l2p.py:334  l2p                no read of l2p.C sees its slot overwritten after contract(l2p.C, lambda box, a, b: (a, b)):
+decided                          decided    isl          l2p.py:351  l2p                no read of l2p.C sees its slot overwritten after contract(l2p.C, lambda box, a, b: (a, b)):
                                                                                           l2p.C kept in 22 cells, C[box, a, b] in slot (a, b)
-decided                          decided    isl          l2p.py:342  l2p                on_groups(l2p.unpack.box) renames the instances of l2p one for one
-decided                          decided    isl          l2p.py:342  l2p                the order after on_groups(l2p.unpack.box) runs every dependence of l2p forward, within one work item
-tested                           tested     upstream     l2p.py:464  l2p                the native run of l2p agrees with sumpy_l2p in pot within 1e-14 of the largest value,
+decided                          decided    isl          l2p.py:359  l2p                on_groups(l2p.unpack.box) renames the instances of l2p one for one
+decided                          decided    isl          l2p.py:359  l2p                the order after on_groups(l2p.unpack.box) runs every dependence of l2p forward, within one work item
+tested                           tested     upstream     l2p.py:481  l2p                the native run of l2p agrees with sumpy_l2p in pot within 1e-14 of the largest value,
                                                                                           on its example inputs
 
 56 facts: 2 assumed, 47 decided, 7 tested
@@ -2862,24 +2865,24 @@ evaluate: Schedule(evaluate, target='c')
 
 STATUS   BY     WHERE       OWNER        STATEMENT
 -------  -----  ----------  -----------  ----------------------------------------------------------------------------------------------------
-decided  isl    l2p.py:313  l2p          every cell of l2p.C that l2p reads, l2p.unpack has stored by the time it is read,
+decided  isl    l2p.py:330  l2p          every cell of l2p.C that l2p reads, l2p.unpack has stored by the time it is read,
                                            so l2p runs without the zeros l2p.C is made with
-decided  isl    l2p.py:314  l2p          every cell of l2p.R that l2p reads, l2p.reconstruct has stored by the time it is read,
+decided  isl    l2p.py:331  l2p          every cell of l2p.R that l2p reads, l2p.reconstruct has stored by the time it is read,
                                            so l2p runs without the zeros l2p.R is made with
-decided  isl    l2p.py:328  l2p          fuse(l2p.unpack.box, l2p.reconstruct.box, l2p.evaluate.box) renames the instances of l2p one for one
-decided  isl    l2p.py:328  l2p          the order after fuse(l2p.unpack.box, l2p.reconstruct.box, l2p.evaluate.box) runs every
+decided  isl    l2p.py:345  l2p          fuse(l2p.unpack.box, l2p.reconstruct.box, l2p.evaluate.box) renames the instances of l2p one for one
+decided  isl    l2p.py:345  l2p          the order after fuse(l2p.unpack.box, l2p.reconstruct.box, l2p.evaluate.box) runs every
                                            dependence of l2p forward
-tested   loopy  l2p.py:328  l2p          the scheduled run of l2p agrees with the native run to the accuracy its types state
-decided  isl    l2p.py:334  l2p          no read of l2p.R sees its slot overwritten after contract(l2p.R, lambda box, a, b: (a, b)):
+tested   loopy  l2p.py:345  l2p          the scheduled run of l2p agrees with the native run to the accuracy its types state
+decided  isl    l2p.py:351  l2p          no read of l2p.R sees its slot overwritten after contract(l2p.R, lambda box, a, b: (a, b)):
                                            l2p.R kept in 121 cells, R[box, a, b] in slot (a, b)
-decided  isl    l2p.py:334  l2p          no read of l2p.C sees its slot overwritten after contract(l2p.C, lambda box, a, b: (a, b)):
+decided  isl    l2p.py:351  l2p          no read of l2p.C sees its slot overwritten after contract(l2p.C, lambda box, a, b: (a, b)):
                                            l2p.C kept in 22 cells, C[box, a, b] in slot (a, b)
-tested   loopy  l2p.py:334  l2p          the scheduled run of l2p agrees with the native run to the accuracy its types state
-decided  isl    l2p.py:342  l2p          on_groups(l2p.unpack.box) renames the instances of l2p one for one
-decided  isl    l2p.py:342  l2p          the order after on_groups(l2p.unpack.box) runs every dependence of l2p forward, within one work item
-tested   loopy  l2p.py:221  unpack       the scheduled run of unpack agrees with the native run to the accuracy its types state
-tested   loopy  l2p.py:246  reconstruct  the scheduled run of reconstruct agrees with the native run to the accuracy its types state
-tested   loopy  l2p.py:283  evaluate     the scheduled run of evaluate agrees with the native run to the accuracy its types state
+tested   loopy  l2p.py:351  l2p          the scheduled run of l2p agrees with the native run to the accuracy its types state
+decided  isl    l2p.py:359  l2p          on_groups(l2p.unpack.box) renames the instances of l2p one for one
+decided  isl    l2p.py:359  l2p          the order after on_groups(l2p.unpack.box) runs every dependence of l2p forward, within one work item
+tested   loopy  l2p.py:238  unpack       the scheduled run of unpack agrees with the native run to the accuracy its types state
+tested   loopy  l2p.py:263  reconstruct  the scheduled run of reconstruct agrees with the native run to the accuracy its types state
+tested   loopy  l2p.py:300  evaluate     the scheduled run of evaluate agrees with the native run to the accuracy its types state
 
 13 facts: 8 decided, 5 tested
 

@@ -1889,7 +1889,7 @@ def test_the_line_taylor_theorem_is_in_the_qbx_ledger_and_not_refuted() -> None:
 
 
 def test_the_qbx_ledger_says_single_layer_adds_line_taylors_terms() -> None:
-    """The theorem and the kernel in one row: its terms are line_taylor's c(n) (#252).
+    """The theorem and the kernel in one row: its terms are line_taylor's a(n) (#252).
 
     The kernel's ratio is by the conjugate, and ``by_the_conjugate`` says it
     is the theorem's ``-beta / alpha``: a theorem of its own, tested by the
@@ -1905,8 +1905,8 @@ def test_the_qbx_ledger_says_single_layer_adds_line_taylors_terms() -> None:
     (row,) = [fact for fact in facts if fact["kind"] == "by-theorem"]
     assert row["owner"] == "single_layer"
     assert row["statement"] == (
-        "single_layer adds line_taylor's c(n) for n in 1..5, for every c with "
-        "away, first and ode, read over the complex numbers"
+        "single_layer adds line_taylor's a(n) for n in 1..5, for every a with "
+        "nonzero, first_term and ode, read over the complex numbers"
     )
     assert row["status"] in ("decided", "proved"), row
     assert row["decided_by"] in ("theorem", "lean"), row
@@ -1994,8 +1994,8 @@ def test_the_qbx_demo_prints_the_tile_the_fact_and_the_rows() -> None:
     for line in lines:
         assert line.endswith(", within 1e-12 of the largest value -> tested"), line
     assert (
-        "  single_layer adds line_taylor's c(n) for n in 1..5, for every c with "
-        "away, first and ode, read over the complex numbers -> decided"
+        "  single_layer adds line_taylor's a(n) for n in 1..5, for every a with "
+        "nonzero, first_term and ode, read over the complex numbers -> decided"
     ) in out.splitlines()
     for name in ("green_identity", "jump_S", "jump_D"):
         (line,) = [line for line in out.splitlines() if line.strip().startswith(name)]

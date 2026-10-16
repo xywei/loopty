@@ -6,6 +6,28 @@ All notable changes to loopty are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **The demos write their proofs.** `examples/l2p.py`'s `compressed_taylor`
+  proves itself as a textbook does: the claim at `(a, b)` is what is stored
+  where `a < 2`, and otherwise a chain, `R[a, b]` equals `-R[a - 2, b + 2]`
+  by the recurrence, `-D[a - 2, b + 2]` by the claim at `(a - 2, b + 2)`,
+  and `D[a, b]` by the PDE. `examples/layer_potential.py`'s `line_taylor`
+  names the recurrence on the way and cites it with the claim at `n - 1`,
+  and takes the names of the proof interface's design: the family `a`, the
+  hypotheses `nonzero` and `first_term`. The bodies are lanky's chains
+  (lanky's increment I2); lanky reads them once its proof-trace mode lands,
+  and until then the ledger is as it was.
+- **The theorem matcher's higher-order rule**, shared with lanky
+  (`lanky.matching.higher_order_value`). With `higher_order=True`, a
+  theorem's family applied to the variables its own sums bind matches a
+  term of the program as a function of them, `f` in `sum(f[k] for k in
+  Fin[n])` against `sum(x[k] * y[k] for k in Fin[m])` binding `k ↦ x[k] *
+  y[k]`, and the theorem in the program's terms applies the function. A
+  family is still bound to an array where it can be, and the rule is off by
+  default: the one-statement `weak_grad` kernel of the design is its first
+  use.
+
 ### Fixed
 
 - **A cited theorem is restated from the text Lean proved of it.** A theorem
