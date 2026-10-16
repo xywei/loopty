@@ -2,13 +2,13 @@
 
 A schedule step acts on loops and arrays, and a loop's name is a poor way to
 say which. The binders of two kernels collide once a program composes them
-(``unpack``'s ``i`` and ``reconstruct``'s ``i`` are ``i`` and ``i_0`` in the
-program's term), a fusion makes two loops one, a split makes one loop two,
-and the loops a program zeroes its arrays in are named by loopty and not by
-the source. So a schedule names what it acts on by where it is in the source,
+(``unpack``'s ``box`` and ``reconstruct``'s ``box`` are ``box`` and ``box_0``
+in the program's term), a fusion makes two loops one, a split makes one loop
+two, and the loops a program zeroes its arrays in are named by loopty and not
+by the source. So a schedule names what it acts on by where it is in the source,
 a path from the kernel or the program it schedules::
 
-    l2p.reconstruct.i       # the loop i of the call of reconstruct in l2p
+    l2p.reconstruct.box     # the loop box of the call of reconstruct in l2p
     l2p.R                   # the array R that l2p makes
     reconstruct.b           # the loop b of the kernel reconstruct
     mass_action.mass_ffc.j  # the loop j of the kernel mass_action calls
@@ -29,8 +29,14 @@ and the arrays it makes with ``Arr.zeros_like`` or ``Arr.zeros``, and its
 sizes; it has no loops of its own. A call is a scope too: it has the callee's
 loops and arrays, each scoped to that call, and the calls the callee makes.
 ``l2p.reconstruct.R`` is the array the program passed to ``reconstruct`` for
-its parameter ``R``, which is ``l2p.R``, and ``l2p.reconstruct.i`` is the
-loop ``i`` of that call, which no other call has.
+its parameter ``R``, which is ``l2p.R``, and ``l2p.reconstruct.box`` is the
+loop ``box`` of that call, which no other call has. Where a program checks
+what a call requires of an array before the call, since nothing decided it
+(:mod:`loopty.compose`), the check runs in a loop no line of the file
+writes, which is the call's, by the callee's parameter:
+``p.gather.checks.idx`` is the loop over the cells of what ``gather`` takes
+as ``idx`` (``p.gather.checks.idx[1]`` its second, for an array of two
+axes).
 
 Every name is reached two ways. The short form is an attribute of the
 kernel, the program or the call, ``reconstruct.i``. The long form says what
@@ -59,7 +65,7 @@ A schedule keeps, for every loop of the source, the loops of its kernel
 that loop is now (:meth:`loopty.schedule.Schedule._loop_names`): at first
 the loop the lowering made of it, and after each step what the step made of
 that. A fusion makes the consumer's loops the producer's, so after
-``fuse(l2p.unpack.i, l2p.reconstruct.i, l2p.evaluate.i)`` the three handles
+``fuse(l2p.unpack.box, l2p.reconstruct.box, l2p.evaluate.box)`` the three handles
 are one loop. A split replaces a loop by two, which are the handle's
 children, ``h.outer`` and ``h.inner`` (``tile`` makes the same children of
 both its loops), and a split of a child makes grandchildren,
@@ -176,6 +182,44 @@ def callsites_of(term: Term) -> tuple[Callsite, ...]:
     )
 
 
+def checks_of(term: Term) -> tuple[Binder, ...]:
+    """The loops of a program's checked points, each as a binder of its call.
+
+    Where nothing decided a call's requirement on an array an earlier call
+    wrote, the program checks it in statements of its own before the call
+    (:mod:`loopty.compose`): ``gather.check.idx`` checks every cell of what
+    ``gather`` takes as ``idx``. No line of the file binds their loops, so
+    each is recorded here in the call's scope under the callee's parameter,
+    ``binder == "idx"``, which the handle ``p.gather.checks.idx`` names.
+    """
+    out: list[Binder] = []
+    for stmt_id, (labels, param) in checked_points(term).items():
+        stmt = term.stmt(stmt_id)
+        for iname in stmt.inames:
+            binder = Binder(iname, param, stmt.where, scope=labels)
+            if binder not in out:
+                out.append(binder)
+    return tuple(out)
+
+
+def checked_points(term: Term) -> dict[str, tuple[tuple[str, ...], str]]:
+    """Each statement of a program's checked point, with its call and parameter.
+
+    ``{"gather.check.idx": (("gather",), "idx")}``: the statement checks
+    what the call ``gather`` requires of its parameter ``idx``. A layout's
+    check is two statements, ``....check.off.start`` and ``.rows``, of one
+    parameter.
+    """
+    flags = {flag for flag, _message in term.checks}
+    out: dict[str, tuple[tuple[str, ...], str]] = {}
+    for stmt in term.stmts:
+        if stmt.assignee.array not in flags or ".check." not in stmt.id:
+            continue
+        label, _check, rest = stmt.id.partition(".check.")
+        out[stmt.id] = ((label,), rest.split(".", 1)[0])
+    return out
+
+
 def _count(label: str) -> int:
     """Which call of its kernel a label is: ``dot`` the first, ``dot@3`` the third."""
     _name, _at, count = label.partition("@")
@@ -221,6 +265,16 @@ class _Index:
             for labels in kernels.values():
                 labels.sort(key=lambda path: _count(path[-1]))
         self.root_arrays = _arrays_of(term)
+        #: The loops of the program's checked points (:func:`checks_of`), by
+        #: the call they check and the callee's parameter: ``p.gather.checks.idx``.
+        self.check_binders = checks_of(term)
+        self.check_stmts = checked_points(term)
+        self.checks: dict[tuple[str, ...], dict[str, list[Binder]]] = {}
+        for binder in self.check_binders:
+            self.checks.setdefault(binder.scope, {}).setdefault(
+                binder.binder, []
+            ).append(binder)
+        self._checking = frozenset(self.check_binders)
 
     # {{{ names in a scope
 
@@ -269,6 +323,7 @@ class _Index:
             ("arrays", list(self.arrays(labels))),
             ("calls", list(self.calls.get(labels, {}))),
             ("sizes", list(self.sizes(labels))),
+            ("checks", list(self.checks.get(labels, {}))),
         ):
             if names:
                 verb = "" if parts else " are"
@@ -300,7 +355,17 @@ class _Index:
         return ".".join([self.name, *self.segments(labels)])
 
     def binder_path(self, binder: Binder) -> str:
-        """``l2p.reconstruct.i``, or ``k.i[1]`` for a second loop of one name."""
+        """``l2p.reconstruct.box``, or ``k.i[1]`` for a second loop of one name.
+
+        A loop of a checked point is ``p.gather.checks.idx``, and
+        ``p.gather.checks.idx[1]`` its second axis.
+        """
+        if binder in self._checking:
+            same = self.checks[binder.scope][binder.binder]
+            name = binder.binder
+            if len(same) > 1:
+                name = f"{name}[{same.index(binder)}]"
+            return f"{self.scope_path(binder.scope)}.checks.{name}"
         same = self.loops.get(binder.scope, {}).get(binder.binder, [binder])
         name = binder.binder
         if len(same) > 1:
@@ -366,7 +431,7 @@ def _index(root: Any) -> _Index:
 class Handle:
     """A path from a kernel, a program or a term to something in it.
 
-    ``path`` is the path as it is printed, ``l2p.reconstruct.i``, and
+    ``path`` is the path as it is printed, ``l2p.reconstruct.box``, and
     ``where`` the line of the source that wrote what it names: the ``for``
     of a loop, the call of a call, the definition of an array or a size.
     A handle is resolved against a schedule of its root when a step is
@@ -573,7 +638,7 @@ class Call(_Scoped):
     """A call: a program's call of a kernel, or a kernel's inlined call.
 
     Its loops and arrays are the callee's, scoped to the call:
-    ``l2p.reconstruct.i`` is the loop ``i`` of this call of ``reconstruct``.
+    ``l2p.reconstruct.box`` is the loop ``box`` of this call of ``reconstruct``.
     """
 
 
@@ -587,10 +652,23 @@ class Call(_Scoped):
         """The name of the kernel called."""
         return self._index.sites[self._labels].kernel
 
+    @property
+    def checks(self) -> Names:
+        """The loops of the program's checks before this call, by parameter.
+
+        Where nothing decided what the call requires of an array an earlier
+        call wrote (``idx``, whose cells ``gather`` reads as points of
+        ``Fin[n]``), the program checks it before the call, in a loop over
+        the array's cells that no line of the file writes:
+        ``p.gather.checks.idx``, which a fusion can run in the loop that
+        writes the array, ``fuse(p.reverse_quiet.i, p.gather.checks.idx)``.
+        """
+        return Names(self._index, self._labels, "check")
+
 
 #: What a call's short form yields to: its own attributes.
 _CALL_ATTRIBUTES = frozenset(
-    {"loops", "arrays", "calls", "sizes", "path", "where", "kernel", "root"}
+    {"loops", "arrays", "calls", "sizes", "checks", "path", "where", "kernel", "root"}
 )
 
 
@@ -680,11 +758,22 @@ class Names:
             return list(index.arrays(labels))
         if self._kind == "call":
             return list(index.calls.get(labels, {}))
+        if self._kind == "check":
+            return list(index.checks.get(labels, {}))
         return list(index.sizes(labels))
 
     def __repr__(self) -> str:
-        word = {"loop": "loops", "array": "arrays", "call": "calls", "size": "sizes"}
-        return f"{self._index.scope_path(self._labels)}.{word[self._kind]}"
+        return f"{self._index.scope_path(self._labels)}.{_PLURAL[self._kind]}"
+
+
+#: The long form of each kind of name: ``k.loops.i``.
+_PLURAL = {
+    "loop": "loops",
+    "array": "arrays",
+    "call": "calls",
+    "size": "sizes",
+    "check": "checks",
+}
 
 
 def _named(index: _Index, labels: tuple[str, ...], name: str, kind: str) -> Any:
@@ -712,6 +801,14 @@ def _named(index: _Index, labels: tuple[str, ...], name: str, kind: str) -> Any:
             if len(calls) == 1:
                 return calls[0]
             return _Several(index, path, "call", calls)
+    elif kind == "check":
+        found = index.checks.get(labels, {}).get(name)
+        if found:
+            handles = [Loop(index, binder) for binder in found]
+            if len(handles) == 1:
+                return handles[0]
+            path = f"{index.scope_path(labels)}.checks.{name}"
+            return _Several(index, path, "loop", handles)
     elif name in index.sizes(labels):
         return Size(index, name)
     raise AttributeError(_missing(index, labels, name, kind))
@@ -723,9 +820,8 @@ def _short(index: _Index, labels: tuple[str, ...], name: str) -> Any:
     if not kinds:
         raise AttributeError(_missing(index, labels, name, None))
     if len(kinds) > 1:
-        word = {"loop": "loops", "array": "arrays", "call": "calls", "size": "sizes"}
         path = index.scope_path(labels)
-        forms = [f"{path}.{word[kind]}.{name}" for kind in kinds]
+        forms = [f"{path}.{_PLURAL[kind]}.{name}" for kind in kinds]
         what = " and ".join(
             f"{'an' if kind[0] in 'aeiou' else 'a'} {kind}" for kind in kinds
         )

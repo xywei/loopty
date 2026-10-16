@@ -407,6 +407,8 @@ def preconditions(
     gone: frozenset[str],
     text: str,
     named: Any = None,
+    shown: Any = None,
+    owner: str | None = None,
 ) -> tuple[list[Stmt], list[Stmt]]:
     """The producers and the readers of ``array``, or why it cannot be contracted.
 
@@ -423,23 +425,27 @@ def preconditions(
     Each is a :class:`WindowError` naming what stands in the way. A
     producer that reads the array, a recurrence, is among the readers.
     ``named`` names a statement in a message, by its id where it is not
-    given (a schedule names it by its call, :mod:`loopty.handles`).
+    given (a schedule names it by its call, :mod:`loopty.handles`), and
+    ``shown`` an array, by its path, and ``owner`` the term, as a schedule
+    names them.
     """
     if named is None:
 
         def named(stmt_id: str) -> str:
             return stmt_id
 
+    owner = owner or term.name
     if array not in dict(term.temporaries) or array in dict(term.checks):
         what = (
-            f"a parameter of {term.name}, which its caller passes and sees"
+            f"a parameter of {owner}, which its caller passes and sees"
             if array in term.param_names
-            else f"the flag of a checked point of {term.name}"
+            else f"the flag of a checked point of {owner}"
             if array in dict(term.checks)
-            else f"no array of {term.name}"
+            else f"no array of {owner}"
         )
+        who = array if shown is None or array in dict(term.checks) else shown(array)
         raise WindowError(
-            f"{text}: {array} is {what}, and only an array the program makes "
+            f"{text}: {who} is {what}, and only an array the program makes "
             "with Arr.zeros_like or Arr.zeros is its own to keep in a window"
         )
     zeros = f"{array}.zeros"
