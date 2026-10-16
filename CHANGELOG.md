@@ -251,14 +251,16 @@ for box, a, b in R.dom:
 - The parts of a cast, and of a kernel's ordering and definedness facts,
   that `--verbose` and Lean show name their statements the same way, and
   spell each cell with the loops and sums the source names (#307):
-  `R[box, a, b] written again by R[box, a, b] = C[box, a, b] (l2p.py:276)
-  after the same cell is written by the zeros of l2p.R (l2p.py:320)`, not
-  `R[i_0, a_0, b_0] written again by reconstruct.S0 ...`, and a sum's
+  `R[box, a, b] written again by R[box, a, b] = -R[box, a - 2, b + 2]
+  (l2p.py:273) after R[box, a, b] is written by R[box, a, b] = C[box, a, b]
+  (l2p.py:271)`, not `R[i_0, a_0, b_0] written again by reconstruct.S1
+  ...`; zeros a read sees, which a schedule keeps, write `a cell of f`, and
+  a statement after them `the same cell`; and a sum's
   binder as written, `R[box, a, b]` and not `R[box, a_1, b_1]`. So does the
   reason a cast through the part of a tile isl computed is not offered to
   Lean, and the rule of a theorem's series row.
 - **`IllegalCast.instances`** is the witness's pair as the message names
-  it, `('u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2 (stencil_skew.py:62)
+  it, `('u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2 (stencil_skew.py:61)
   at t=0, i=8', 'the same statement at t=1, i=7')`; `witness` keeps the
   ids. `examples/stencil_skew.py` and `examples/wavefront_acoustic.py`
   print it, `witness: ... runs before the same statement at t=1, i=7, where

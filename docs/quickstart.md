@@ -329,8 +329,8 @@ native, the 16 by 16 array (first six levels around the spike):
  [0.156 0.    0.312 0.    0.312 0.    0.156]]
 
 Schedule(jacobi).tile(jacobi.t, jacobi.i, 8, 8) ->
-  IllegalCast: tile(jacobi.t, jacobi.i, 8, 8) illegal: u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2 (stencil_skew.py:62) at t=0, i=8 writes u[1, 8], read by the same statement at t=1, i=7, scheduled earlier (at nt=16, nx=16, as hinted)
-  witness: u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2 (stencil_skew.py:62) at t=0, i=8 runs before the same statement at t=1, i=7, where nt=16, nx=16
+  IllegalCast: tile(jacobi.t, jacobi.i, 8, 8) illegal: u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2 (stencil_skew.py:61) at t=0, i=8 writes u[1, 8], read by the same statement at t=1, i=7, scheduled earlier (at nt=16, nx=16, as hinted)
+  witness: u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2 (stencil_skew.py:61) at t=0, i=8 runs before the same statement at t=1, i=7, where nt=16, nx=16
 
 accepted: Schedule(jacobi, target='c').skew(jacobi.i, by=jacobi.t).tile(jacobi.t, jacobi.i, 8, 8)
   loop nest: jacobi.t.outer jacobi.i.outer jacobi.t.inner jacobi.i.inner
@@ -364,20 +364,20 @@ Checking and running the file behave the same way as the sparse product:
 $ uv run lanky check examples/stencil_skew.py
 STATUS   BY           WHERE                OWNER   STATEMENT
 -------  -----------  -------------------  ------  ----------------------------------------------------------------------------------------------
-decided  isl          stencil_skew.py:62   jacobi  u[t + 1, i] is in bounds for every instance of u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2
-                                                     (stencil_skew.py:62)
-decided  isl          stencil_skew.py:62   jacobi  u[t, i - 1] is in bounds for every instance of u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2
-                                                     (stencil_skew.py:62)
-decided  isl          stencil_skew.py:62   jacobi  u[t, i + 1] is in bounds for every instance of u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2
-                                                     (stencil_skew.py:62)
-decided  isl          stencil_skew.py:62   jacobi  distinct instances of u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2 (stencil_skew.py:62) write
+decided  isl          stencil_skew.py:61   jacobi  u[t + 1, i] is in bounds for every instance of u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2
+                                                     (stencil_skew.py:61)
+decided  isl          stencil_skew.py:61   jacobi  u[t, i - 1] is in bounds for every instance of u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2
+                                                     (stencil_skew.py:61)
+decided  isl          stencil_skew.py:61   jacobi  u[t, i + 1] is in bounds for every instance of u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2
+                                                     (stencil_skew.py:61)
+decided  isl          stencil_skew.py:61   jacobi  distinct instances of u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2 (stencil_skew.py:61) write
                                                      distinct cells of u
-decided  isl          stencil_skew.py:54   jacobi  the source order runs every dependence forward in time
-tested   interpreter  stencil_skew.py:54   jacobi  the traced term computes what the body computes
-decided  isl          stencil_skew.py:116  jacobi  skew(jacobi.i, by=jacobi.t) renames the instances of jacobi one for one
-decided  isl          stencil_skew.py:116  jacobi  the order after skew(jacobi.i, by=jacobi.t) runs every dependence of jacobi forward
-decided  isl          stencil_skew.py:117  jacobi  tile(jacobi.t, jacobi.i, 8, 8) renames the instances of jacobi one for one
-decided  isl          stencil_skew.py:117  jacobi  the order after tile(jacobi.t, jacobi.i, 8, 8) runs every dependence of jacobi forward
+decided  isl          stencil_skew.py:53   jacobi  the source order runs every dependence forward in time
+tested   interpreter  stencil_skew.py:53   jacobi  the traced term computes what the body computes
+decided  isl          stencil_skew.py:115  jacobi  skew(jacobi.i, by=jacobi.t) renames the instances of jacobi one for one
+decided  isl          stencil_skew.py:115  jacobi  the order after skew(jacobi.i, by=jacobi.t) runs every dependence of jacobi forward
+decided  isl          stencil_skew.py:116  jacobi  tile(jacobi.t, jacobi.i, 8, 8) renames the instances of jacobi one for one
+decided  isl          stencil_skew.py:116  jacobi  the order after tile(jacobi.t, jacobi.i, 8, 8) runs every dependence of jacobi forward
 
 10 facts: 9 decided, 1 tested
 
@@ -499,7 +499,7 @@ The same file applies firedrake's quadrature rule to an integrand,
 - Break something. Change the stencil's guard from `i > 0` to `i >= 0` and
   re-check. The in-bounds fact for `u[t, i - 1]` turns `refuted`, `lanky check`
   prints `6 facts: 1 assumed, 4 decided, 1 refuted` and then
-  `REFUTED jacobi at ...: u[t, i - 1] is in bounds for every instance of u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2 (stencil_skew.py:62)`
+  `REFUTED jacobi at ...: u[t, i - 1] is in bounds for every instance of u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2 (stencil_skew.py:61)`
   with the cell that escapes under it, first as isl's tuple,
   `witness: (0, -1)`, then named, at the sizes isl read it off at:
   `cells u[t, i - 1] reaches are cells u has, except [a0=0, a1=-1] at [nt=2, nx=2]`.

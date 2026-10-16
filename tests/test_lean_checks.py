@@ -479,13 +479,59 @@ def test_a_programs_cast_names_each_cell_by_the_loops_the_source_names() -> None
     renamed = [label for label in labels if re.search(r"\b[a-z]+_[0-9]+\b", label)]
     assert not renamed, renamed
     assert any(label.startswith("R[box, a, b] written again by ") for label in labels)
-    # the zeros run in loops the program made, and write the cell the other
-    # statement reaches
-    zeros = f"the zeros of l2p.R ({where(l2p.l2p, 'R = Arr.zeros(')})"
-    assert any(
-        label.endswith(f"after the same cell is written by {zeros}")
-        for label in labels
-    ), labels
+    # no read sees the zeros R and C are made with, so the schedules run
+    # without them (#290), and no part names them
+    assert not any("zeros" in label for label in labels), labels
+
+
+@kernel
+def doubled_inner(x: Arr[Fin[n], Real], f: Arr[Fin[n], Real]):  # noqa: F821
+    """Each cell but the first twice ``x``'s; the first keeps its zero."""
+    for i in f.dom:
+        if i > 0:
+            f[i] = 2.0 * x[i]
+
+
+@kernel
+def one_more(f: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+    """Each cell one more than ``f``'s, the zero at ``f[0]`` included."""
+    for i in y.dom:
+        y[i] = f[i] + 1.0
+
+
+@program
+def padded_once_more(x, y):
+    """``f[0]`` is the zero ``f`` is made with, which ``one_more`` reads."""
+    f = Arr.zeros_like(x)
+    doubled_inner(x, f)
+    one_more(f, y)
+
+
+def test_a_cast_names_the_zeros_a_read_sees_by_the_array_they_zero() -> None:
+    # one_more reads the zero at f[0], so the zeros are kept (#290); they run
+    # in loops the program made, and a part names them as what they are, the
+    # cell they write as a cell of f, and the cell the other statement
+    # reaches as the same cell (#307)
+    fused = Schedule(padded_once_more).fuse(
+        padded_once_more.doubled_inner.i, padded_once_more.one_more.i
+    )
+    labels = [
+        part.label
+        for fact in fused.facts()
+        if fact.kind == "monotone"
+        for part in cast_obligation(fact.term).parts
+    ]
+    zeros = (
+        "the zeros of padded_once_more.f "
+        f"({where(padded_once_more, 'f = Arr.zeros_like')})"
+    )
+    stored = said(doubled_inner, "f[i] = 2.0 * x[i]")
+    assert (
+        f"a cell of f written again by {zeros} after f[i] is written by {stored}"
+    ) in labels, labels
+    assert (
+        f"f[i] written again by {stored} after the same cell is written by {zeros}"
+    ) in labels, labels
 
 
 def test_a_refused_cast_is_stated_with_isls_pair() -> None:

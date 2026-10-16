@@ -767,6 +767,9 @@ def test_zeros_a_read_sees_on_a_split_loop_are_refused_saying_why(plain_opencl):
     message = str(caught.value)
     # the zeros, which no line of the file stores, by the array they zero
     made = where(padded_plus_one, "f = Arr.zeros_like")
+    # the read and the store, by their text and line
+    reading = where(plus_one, "y[i] = f[i] + 1.0")
+    storing = where(doubled_inside, "f[i] = 2.0 * x[i]")
     assert message.startswith(
         "tag({padded_plus_one.doubled_inside.i.outer: 'g.0', "
         "padded_plus_one.doubled_inside.i.inner: 'l.0'}) illegal: the zeros of "
@@ -780,10 +783,10 @@ def test_zeros_a_read_sees_on_a_split_loop_are_refused_saying_why(plain_opencl):
         "zeros padded_plus_one.f is made with run on the work item that stores "
         "each cell only where every statement that stores padded_plus_one.f "
         "stores it along a loop of its own on g.0, and none does here; and "
-        "padded_plus_one.plus_one reads f[0], which padded_plus_one.doubled_inside "
-        "does not store (at n=1), so the read would see the zeros the array was "
-        "made with, and they are kept: store every cell a call reads in a call "
-        "before it, and they are dropped"
+        f"y[i] = f[i] + 1.0 ({reading}) reads f[0], which f[i] = 2.0 * x[i] "
+        f"({storing}) does not store (at n=1), so the read would see the zeros "
+        "the array was made with, and they are kept: store every cell a call "
+        "reads in a call before it, and they are dropped"
     ), message
 
 
