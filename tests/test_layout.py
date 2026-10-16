@@ -16,8 +16,9 @@ from pathlib import Path
 
 import pytest
 from lanky.ledger import Status
+from lanky.prelude import Real
 
-from loopty import Fin, IslOracle, Where, layout
+from loopty import Arr, Fin, IslOracle, Where, kernel, layout
 from loopty.layout import LayoutError
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -315,6 +316,50 @@ def test_a_layout_called_after_what_it_computes_with_changed_is_refused(
 
     with pytest.raises(LayoutError, match=r"2\*i, where its facts say 1\*i"):
         helped(Var("i"))
+
+
+#: How often ``alternating`` has been called.
+CALLS = [0]
+
+
+def alternating(i: Fin[4]) -> Fin[4]:  # noqa: F821
+    """``i`` on every odd call, ``(i + 1) % 4`` on every even one."""
+    CALLS[0] += 1
+    return i if CALLS[0] % 2 else (i + 1) % 4
+
+
+def test_a_traced_call_is_compared_by_the_address_it_returns() -> None:
+    # #236: the address a traced call returns is what the trace records, and
+    # a check that called the function a second time compared that call's
+    # term instead, which a function that answers differently on alternate
+    # calls passes: the kernel read x[(i + 1) % 4] through a layout whose
+    # facts are about x[i]
+    from lanky.terms import Var
+
+    CALLS[0] = 0
+    checked = layout(alternating)  # the first call: i
+    with pytest.raises(LayoutError) as caught:
+        checked(Var("i"))  # the second: (i + 1) % 4
+    assert str(caught.value).startswith(
+        "alternating now computes the address (i + 1) % 4, where its facts say i"
+    )
+
+    @kernel
+    def through(x: Arr[Fin[4], Real], y: Arr[Fin[4], Real]):
+        for i in y.dom:
+            y[i] = x[checked(i)]
+
+    CALLS[0] = 1  # the trace's call is an even one
+    (fact,) = through.facts()
+    assert (fact.kind, fact.status) == ("trace", Status.REFUTED)
+    assert "alternating now computes the address (i + 1) % 4" in (
+        fact.provenance["reason"]
+    )
+    # an address written at other indices is the same term there
+    def shifted(i: Fin[4]) -> Fin[4]:  # noqa: F821
+        return (i + 1) % 4
+
+    assert layout(shifted)(Var("j") + 1) is not None
 
 
 def test_a_kernel_reads_through_the_layout_it_declares() -> None:

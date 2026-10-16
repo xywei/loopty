@@ -97,6 +97,31 @@ the ledger, the refusals and the fixes they suggest, and `loopty run`.
 - `examples/l2p.py` names its boxes `box` where it named them `i`, and its
   three calls fuse in one step, so `fused` has two cast facts where it had
   four.
+- **The flagship's agreement with sumpy says how close it is (#278).**
+  `sumpy_l2p` is `@upstream(l2p, within=1e-14)`, and its row reads `the
+  native run of l2p agrees with sumpy_l2p in pot within 1e-14 of the largest
+  value, on its example inputs`, where it said only that the two agree to
+  the `approx` class, a millionth. On the example inputs the two differ by
+  8.3e-17 where the largest potential is 0.217.
+
+### Fixed
+
+- **A layout called in a traced kernel is checked by the address the call
+  returned (#236).** At symbolic indices the check called the layout's
+  function a second time, on fresh variables, and compared that term with
+  the stated one, so a function that answers differently when called again
+  passed, and the kernel read through a subscript the layout's facts say
+  nothing about. The term the call returned, which the trace records, is
+  now compared with the stated address at the call's own indices and
+  sizes: the same term, the same polynomial multiplied out, or the same
+  quasi-affine function as isl reads it.
+- **`@upstream` runs on the comparison's own file's `example_inputs()`
+  (#262).** It read the kernel's module's, so a comparison declared in a
+  file of its own, importing the kernel (`from l2p import l2p` in
+  `l2p_vs_sumpy.py`), was `assumed` where the kernel's file has none, or
+  compared on inputs the comparison file did not mean. The comparison's
+  file comes first, then the kernel's, and the row's provenance says whose
+  were used (`inputs`: `example_inputs() of l2p.py`).
 
 ## [0.3.0] - 2026-10-15
 

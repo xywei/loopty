@@ -68,8 +68,8 @@ contiguous runs of targets, as boxtree's do, so ``box_target_starts`` is the
 scan of the counts. sumpy reconstructs the triangle symbolically, inside the
 straight-line code it generates for each target, and its Taylor sum is
 sympy's; here both are loops. ``sumpy_l2p`` is sumpy's own kernel on this
-file's inputs: the potentials agree to round-off (``benchmarks/l2p.py``
-recorded them, at the commit below, on loopy main).
+file's inputs: the potentials agree within ``1e-14`` of the largest one
+(``benchmarks/l2p.py`` recorded them, at the commit below, on loopy main).
 
 The code it mirrors, at sumpy 13a48a0:
 
@@ -466,7 +466,7 @@ def example_inputs() -> dict:
 RECORDED = Path(__file__).with_name("l2p_sumpy.json")
 
 
-@upstream(l2p)
+@upstream(l2p, within=1e-14)
 def sumpy_l2p(coeffs, cx, cy, cnt, tx, ty, pot, rscale):
     """sumpy's own E2PFromSingleBox at 13a48a0, run on these inputs and recorded."""
     recorded = json.loads(RECORDED.read_text())

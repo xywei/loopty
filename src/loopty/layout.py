@@ -149,13 +149,13 @@ class Piece:
         anything it computes with besides the indices (a module constant, a
         helper) may have changed since. At a cell of numbers the address is
         compared with the term's value there; at symbolic indices, in a
-        traced kernel, the function's term is computed again and compared
-        with the stated one, at the ``sizes`` the call gave. ``None`` when
-        they agree.
+        traced kernel, ``got`` is the term the trace records, and it is
+        compared with the stated term at those indices and at the ``sizes``
+        the call gave (:func:`_same_address`). ``None`` when they agree.
         """
         import numbers
 
-        from lanky.terms import Var, render, structurally_equal
+        from lanky.terms import render
         from pymbolic import evaluate
 
         from loopty.hypotheses import substitute
@@ -174,16 +174,14 @@ class Piece:
                 return None
             cell = ", ".join(f"{n}={v}" for n, v in zip(self.names, values))
             return f"{got} for ({cell}), where its facts say {stated}"
-        fresh = tuple(Var(name) for name in self.names)
-        now = self.run((fresh,) if self.packed else fresh, sizes)
-        address = substitute(self.address, sizes) if sizes else self.address
-        if structurally_equal(_plain(now), _plain(address)):
+        # the stated term at the call's own indices, not a second call's term:
+        # a function that answers differently when called again would pass
+        address = substitute(
+            self.address, {**sizes, **dict(zip(self.names, values, strict=True))}
+        )
+        if _same_address(got, address):
             return None
-        mine = polynomial(now)
-        if mine is not None and mine == polynomial(address):
-            # the same address multiplied out (see _normal)
-            return None
-        return f"{render(now)}, where its facts say {render(address)}"
+        return f"{render(got)}, where its facts say {render(address)}"
 
     def at(self, values: dict[str, int]) -> Piece:
         """This piece at the sizes ``values``: its address, cells and buffer there."""
@@ -364,6 +362,39 @@ def _normal(expr: Any) -> Any:
         return expr
     term = _term(found)
     return term if _affine(term) else expr
+
+
+def _same_address(got: Any, stated: Any) -> bool:
+    """Whether two addresses are one term at every value of what they name.
+
+    The same term; the same polynomial multiplied out, ``n * i - n * i + i``
+    and ``i``; or, quasi-affine, the same function of its names as isl reads
+    it, ``(i + 1) + b`` and ``i + (1 + b)``, with a read of an array or a
+    product of unknowns one name wherever it is the same term.
+    """
+    from lanky.terms import structurally_equal
+
+    from loopty.lower import _plain
+
+    got, stated = _plain(got), _plain(stated)
+    if structurally_equal(got, stated):
+        return True
+    found = polynomial(got)
+    if found is not None and found == polynomial(stated):
+        return True
+    if isinstance(got, bool) or isinstance(stated, bool):
+        return False
+    table = idx.Reflections()
+    reflected: dict[str, Any] = {}
+    try:
+        first = flow.expr_text(got, reflected=reflected, table=table)
+        second = flow.expr_text(stated, reflected=reflected, table=table)
+        names = sorted(flow.free_names(first) | flow.free_names(second))
+        head = f"[{', '.join(names)}] -> " if names else ""
+        apart = isl.Set(f"{head}{{ : {first} < {second} or {first} > {second} }}")
+        return bool(apart.is_empty())
+    except (isl.Error, flow.NonAffine, TypeError, ValueError):
+        return False
 
 
 def _linear_in(found: Polynomial, names: Sequence[str]) -> bool:
