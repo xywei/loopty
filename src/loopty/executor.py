@@ -105,11 +105,12 @@ def _resolve(obj: Any, target: str | None = None) -> tuple[Term, Any, Lowering, 
         term = obj.trace()
     if not isinstance(term, Term):
         raise TypeError(f"{obj!r} is neither a kernel, a schedule, nor a term")
+    from loopty.hoist import hoist_invariants
     from loopty.lower import lower_generic, require_pyopencl
 
     lowering = lower_generic(term, target or "c")
     require_pyopencl(lowering.kernel)
-    return term, lowering.kernel, lowering, target or "c"
+    return term, hoist_invariants(lowering.kernel), lowering, target or "c"
 
 
 def _off_the_stack(

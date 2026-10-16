@@ -1,6 +1,6 @@
 # Notes on loopy and islpy
 
-Thirty-one interactions with loopty's dependencies that cost real debugging
+Thirty-three interactions with loopty's dependencies that cost real debugging
 time, each with the local workaround and the reason it is local. No upstream
 issues were filed: these are notes so that the next person meets the answer
 instead of the symptom.
@@ -1675,3 +1675,77 @@ does the sum of a statement that never runs (a `when` that holds nowhere):
 within an empty set every set is the same one, and the gist would make the
 domain unbounded. The facts are those of the term, and the device code of
 every other shape the S1 driver times is the same as before.
+
+## 33. A sum's body is evaluated at every term, operands that read none of its binders included
+
+**Symptom.** `examples/l2p.py`'s `evaluate` computes each target's offset
+from its box's centre as Python locals before the Taylor sum,
+
+```python
+x = (tx[box, target] - cx[box]) / rscale
+y = (ty[box, target] - cy[box]) / rscale
+pot[box, target] = SCALING * reduce_sum(
+    R[box, a, b] * ipow(x, a) * ipow(y, b) * INV_FACT[a] * INV_FACT[b] ...
+```
+
+and the C and the OpenCL loopy generated computed both at every term of the
+triangle, two divisions and four loads per term:
+
+```c
+acc_a_1_b_1 = acc_a_1_b_1 + R_window[11 * a_1 + b_1] * loopy_pow_float64_int32((tx[off_cnt[box] + target] + -1.0 * cx[box]) / rscale, a_1) * ...
+```
+
+The loop form of `contracted` was 1.37x plain loopy's on the H200 at order
+10, and plain loopy with `x` and `y` written into the sum
+(`benchmarks/l2p.py --variant inline`) was as slow; unrolled, the compilers
+fold the repeated terms and the two were at parity (#270).
+
+**Cause.** The trace reads a local into the summand: what loopty lowers is
+the expression, not the name, and a loopy reduction evaluates its body as
+written at each term. loopy moves nothing out of a sum, and neither GCC nor
+the CUDA compiler took the loads and the divisions out of the triangle's
+loops.
+
+**Local fix.** `loopty.hoist.hoist_invariants` lowers an operand of a sum
+that reads none of its binders, nor an enclosing sum's, into a private
+temporary, assigned in the statement's loops before the sum, as a loopy
+author writes `<> x = ...`:
+
+```c
+invariant_0 = (tx[off_cnt[box] + target] + -1.0 * cx[box]) / rscale;
+invariant_1 = (ty[off_cnt[box] + target] + -1.0 * cy[box]) / rscale;
+for (int32_t a_1 = 0; a_1 <= 10; ++a_1)
+  for (int32_t b_1 = 0; b_1 <= 10 + -1 * a_1; ++b_1)
+    acc_a_1_b_1 = acc_a_1_b_1 + R_window[11 * a_1 + b_1] * loopy_pow_float64_int32(invariant_0, a_1) * ...
+```
+
+It runs on the kernel code is generated from, `Schedule.kernel` after every
+step and a kernel run without a schedule, so no step and no fact sees the
+temporaries, and loopy privatizes one along an `ilp` loop as it does any
+private temporary (`invariant_0[16]` in `layer_potential.py`'s tile). It keeps
+the bits and the reads:
+
+- Only a whole operand moves, or the leading operands of a real sum or
+  product, which C computes first: `h * w[i] * f[j]` is `(h * w[i]) *
+  f[j]`, and `f[j] * h * w[i]` keeps both products in the sum. A floating or
+  complex one only, of the type every operation from the sum down to it is
+  written in: loopy writes a Python number in the type context it is
+  handed (note 25), and a temporary's context is its own type, so a
+  `float32` operand of a double sum stays.
+- Nothing moves out of a conditional, an `and` or an `or`, which evaluate a
+  part only sometimes, out of a subscript, which loopy reads as affine, or
+  out of a substitution, whose body loopy expands later. Nor out of a
+  statement with a sum on a local axis: loopy runs that statement on the
+  axis (`realize_reduction`) and refuses an instruction that does not run
+  on every local axis of its kernel (`check_for_unused_hw_axes_in_insns`),
+  as a temporary of the statement's loops alone would not.
+- The temporary is assigned under the statement's predicates, after what the
+  statement waits for, where the sum computed the operand at each of its
+  terms, of which there may be none. An operand that reads arrays moves
+  where loopy's own check of an instruction's reads finds every cell it
+  reads inside its array at every instance of the statement, or where isl
+  finds that the sum has a term at every instance. `x[i - 1]` in a sum over
+  `Fin[i]` stays: `i = 0` has no term, and `x[-1]` is no cell.
+
+An operand of an inner sum that reads an outer sum's binder stays: an
+instruction cannot run inside another's sum.

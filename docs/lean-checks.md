@@ -341,8 +341,9 @@ stays `decided`.
   hypotheses only the conjuncts in which nothing rounds, copies and sign
   changes, whose two readings agree: `s[i] == a[i] + b[i]` holds of the
   floats a kernel stores, and not of them read as reals.
-- The gap between the model and the code: lowering, loopy and the compiler,
-  which the native and compiled differential covers, by sampling.
+- The gap between the model and the code: lowering, the operands of a sum
+  the generated code computes once before it (`loopty.hoist`), loopy and the
+  compiler, which the native and compiled differential covers, by sampling.
 
 ## Cost
 

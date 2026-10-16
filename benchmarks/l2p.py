@@ -459,8 +459,8 @@ def run_sumpy(inputs: dict, args: argparse.Namespace) -> tuple[dict, np.ndarray]
 #: and ``pow_global`` keep every box's triangle in one array of the kernel's,
 #: zeroed first, as loopty's program keeps an array it makes, where loopy keeps
 #: one box's in a temporary of the box; ``inline`` writes ``x`` and ``y`` into
-#: the sum, computed again at every term, as loopty's code of the example has
-#: them, where loopy computes them once per target.
+#: the sum, computed again at every term, as loopty's code of the example had
+#: them until it computed them once per target, as loopy does (#270).
 LOOPY_VARIANTS = (
     "loop", "unrolled", "global", "unrolled_global", "pow", "pow_global",
     "inline",
