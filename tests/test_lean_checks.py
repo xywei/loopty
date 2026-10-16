@@ -1218,6 +1218,22 @@ def test_lean_confirms_a_layouts_refutation_at_isls_cell(lean: Any) -> None:
         assert said.startswith("Lean confirmed the counterexample"), said
 
 
+def test_lean_does_the_arithmetic_of_two_layouts_at_a_number(lean: Any) -> None:
+    # #275: grudge's DOFArray at N = 3 and #418's dim_tags, each address as
+    # written, 3 ^ 3 * e and 3 * 3 * 3 * e, where both used to read 27 * e
+    from loopty import IslOracle
+
+    layouts = load(EXAMPLES / "storage_layouts.py")
+    (same,) = layouts.as_dim_tags.facts()
+    proved = lean.establish(IslOracle().establish(same))
+    assert proved.status is Status.PROVED, proved.provenance
+    source = proved.provenance["lean_source"]
+    assert (
+        ": (3 : Int) ^ 3 * e + a + 3 * b + (3 : Int) ^ 2 * c = "
+        "((3 * 3) * 3) * e + a + 3 * b + (3 * 3) * c :="
+    ) in source
+
+
 def test_lean_proves_the_device_launches_of_the_demos(lean: Any) -> None:
     # every cast that puts a loop on a hardware axis: S1's three launches of
     # each operator, sumpy's tile in S2, Kulkarni's split in S3, and the

@@ -34,7 +34,7 @@ marked with `...` is an excerpt and the lines it keeps are checked verbatim.
 | `assembly.py` | firedrake's PyOP2 assembly loop with FFC's P1 mass kernel called per cell and the cell's matrix added into the nodes, `y[cell[c, a]] += ...`: the rule's exactness, the element's mass and the scatter's total as theorems, the element's mass as `mass_ffc`'s postcondition to the approx tolerance, an update that owes the class of its sum and not distinct writes, PyOP2's GPU split refused with the node its two triangles share, and accepted once the updates are atomic |
 | `calls.py` | kernels calling kernels inside their loops: a rule with a loop of its own (`dot`, loopy #1044) in a matrix-vector and a sparse product, and firedrake's P1 quadrature rule applied per element through a rule that takes the integrand (#1043), each call inlined with binders of its own and owing the caller what the callee's contract checks |
 | `taylor_reconstruction.py` | sumpy's compressed Taylor reconstruction in one file, theorem, kernel and schedule: the theorem proved for every order, the kernel's postcondition decided from what it stores, the theorem applied to it, and the schedule's casts, in one ledger |
-| `l2p.py` | the demo's flagship, sumpy's L2P for the 2-D Laplace kernel (`E2PFromSingleBox`): the compressed Taylor theorem proved for every order and its form box by box, sumpy's storage index a checked layout, the kernel that reconstructs each box's triangle with the theorem applied to its postcondition, the interchange of the triangle's loops refused with its pair, the three calls fused box by box with each box's triangle and table in windows of its own, sumpy's own schedule for a GPU with each box a work group, and a row that compares the program with sumpy's own kernel |
+| `l2p.py` | the demo's flagship, sumpy's L2P for the 2-D Laplace kernel (`E2PFromSingleBox`): the compressed Taylor theorem proved for every order and its form box by box, sumpy's storage index a checked layout, the kernel that reconstructs each box's triangle with the theorem applied to its postcondition, the interchange of the triangle's loops refused with its pair, the three calls fused box by box with each box's triangle and table in windows of its own, sumpy's own schedule for a GPU with each box a work group, and a row that compares the program with sumpy's own kernel, within `1e-14` of the largest value |
 | `hexahedra.py` | grudge #418's weak gradient and weak divergence on hexahedra, the kernels for every order: the metric product, a pass per reference axis and the three directions summed, each a kernel and together a program; the Kronecker theorem the passes rest on, for every `n`; the DOFArray's layout at every order, the same as #418's `dim_tags` `N3,N0,N1,N2` and as the kernels' row-major arrays; the passes fused as deep as each pair allows, one loop deeper refused with its pair, and what passes between them kept a row and a slab at a time; and the three launches a device runs, every node on a work item, which `benchmarks/hexahedra.py` times |
 | `advection.py` | grudge #418's weak advection right-hand side on hexahedra, from grudge's own geometry: the upwind flux at every face node, the neighbor's value gathered through the face maps and in bounds by type; the volume term and the lift with the inverse mass pushed inward, the rearrangement two theorems state for every order, and a third that the lift onto the face nodes is the face gather's transpose; the kernels fused on the element and one loop deeper refused with its pair, the fluxes kept an element at a time; every split a device runs (libParanumal's volume and surface, the fluxes first, three launches, one, one from the metric terms) checked before it runs; and libParanumal's lift onto the face nodes, refused without its barriers with the edge node two faces update, and accepted atomic. `benchmarks/advection.py` times them |
 
@@ -2511,7 +2511,7 @@ mirrors.
   it computed is recorded beside the file (`l2p_sumpy.json`, written by
   `benchmarks/l2p.py` in an environment with sumpy main and loopy main), and
   the `upstream` row compares the native run of `l2p` with it. They agree to
-  round-off.
+  round-off, and the row says how close: within `1e-14` of the largest value.
 
 ### python examples/l2p.py
 
@@ -2646,7 +2646,8 @@ decided                          decided    isl          l2p.py:340  l2p        
                                                                                           l2p.C kept in 22 cells, C[box, a, b] in slot (a, b)
 decided                          decided    isl          l2p.py:347  l2p                on_groups(l2p.unpack.box) renames the instances of l2p one for one
 decided                          decided    isl          l2p.py:347  l2p                the order after on_groups(l2p.unpack.box) runs every dependence of l2p forward, within one work item
-tested                           tested     upstream     l2p.py:469  l2p                the native run of l2p agrees with sumpy_l2p in pot, on its example inputs
+tested                           tested     upstream     l2p.py:469  l2p                the native run of l2p agrees with sumpy_l2p in pot within 1e-14 of the largest value,
+                                                                                          on its example inputs
 
 56 facts: 2 assumed, 47 decided, 7 tested
 

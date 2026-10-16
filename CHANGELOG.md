@@ -121,6 +121,24 @@ the ledger, the refusals and the fixes they suggest, and `loopty run`.
   33 in `docs/loopy-notes.md`). No fact changes: the steps transform and
   check the kernel as it is lowered, and the temporaries are in the code
   generated after them (`loopty.hoist`).
+- **Two layouts at a number are stated for Lean as written (#275).** At a
+  module constant, `N = 3`, Python folds `N**3 * e + (a + N * b + N**2 *
+  c)` to `27*e + a + 3*b + 9*c` before loopty reads it, and `dim_tags`
+  built the same sum from its strides, so `--show-lean as_dim_tags` in
+  `examples/storage_layouts.py` read `27 * e + a + 3 * b + 9 * c = 27 * e +
+  a + 3 * b + 9 * c`: true, and the arithmetic Python's. A layout's body is
+  now run once more with each module constant it reads a symbol, and the
+  number put back unfolded, and `dim_tags` gives each stride as the product
+  of the extents nested inside it, so Lean is asked `3 ^ 3 * e + a + 3 * b
+  + 3 ^ 2 * c = ((3 * 3) * 3) * e + a + 3 * b + (3 * 3) * c`, and proves
+  it. isl reads the address Python computed, as before; a body that
+  branches on a constant keeps the folded address alone.
+- **The flagship's agreement with sumpy says how close it is (#278).**
+  `sumpy_l2p` is `@upstream(l2p, within=1e-14)`, and its row reads `the
+  native run of l2p agrees with sumpy_l2p in pot within 1e-14 of the largest
+  value, on its example inputs`, where it said only that the two agree to
+  the `approx` class, a millionth. On the example inputs the two differ by
+  8.3e-17 where the largest potential is 0.217.
 
 ### Fixed
 
@@ -168,6 +186,38 @@ the ledger, the refusals and the fixes they suggest, and `loopty run`.
   run is now of the program stopped at that call by a flag of its own
   (`loopty.compose.stopped_at`), so the caller's arrays hold what the calls
   before it wrote, as natively.
+- **A layout called in a traced kernel is checked by the address the call
+  returned (#236).** At symbolic indices the check called the layout's
+  function a second time, on fresh variables, and compared that term with
+  the stated one, so a function that answers differently when called again
+  passed, and the kernel read through a subscript the layout's facts say
+  nothing about. The term the call returned, which the trace records, is
+  now compared with the stated address at the call's own indices and
+  sizes: the same term, the same polynomial multiplied out, or the same
+  quasi-affine function as isl reads it.
+- **`@upstream` runs on the comparison's own file's `example_inputs()`
+  (#262).** It read the kernel's module's, so a comparison declared in a
+  file of its own, importing the kernel (`from l2p import l2p` in
+  `l2p_vs_sumpy.py`), was `assumed` where the kernel's file has none, or
+  compared on inputs the comparison file did not mean. The comparison's
+  file comes first, then the kernel's, and the row's provenance says whose
+  were used (`inputs`: `example_inputs() of l2p.py`).
+- **A theorem a kernel cites that gives it nothing says why (#234).** It
+  had no row and no reason anywhere, so a recurrence off by one, a guard
+  off by one or a conjunct about reals that rounds looked the same as a
+  theorem never cited, and an exception of the matcher was taken for a
+  theorem that does not apply. Such a theorem now has a row of kind
+  `by-theorem`, `assumed`, `on_the_triangle, which off_by_one cites,
+  applies to it`, and `lanky check` says why under the table, in the
+  kernel's terms: the hypothesis about an array the kernel writes that no
+  conjunct of the postcondition is, put in the kernel's names, with the
+  nearest conjunct (`no conjunct of the postcondition of off_by_one is its
+  hypothesis recurrence, ... R[a + 2, b] == -R[a, b + 2]; the nearest is
+  ... R[a + 2, b] == -R[a, b + 1]`); the conjunct about reals that would be
+  a hypothesis and rounds; the binding no array or size can stand for
+  (`its integer k would be s, which is no integer of fill's`); a conclusion
+  that rounds; a refuted postcondition; or the exception. A theorem that
+  decides a conjunct of the postcondition, or gives a row, has none.
 
 ## [0.3.0] - 2026-10-15
 

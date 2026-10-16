@@ -44,7 +44,30 @@ with registry.collecting():
 
 
 def rows(kernel: Any) -> list[Any]:
-    return [fact for fact in kernel.facts() if fact.kind == KIND]
+    return [
+        fact
+        for fact in kernel.facts()
+        if fact.kind == KIND and fact.status is not Status.ASSUMED
+    ]
+
+
+def nothing(kernel: Any) -> dict[str, str]:
+    """Why each theorem ``kernel`` cites gives it nothing, as its row says (#234)."""
+    return {
+        fact.statement.split(",")[0]: fact.provenance["unapplied"]
+        for fact in kernel.facts()
+        if fact.kind == KIND and fact.status is Status.ASSUMED
+    }
+
+
+#: What a kernel that adds no series of ``halves`` is told of the two it cites.
+NO_SERIES = {
+    "halves": "no sum of {k} adds the terms of its series c(n)",
+    "halved": (
+        "it is an identity, which puts a series theorem's terms in the kernel's "
+        "spelling, and no series {k} adds is read with it"
+    ),
+}
 
 
 def test_the_terms_a_kernel_adds_are_the_theorems_through_the_identity() -> None:
@@ -64,16 +87,22 @@ def test_the_terms_a_kernel_adds_are_the_theorems_through_the_identity() -> None
 
 def test_a_kernel_that_adds_other_terms_gets_no_row() -> None:
     assert rows(kernels.quarter_sum) == []
+    # but each theorem it cites says that it gives nothing, and why (#234)
+    assert nothing(kernels.quarter_sum) == {
+        name: words.format(k="quarter_sum") for name, words in NO_SERIES.items()
+    }
 
 
 def test_a_term_inside_another_is_not_one_the_kernel_adds() -> None:
     """``1 / (x[i] * 0.5) ** 2`` divides by ``c(2)`` and adds nothing (Codex)."""
     assert rows(kernels.inverse_square) == []
+    assert set(nothing(kernels.inverse_square)) == {"halves", "halved"}
 
 
 def test_a_theorem_about_reals_is_not_applied_to_complex_numbers() -> None:
     """The same powers of a complex ``x[i]`` match the term, not the sort (Codex)."""
     assert rows(kernels.complex_sum) == []
+    assert set(nothing(kernels.complex_sum)) == {"halves", "halved"}
 
 
 def test_an_identitys_premise_is_named_in_the_row() -> None:

@@ -838,37 +838,67 @@ class Kernel(_Decorated):
         the same kind after the others, the terms it adds read as the
         theorem's, with the identities the kernel cites to read them so
         (:mod:`loopty.summands`).
+
+        A theorem that gives nothing, one no fact of the kernel rests on, has
+        a row too, ``assumed``, that says why
+        (:func:`loopty.dataflow.unapplied_facts`): before, it was not in the
+        ledger at all, and a recurrence off by one looked the same as a
+        theorem never cited (#234). So does one whose matching raised, with
+        the exception.
         """
         from lanky.ledger import Status
 
-        from loopty.dataflow import application_facts
+        from loopty.dataflow import application_facts, unapplied_facts
         from loopty.summands import series_facts
 
         if not self.uses:
             return facts
+        key = {"module": self.module, "line": self.line}
+        raised: dict[int, str] = {}
         try:
-            series = series_facts(
-                term, self.uses, self.qualname, module=self.module, line=self.line
-            )
-        except Exception:  # noqa: BLE001 - a theorem that does not apply gives nothing
+            series = series_facts(term, self.uses, self.qualname, **key)
+        except Exception as exc:  # noqa: BLE001 - said in the theorems' rows
             series = []
+            for theorem in self.uses:
+                raised[id(theorem)] = (
+                    f"reading the terms {term.name} adds raised "
+                    f"{type(exc).__name__}: {exc}"
+                )
         at = next(
             (k for k, fact in enumerate(facts) if fact.kind == "postcondition"), None
         )
-        if at is None or facts[at].status is Status.REFUTED:
-            return [*facts, *series]
-        try:
-            applied = application_facts(
-                term,
-                self.uses,
-                facts[at],
-                self.qualname,
-                module=self.module,
-                line=self.line,
-            )
-        except Exception:  # noqa: BLE001 - a theorem that does not apply gives nothing
-            applied = []
-        return [*facts[: at + 1], *applied, *facts[at + 1 :], *series]
+        post = None if at is None else facts[at]
+        applied: list[Fact] = []
+        if post is not None and post.status is not Status.REFUTED:
+            for theorem in self.uses:
+                try:
+                    applied.extend(
+                        application_facts(term, [theorem], post, self.qualname, **key)
+                    )
+                except Exception as exc:  # noqa: BLE001 - said in its row
+                    raised[id(theorem)] = (
+                        f"applying it raised {type(exc).__name__}: {exc}"
+                    )
+        given = {
+            entry for fact in (*facts, *applied, *series) for entry in fact.rests_on
+        }
+        nothing = [
+            theorem
+            for theorem in self.uses
+            if getattr(theorem, "fact_id", None) not in given
+        ]
+        rows = unapplied_facts(
+            term,
+            nothing,
+            post,
+            self.qualname,
+            raised=raised,
+            where=self.where,
+            **key,
+        )
+        if at is None:
+            return [*facts, *series, *rows]
+        return [*facts[: at + 1], *applied, *rows, *facts[at + 1 :], *series]
 
     def _decided(self, term: Term, facts: list[Fact]) -> list[Fact]:
         """``facts`` with the postcondition decided from the term, where it can be.

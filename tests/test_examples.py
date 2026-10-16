@@ -1655,14 +1655,18 @@ def test_the_l2p_demo_agrees_with_sumpys_own_kernel() -> None:
         "upstream",
         "l2p",
     )
+    # round-off, far inside the class's allowance: the row states its own (#278)
     assert row["statement"] == (
-        "the native run of l2p agrees with sumpy_l2p in pot, on its example inputs"
+        "the native run of l2p agrees with sumpy_l2p in pot within 1e-14 of the "
+        "largest value, on its example inputs"
     )
     assert row["provenance"]["uncompared"] == []
+    assert row["provenance"]["inputs"] == "example_inputs() of l2p.py"
     detail = row["provenance"]["outputs"]["pot"]
     assert detail["agree"] and detail["exactness"] == "approx"
-    # round-off, far inside the class's allowance
-    assert detail["difference"] < 1e-14 * detail["largest"]
+    assert detail["within"] == 1e-14
+    assert detail["tolerance"] == 1e-14 * detail["largest"], detail
+    assert detail["difference"] <= detail["tolerance"], detail
 
 
 def test_the_l2p_demo_refuses_the_interchange_and_fuses_box_by_box() -> None:

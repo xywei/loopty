@@ -54,7 +54,35 @@ with registry.collecting():
 
 
 def facts(kernel: Any, kind: str) -> list[Any]:
-    return [fact for fact in kernel.facts() if fact.kind == kind]
+    return [
+        fact
+        for fact in kernel.facts()
+        if fact.kind == kind
+        and not (kind == APPLIED and fact.status is Status.ASSUMED)
+    ]
+
+
+def nothing(kernel: Any) -> str:
+    """Why the one theorem ``kernel`` cites gives it nothing, as its row says.
+
+    A cited theorem that gives nothing has a row of its own, ``assumed``, the
+    reason under ``declined``, which ``lanky check`` prints (#234).
+    """
+    (row,) = [
+        fact
+        for fact in kernel.facts()
+        if fact.kind == APPLIED and fact.status is Status.ASSUMED
+    ]
+    (theorem,) = kernel.uses
+    assert row.statement == (
+        f"{theorem.__name__}, which {kernel.__name__} cites, applies to it"
+    )
+    assert row.provenance["theorem"] == theorem.fact_id
+    assert row.decided_by is None and not row.rests_on
+    said = row.provenance["declined"]
+    prefix = f"{theorem.__name__} gives {kernel.__name__} nothing: "
+    assert said.startswith(prefix), said
+    return said[len(prefix) :]
 
 
 # {{{ decided
@@ -270,8 +298,9 @@ def test_a_conjunct_the_cited_theorem_gives_is_decided_under_it() -> None:
     assert any(
         source.startswith("offsets_increase at ") for source in post.provenance["used"]
     )
-    # its conclusion is a conjunct already: no fact of its own
-    assert not facts(kernels.scan_monotone, APPLIED)
+    # its conclusion is a conjunct already: no fact of its own, and no row
+    # saying it gives nothing, since the postcondition rests on it
+    assert not [f for f in kernels.scan_monotone.facts() if f.kind == APPLIED]
 
 
 def test_a_cited_theorem_gives_its_conclusion_from_the_postcondition() -> None:
@@ -315,6 +344,10 @@ def test_a_kernel_computing_another_recurrence_gets_nothing_from_its_theorem() -
     (post,) = facts(kernels.wrong_coefficient, "postcondition")
     assert post.status is Status.REFUTED
     assert not facts(kernels.wrong_coefficient, APPLIED)
+    assert nothing(kernels.wrong_coefficient) == (
+        "the postcondition of wrong_coefficient is refuted, and a theorem is applied "
+        "to one that holds"
+    )
     from loopty.dataflow import decide_postcondition
 
     term = kernels.wrong_coefficient.term
@@ -336,6 +369,14 @@ def test_a_kernel_off_by_one_gets_nothing_from_the_theorem() -> None:
     (post,) = facts(kernels.off_by_one, "postcondition")
     assert (post.status, post.decided_by) == (Status.DECIDED, "isl")
     assert not facts(kernels.off_by_one, APPLIED)
+    # and says so: the hypothesis no conjunct is, in the kernel's names, and
+    # the conjunct nearest it, off by one in b (#234)
+    guard = "forall a in Fin(p + 1), b in Fin(p + 1) where a + b + 2 <= p. "
+    assert nothing(kernels.off_by_one) == (
+        "no conjunct of the postcondition of off_by_one is its hypothesis "
+        f"recurrence, {guard}R[a + 2, b] == -R[a, b + 2]; the nearest is "
+        f"{guard}R[a + 2, b] == -R[a, b + 1]"
+    )
 
 
 @pytest.mark.parametrize("name", ["scaled", "summed"])
@@ -353,6 +394,16 @@ def test_a_conjunct_that_rounds_is_no_hypothesis_of_a_theorem_about_reals(
     assert (post.status, post.decided_by) == (Status.DECIDED, "isl")
     assert not facts(k, APPLIED)
     assert 3.0 * 0.1 * 10 != 3.0
+    # the row says which conjunct rounds (#234)
+    conjunct = {
+        "scaled": "R[i] == c[i]*0.1",
+        "summed": "s[i] == a[i] + b[i]",
+    }[name]
+    assert nothing(k) == (
+        f"the conjunct forall i in Fin(n). {conjunct} would be its hypothesis h, and "
+        "it is about reals and rounds in floating point, so a theorem about the "
+        "reals is not given it"
+    )
 
 
 def test_a_conjunct_reads_the_same_as_reals_where_nothing_in_it_rounds() -> None:
@@ -376,6 +427,9 @@ def test_a_theorems_integer_is_never_taken_at_a_real() -> None:
     (post,) = facts(kernels.fill, "postcondition")
     assert (post.status, post.decided_by) == (Status.DECIDED, "isl")
     assert not facts(kernels.fill, APPLIED)
+    assert nothing(kernels.fill) == (
+        "its integer k would be s, which is no integer of fill's"
+    )
 
 
 def test_a_conclusion_that_rounds_decides_no_conjunct_and_is_no_row() -> None:
@@ -388,6 +442,10 @@ def test_a_conclusion_that_rounds_decides_no_conjunct_and_is_no_row() -> None:
     assert post.status is not Status.DECIDED
     assert (2.0**53 + 1) - 2.0**53 != 1
     assert not facts(kernels.ones, APPLIED)
+    assert nothing(kernels.ones) == (
+        "its conclusion there, forall i in Fin(n). R[i] + 1 - R[i] == 1, holds of the "
+        "reals and not of the floats ones computes, which round"
+    )
 
 
 def test_a_theorems_integer_decides_nothing_at_a_real() -> None:
@@ -423,10 +481,33 @@ def test_numpys_floats_are_reals_to_a_theorem_about_reals() -> None:
 
 def test_a_theorem_that_does_not_apply_gives_nothing() -> None:
     assert not facts(kernels.scan_unrelated, APPLIED)
+    assert nothing(kernels.scan_unrelated) == (
+        "no conjunct of the postcondition is its hypothesis h, forall i in Fin(n). "
+        "f(i) == 7"
+    )
     # over Nat: the cells the scan writes are not known to be naturals
     assert not facts(kernels.scan_naturals, APPLIED)
     (post,) = facts(kernels.scan_naturals, "postcondition")
     assert kernels.naturals_increase.fact_id not in post.rests_on
+    assert nothing(kernels.scan_naturals) == (
+        "its off would be off, but scan_naturals writes off, and nothing says its "
+        "cells are points of Nat: a theorem about them is over Int"
+    )
+
+
+def test_a_matcher_that_raises_says_so_in_the_theorems_row(monkeypatch) -> None:
+    # #234: an exception of the matcher was taken for a theorem that does not
+    # apply, and said nothing
+    from loopty import dataflow
+    from loopty.kernel import Kernel
+
+    def broken(*args: Any, **kwargs: Any) -> list[Any]:
+        raise RuntimeError("the matcher broke")
+
+    monkeypatch.setattr(dataflow, "application_facts", broken)
+    k = Kernel(kernels.scan_cited.fn, uses=list(kernels.scan_cited.uses))
+    assert not facts(k, APPLIED)
+    assert nothing(k) == "applying it raised RuntimeError: the matcher broke"
 
 
 def test_uses_takes_theorems_and_refuses_anything_else() -> None:

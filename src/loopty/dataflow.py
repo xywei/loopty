@@ -971,7 +971,7 @@ def theorem_applications(
       for one: the copies ``R(a)(b) == c(a)(b)`` read backwards would
       otherwise match the stored entries ``c(a)(b) == D(a)(b)``, with ``D``
       and ``R`` both ``c``, and give a claim about ``c`` and itself;
-    - each binding is one an array or a size can stand for (:func:`_fits`);
+    - each binding is one an array or a size can stand for (:func:`_misfit`);
     - the claim names nothing but the kernel's names and its own binders.
       The theorem's sizes are put in wherever they are, the sort of a family
       nothing bound included (``D: Fn[Fin[n], Real]`` with ``n`` bound to
@@ -982,6 +982,36 @@ def theorem_applications(
     Of the matches that pass, the one that matches the most hypotheses is
     taken. A theorem with none, or whose conclusion is a conjunct of the
     postcondition already, gives nothing.
+    """
+    return [
+        found
+        for _theorem, found in theorem_outcomes(term, theorems, given)
+        if isinstance(found, Application)
+    ]
+
+
+#: How far a match got before it was refused, for the nearest one's reason:
+#: two families one array, a conclusion about no array the kernel writes, a
+#: hypothesis about one that nothing matched, a binding nothing stands for, a
+#: conclusion that rounds, one that cannot be stated, one that names more.
+_STAGES = ("shared", "unwritten", "unmatched", "misfit", "rounds", "unstated", "names")
+
+
+def theorem_outcomes(
+    term: Term, theorems: Sequence[Any], given: Sequence[Any]
+) -> list[tuple[Any, Application | str]]:
+    """Each cited theorem with what it gives the kernel, or why it gives nothing.
+
+    The applications are :func:`theorem_applications`'. A theorem that gives
+    nothing says why, in the kernel's terms (#234), from the match that got
+    furthest before it was refused (:data:`_STAGES`), the most hypotheses
+    matched among those: its hypothesis about an array the kernel writes
+    that no conjunct of the postcondition is, put in the kernel's names, with
+    the nearest conjunct (``the nearest is ...``); a binding no array or size
+    of the kernel's can stand for; its conclusion, where it rounds, or is a
+    conjunct already. Where nothing matched, a conjunct about reals that a
+    hypothesis would match and that rounds, or that no conjunct is any of its
+    hypotheses.
     """
     from lanky.prelude import FnType
 
@@ -1006,7 +1036,7 @@ def theorem_applications(
         | {name for name, _ in term.reflected}
         | (free_in(term.post) if term.post is not None else set())
     )
-    out: list[Application] = []
+    out: list[tuple[Any, Application | str]] = []
     for theorem in theorems:
         variables = dict(getattr(theorem, "variables", ()))
         functions = {
@@ -1017,6 +1047,12 @@ def theorem_applications(
         hypotheses = [prop for _name, prop in named]
         goal = getattr(theorem, "goal", None)
         if goal is None or not hypotheses:
+            out.append(
+                (
+                    theorem,
+                    "it has no hypothesis for a conjunct of the postcondition to be",
+                )
+            )
             continue
         families = [_names(prop) & functions for prop in hypotheses]
         concluded = _names(goal) & functions
@@ -1024,38 +1060,72 @@ def theorem_applications(
             name for name, sort in variables.items() if _real(_codomain(sort))
         }
         best: list[Any] = [None]
+        nearest: list[Any] = [None]
         tried = [0]
 
-        def acceptable(sigma: dict[str, Any], matched: tuple) -> bool:
+        def refused(sigma: dict[str, Any], matched: tuple) -> Any:
+            """``None`` for a match that applies, else its stage and its words."""
             arrays = [sigma[name] for name in functions if name in sigma]
             # two families of a theorem are two arrays: one array standing
             # for both makes a claim about the array and itself
             if len(set(arrays)) != len(arrays):
-                return False
+                shared = next(a for a in arrays if arrays.count(a) > 1)
+                both = [f for f in sorted(functions) if sigma.get(f) == shared]
+                return 0, lambda: (
+                    f"its {' and '.join(both)} would both be {shared}, and two of "
+                    "its families are two arrays"
+                )
             outputs = {name for name in functions if sigma.get(name) in written}
             if not outputs or not (concluded & outputs):
-                return False
+                return 1, lambda: (
+                    f"its conclusion would be about no array {term.name} writes"
+                )
             used = {k for k, _ in matched}
-            if any(
-                families[k] & outputs for k in range(len(hypotheses)) if k not in used
-            ):
-                return False
-            if not _fits(term, written, sizes, variables, sigma, linear):
-                return False
+            missing = [
+                k
+                for k in range(len(hypotheses))
+                if k not in used and families[k] & outputs
+            ]
+            if missing:
+                return 2, partial(
+                    _unmatched_words,
+                    term,
+                    named,
+                    missing,
+                    sigma,
+                    functions,
+                    given,
+                    {position for _k, position in matched},
+                )
+            misfit = _misfit(term, written, sizes, variables, sigma, linear)
+            if misfit is not None:
+                return 3, lambda: misfit
             # the conclusion is about the reals, and says what the floats
             # hold only where the two readings agree
             free = functions - set(sigma)
             bound = {sigma[name] for name in functions if name in sigma}
             conclusion = _apply(goal, sigma, set(sigma) & functions)
             if not exact(conclusion, reals_too | bound, free):
-                return False
+                return 4, lambda: (
+                    f"its conclusion there, {render(conclusion)}, holds of the "
+                    f"reals and not of the floats {term.name} computes, which round"
+                )
             made = _applied_claim(
                 term, theorem, variables, sigma, matched, set(sigma) & functions
             )
             if made is None:
-                return False
+                return 5, lambda: (
+                    "its conclusion cannot be stated there: the sorts of the "
+                    "variables nothing binds name one another"
+                )
             claim, _conclusion, names = made
-            return not (free_in(claim) - set(names) - known)
+            extra = free_in(claim) - set(names) - known
+            if extra:
+                return 6, lambda: (
+                    f"its conclusion there would name {', '.join(sorted(extra))}, "
+                    f"which {term.name} does not"
+                )
+            return None
 
         def search(
             k: int, sigma: dict[str, Any], matched: tuple[tuple[int, int], ...]
@@ -1068,8 +1138,13 @@ def theorem_applications(
                     best[0] is not None and len(matched) <= len(best[0][1])
                 ):
                     return
-                if acceptable(sigma, matched):
+                why = refused(sigma, matched)
+                if why is None:
                     best[0] = (dict(sigma), matched)
+                    return
+                rank = (why[0], len(matched))
+                if nearest[0] is None or rank > nearest[0][0]:
+                    nearest[0] = (rank, why[1])
                 return
             for position, conjunct in enumerate(given):
                 if not usable[position]:
@@ -1081,6 +1156,17 @@ def theorem_applications(
 
         search(0, {}, ())
         if best[0] is None:
+            if nearest[0] is not None:
+                out.append((theorem, nearest[0][1]()))
+                continue
+            out.append(
+                (
+                    theorem,
+                    _nothing_matched(
+                        named, given, usable, matcher, tried[0] > _SEARCH
+                    ),
+                )
+            )
             continue
         sigma, matched = best[0]
         bound = {name for name in functions if name in sigma}
@@ -1088,31 +1174,117 @@ def theorem_applications(
         assert made is not None
         claim, conclusion, free = made
         if structural_key(claim) in have:
+            out.append(
+                (
+                    theorem,
+                    f"its conclusion, {render(claim)}, is a conjunct of the "
+                    "postcondition already",
+                )
+            )
             continue
         used = {k for k, _ in matched}
         out.append(
-            Application(
+            (
                 theorem,
-                tuple((name, sigma[name]) for name in variables if name in sigma),
-                matched,
-                claim,
-                conclusion,
-                free,
-                tuple(name for k, (name, _) in enumerate(named) if k not in used),
+                Application(
+                    theorem,
+                    tuple((name, sigma[name]) for name in variables if name in sigma),
+                    matched,
+                    claim,
+                    conclusion,
+                    free,
+                    tuple(name for k, (name, _) in enumerate(named) if k not in used),
+                ),
             )
         )
     return out
 
 
-def _fits(
+def _unmatched_words(
+    term: Term,
+    named: Sequence[tuple[str, Any]],
+    missing: Sequence[int],
+    sigma: Mapping[str, Any],
+    functions: Collection[str],
+    given: Sequence[Any],
+    taken: Collection[int],
+) -> str:
+    """``no conjunct of the postcondition is its hypothesis recurrence, ...``.
+
+    The hypothesis in the kernel's names, as the match put them, and the
+    conjunct nearest it: one about the same arrays that no hypothesis
+    matched, else any about them.
+    """
+    from loopty.hypotheses import _apply, _names
+
+    k = missing[0]
+    name, prop = named[k]
+    wanted = _apply(prop, sigma, set(sigma) & set(functions))
+    arrays = {sigma[f] for f in _names(prop) & set(functions) if f in sigma}
+    about = [
+        position
+        for position, conjunct in enumerate(given)
+        if arrays & _names(conjunct)
+    ]
+    others = [position for position in about if position not in taken]
+    words = (
+        f"no conjunct of the postcondition of {term.name} is its hypothesis "
+        f"{name}, {render(wanted)}"
+    )
+    if others or about:
+        words += f"; the nearest is {render(given[(others or about)[0]])}"
+    rest = [named[j][0] for j in missing[1:]]
+    if rest:
+        words += f"; nor is any its {' or '.join(rest)}"
+    return words
+
+
+def _nothing_matched(
+    named: Sequence[tuple[str, Any]],
+    given: Sequence[Any],
+    usable: Sequence[bool],
+    matcher: Any,
+    stopped: bool,
+) -> str:
+    """Why no hypothesis of a theorem matched a conjunct of the postcondition.
+
+    A conjunct about reals that rounds, which a hypothesis would match: a
+    theorem about the reals is not given it. Else none is any hypothesis.
+    """
+    for name, prop in named:
+        for position, conjunct in enumerate(given):
+            if usable[position]:
+                continue
+            if matcher.match(prop, conjunct, {}, {}):
+                return (
+                    f"the conjunct {render(conjunct)} would be its hypothesis "
+                    f"{name}, and it is about reals and rounds in floating point, "
+                    "so a theorem about the reals is not given it"
+                )
+    if stopped:
+        return (
+            f"no match of its hypotheses was found in the {_SEARCH} ways of "
+            "matching them that were tried"
+        )
+    if len(named) == 1:
+        ((name, prop),) = named
+        return (
+            f"no conjunct of the postcondition is its hypothesis {name}, "
+            f"{render(prop)}"
+        )
+    names = ", ".join(name for name, _ in named)
+    return f"no conjunct of the postcondition is any of its hypotheses, {names}"
+
+
+def _misfit(
     term: Term,
     written: set[str],
     sizes: set[str],
     variables: Mapping[str, Any],
     sigma: Mapping[str, Any],
     linear: Any,
-) -> bool:
-    """Whether every binding is one the theorem may be taken at.
+) -> str | None:
+    """Why a binding is not one the theorem may be taken at, or ``None``.
 
     A family stands for an array of as many axes as the family takes
     arguments, whose cells are points of the family's values
@@ -1135,33 +1307,52 @@ def _fits(
     for name, sort in variables.items():
         if name not in sigma:
             continue
+        value = sigma[name]
+        shown = value if isinstance(value, str) else render(value)
         if isinstance(sort, FnType):
             rank, codomain = 0, sort
             while isinstance(codomain, FnType):
                 rank += 1
                 codomain = codomain.codomain
-            typ = types.get(sigma[name])
-            if not isinstance(typ, ArrType) or typ.ndim != rank:
-                return False
-            if applicable(term, written, sigma[name], codomain) is not None:
-                return False
+            typ = types.get(value)
+            if not isinstance(typ, ArrType):
+                return (
+                    f"its {name} would be {shown}, which is no array of {term.name}'s"
+                )
+            if typ.ndim != rank:
+                return (
+                    f"its {name} takes {rank} arguments, and {shown}, which it "
+                    f"would be, has {typ.ndim} axes"
+                )
+            why = applicable(term, written, value, codomain)
+            if why is not None:
+                return f"its {name} would be {shown}, but {why}"
         elif getattr(sort, "name", None) == "Nat":
-            form = linear(sigma[name])
-            if form is None:
-                return False
-            names, constant = form
-            if constant < 0 or any(c < 0 or n not in sizes for n, c in names.items()):
-                return False
+            form = linear(value)
+            if form is None or form[1] < 0 or any(
+                c < 0 or n not in sizes for n, c in form[0].items()
+            ):
+                return (
+                    f"its natural {name} would be {shown}, which is no sum of "
+                    f"{term.name}'s sizes that is never negative"
+                )
         elif getattr(sort, "name", None) == "Int":
-            form = linear(sigma[name])
+            form = linear(value)
             if form is None or any(n not in integral for n in form[0]):
-                return False
+                return (
+                    f"its integer {name} would be {shown}, which is no integer "
+                    f"of {term.name}'s"
+                )
         elif getattr(sort, "name", None) == "Real":
-            if not _real_value(sigma[name], reals):
-                return False
+            if not _real_value(value, reals):
+                return (
+                    f"its real {name} would be {shown}, which is neither a real "
+                    f"of {term.name}'s nor a number that reads as a real as its "
+                    "float does"
+                )
         else:
-            return False
-    return True
+            return f"its {name} is of {sort}, which nothing of {term.name}'s stands for"
+    return None
 
 
 def _applied_claim(
@@ -1393,6 +1584,102 @@ def application_facts(
                 where=post.where,
                 owner=owner,
                 rests_on=(identifier, post.id),
+            )
+        )
+    return out
+
+
+def unapplied_facts(
+    term: Term,
+    theorems: Sequence[Any],
+    post: Fact | None,
+    owner: str,
+    *,
+    raised: Mapping[int, str] | None = None,
+    module: str | None = None,
+    line: int | None = None,
+    where: str = "",
+) -> list[Fact]:
+    """A row for each cited theorem that gives the kernel nothing, with why (#234).
+
+    ``theorems`` are the ones no fact of the kernel rests on: no row of
+    theirs (:func:`application_facts`, :func:`loopty.summands.series_facts`),
+    and no conjunct of the postcondition decided under them. The citation
+    claims the theorem applies, and nothing established that, so the row is
+    ``assumed``, kind ``by-theorem``, and says why under ``declined``, which
+    ``lanky check`` prints under the table: a hypothesis about an array the
+    kernel writes that no conjunct of the postcondition is, with the nearest
+    conjunct; a conjunct about reals that rounds; a binding no array or size
+    can stand for; a conclusion that rounds; the postcondition refuted, or
+    none; and an exception, as the exception (``raised``, by the theorem's
+    ``id``). Before, such a theorem was not in the ledger at all.
+    """
+    from loopty.summands import _identity, _series_theorem
+
+    raised = dict(raised or {})
+    outcomes: dict[int, Any] = {}
+    if post is not None and post.status is not Status.REFUTED and term.post is not None:
+        pending = [theorem for theorem in theorems if id(theorem) not in raised]
+        try:
+            given = list(conjuncts(term.post))
+            for theorem, found in theorem_outcomes(term, pending, given):
+                outcomes[id(theorem)] = found
+        except Exception as exc:  # noqa: BLE001 - said as the exception
+            for theorem in pending:
+                raised[id(theorem)] = (
+                    f"matching its hypotheses raised {type(exc).__name__}: {exc}"
+                )
+    out = []
+    for theorem in theorems:
+        name = getattr(theorem, "__name__", "theorem")
+        identifier = getattr(theorem, "fact_id", name)
+        series = _series_theorem(theorem)
+        reasons = []
+        if id(theorem) in raised:
+            reasons.append(raised[id(theorem)])
+        elif _identity(theorem) is not None:
+            reasons.append(
+                "it is an identity, which puts a series theorem's terms in the "
+                f"kernel's spelling, and no series {term.name} adds is read with it"
+            )
+        else:
+            if series is not None:
+                reasons.append(
+                    f"no sum of {term.name} adds the terms of its series "
+                    f"{series.family}({series.binder.name})"
+                )
+            if post is None or term.post is None:
+                if series is None:
+                    reasons.append(
+                        f"{term.name} has no postcondition whose conjuncts would be "
+                        "its hypotheses"
+                    )
+            elif post.status is Status.REFUTED:
+                reasons.append(
+                    f"the postcondition of {term.name} is refuted, and a theorem is "
+                    "applied to one that holds"
+                )
+            else:
+                found = outcomes.get(id(theorem))
+                if isinstance(found, str):
+                    reasons.append(found)
+        if not reasons:
+            continue
+        why = "; and ".join(reasons)
+        out.append(
+            Fact(
+                id=fact_id(APPLIED, owner, module=module, line=line, detail=identifier),
+                kind=APPLIED,
+                statement=f"{name}, which {term.name} cites, applies to it",
+                term=None,
+                status=Status.ASSUMED,
+                provenance={
+                    "theorem": identifier,
+                    "unapplied": why,
+                    "declined": f"{name} gives {term.name} nothing: {why}",
+                },
+                where=post.where if post is not None else where,
+                owner=owner,
             )
         )
     return out
