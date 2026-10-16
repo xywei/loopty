@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import dataclasses
+import os
+import subprocess
+import sys
 
 import islpy as isl
 import pymbolic.primitives as prim
@@ -98,3 +101,34 @@ def test_term_lists_params_in_signature_order() -> None:
     assert term.stmt("s0").where.endswith(":17")
     with pytest.raises(KeyError):
         term.stmt("nope")
+
+
+def test_a_hypothesis_prints_what_it_mentions_in_one_order() -> None:
+    # A program fact's term in the JSON ledger is a repr with its hypotheses
+    # in it, and a frozenset of names prints in the order of the process's
+    # hash seed: l2p's ledger read mentions=frozenset({'C', 'R'}) under one
+    # seed and frozenset({'R', 'C'}) under another (#298). Each seed runs in
+    # a process of its own.
+    script = (
+        "from loopty.term import Hypothesis\n"
+        "names = frozenset({'R', 'C', 'coeffs', 'cnt', 'x', 'y'})\n"
+        "print(repr(Hypothesis(True, 'a claim', mentions=names)))\n"
+        "print(repr(Hypothesis(True, 'a claim')))\n"
+    )
+    texts = {
+        subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=120,
+            env={**os.environ, "PYTHONHASHSEED": seed},
+        ).stdout
+        for seed in ("1", "2", "3", "4")
+    }
+    assert texts == {
+        "Hypothesis(claim=True, source='a claim', rests_on=(), "
+        "mentions=frozenset({'C', 'R', 'cnt', 'coeffs', 'x', 'y'}))\n"
+        "Hypothesis(claim=True, source='a claim', rests_on=(), "
+        "mentions=frozenset())\n"
+    }

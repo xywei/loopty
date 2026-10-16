@@ -28,6 +28,7 @@ from loopty.lower import (
     lower,
     lower_generic,
     numpy_dtype,
+    pyopencl_installed,
     target_for,
 )
 
@@ -299,7 +300,9 @@ def test_the_opencl_target_is_named_but_not_imported() -> None:
     opencl_host = InKernelOpenCLTarget.get_host_ast_builder(None)
     assert not opencl_host.can_implement_conditionals
     # Importing loopty, lowering, and running must never pull in pyopencl.
-    assert "pyopencl" not in sys.modules
+    # Where pyopencl is installed, ``import loopy`` imports it (#179).
+    if not pyopencl_installed():
+        assert "pyopencl" not in sys.modules
 
 
 # {{{ the loops outside an inner loop

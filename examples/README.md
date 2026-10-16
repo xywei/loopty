@@ -92,8 +92,6 @@ scan_monotone: n : Nat, cnt : Fn[Fin(n), Nat], off : Fn[Fin(n + 1), Nat] | off(0
 schedule: Schedule(spmv, target='c').split(spmv.j, 2).realize(spmv.y, tree=True)
   decided  isl  split(spmv.j, 2) renames the instances of spmv one for one
   decided  isl  the order after split(spmv.j, 2) runs every dependence of spmv forward
-  decided  isl  realize(spmv.y, tree=True) renames the instances of spmv one for one
-  decided  isl  the order after realize(spmv.y, tree=True) runs every dependence of spmv forward
   decided  isl  the accumulation into spmv.y is reassociated by realize(spmv.y, tree=True), so its result is compared at 'reassoc'
 device schedule: Schedule(spmv, target='c').on_groups(spmv.r).split(spmv.j, 32).on_items(spmv.j.inner).realize(spmv.y, tree=True)
   decided  isl  on_groups(spmv.r) renames the instances of spmv one for one
@@ -104,8 +102,6 @@ device schedule: Schedule(spmv, target='c').on_groups(spmv.r).split(spmv.j, 32).
   decided  isl  the order after on_items(spmv.j.inner) runs every dependence of spmv forward, within one work item
   refuted  loopy-target c code can be generated for spmv after on_items(spmv.j.inner)
   decided  isl  the accumulation into spmv.y is reassociated by on_items(spmv.j.inner), so its result is compared at 'reassoc'
-  decided  isl  realize(spmv.y, tree=True) renames the instances of spmv one for one
-  decided  isl  the order after realize(spmv.y, tree=True) runs every dependence of spmv forward, within one work item
   reason: the parallel tag on spmv.j.inner sits inside a loop whose bound comes from an array (a ragged fiber), and loopy will not put a hardware axis in a domain with a data-dependent parameter. Parallelize an enclosing loop with a size known at launch instead, such as the rows of a CSR product
 
   y: difference 0 within 1e-06 (approx) -> tested
@@ -161,16 +157,14 @@ decided  type           spmv.py:114  spmv           the accumulation into y[r] o
 tested   interpreter    spmv.py:104  spmv           the traced term computes what the body computes
 decided  isl            spmv.py:195  spmv           split(spmv.j, 2) renames the instances of spmv one for one
 decided  isl            spmv.py:195  spmv           the order after split(spmv.j, 2) runs every dependence of spmv forward
-decided  isl            spmv.py:196  spmv           realize(spmv.y, tree=True) renames the instances of spmv one for one
-decided  isl            spmv.py:196  spmv           the order after realize(spmv.y, tree=True) runs every dependence of spmv forward
 decided  isl            spmv.py:196  spmv           the accumulation into spmv.y is reassociated by realize(spmv.y, tree=True),
                                                       so its result is compared at 'reassoc'
 decided  call           spmv.py:117  solve          after scan(...) in solve: off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
 tested   interpreter    spmv.py:117  solve          the traced term computes what the body computes
 
-29 facts: 24 decided, 5 tested
+27 facts: 22 decided, 5 tested
 
-WITHOUT LEAN: scan_monotone and 20 more rows are not proved. To have Lean prove what it can: pip install "lanky[lean]", and Lean v4.29.1 from elan (elan default leanprover/lean4:v4.29.1).
+WITHOUT LEAN: scan_monotone and 18 more rows are not proved. To have Lean prove what it can: pip install "lanky[lean]", and Lean v4.29.1 from elan (elan default leanprover/lean4:v4.29.1).
 ```
 
 ### loopty run examples/spmv.py
@@ -198,17 +192,15 @@ STATUS   BY     WHERE        OWNER  STATEMENT
 -------  -----  -----------  -----  -------------------------------------------------------------------------------------
 decided  isl    spmv.py:195  spmv   split(spmv.j, 2) renames the instances of spmv one for one
 decided  isl    spmv.py:195  spmv   the order after split(spmv.j, 2) runs every dependence of spmv forward
-decided  isl    spmv.py:196  spmv   realize(spmv.y, tree=True) renames the instances of spmv one for one
-decided  isl    spmv.py:196  spmv   the order after realize(spmv.y, tree=True) runs every dependence of spmv forward
 decided  isl    spmv.py:196  spmv   the accumulation into spmv.y is reassociated by realize(spmv.y, tree=True),
                                       so its result is compared at 'reassoc'
 tested   loopy  spmv.py:196  spmv   the scheduled run of spmv agrees with the native run to the accuracy its types state
 tested   loopy  spmv.py:71   scan   the scheduled run of scan agrees with the native run to the accuracy its types state
 tested   loopy  spmv.py:117  solve  the scheduled run of solve agrees with the native run to the accuracy its types state
 
-8 facts: 5 decided, 3 tested
+6 facts: 3 decided, 3 tested
 
-WITHOUT LEAN: 4 rows are not proved. To have Lean prove what it can: pip install "lanky[lean]", and Lean v4.29.1 from elan (elan default leanprover/lean4:v4.29.1).
+WITHOUT LEAN: 2 rows are not proved. To have Lean prove what it can: pip install "lanky[lean]", and Lean v4.29.1 from elan (elan default leanprover/lean4:v4.29.1).
 ```
 
 ## stencil_skew.py

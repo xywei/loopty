@@ -106,6 +106,26 @@ the ledger, the refusals and the fixes they suggest, and `loopty run`.
   three calls fuse in one step, so `fused` has two cast facts where it had
   four.
 
+### Fixed
+
+- `realize(k.y, tree=True)` records one fact, that the accumulation into
+  `k.y` is reassociated, and no `bijective` or `monotone` fact: the step
+  moves no instance and changes no order, so the two said nothing about it,
+  as `atomic`'s did not (#203). `examples/spmv.py`'s ledger is two rows
+  shorter, and so is `examples/p2p.py`'s.
+- A program fact's term in the JSON ledger (`lanky check --json`, `loopty
+  run --json`) is one text whatever the hash seed: a hypothesis prints the
+  arrays it mentions sorted, where a frozenset printed them in the order of
+  the process's hash seed, `{'C', 'R'}` in one run of `examples/l2p.py` and
+  `{'R', 'C'}` in another (#298).
+- The test suite passes with the `opencl` extra installed. The two tests
+  that ask that nothing imports pyopencl ask it where pyopencl is not
+  installed, since `import loopy` imports it where it is; the test of
+  `loopty run --target opencl` on a machine without pyopencl hides it (#179).
+  The refusal of a group axis over a window kept in global memory is asked
+  without pyopencl too, on loopy's plain OpenCL target, so that CI sees it,
+  and with the refusal's wording since #276 (#299).
+
 ## [0.3.0] - 2026-10-15
 
 The third release, on lanky 0.3.0. Five demos, each written after a kernel

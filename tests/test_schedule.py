@@ -538,6 +538,25 @@ def test_realizing_a_reduction_as_a_tree_marks_it_reassociated() -> None:
     assert exactness[0].status.value == "decided"
 
 
+def test_realize_moves_no_instance_and_records_no_cast_of_its_own() -> None:
+    # A reduction tree changes how the sum is added up, not which instance
+    # runs when, so its one fact is the reassociation, as atomic's is; a
+    # step after it is a cast as before (#203).
+    schedule = Schedule(ht.spmv_term(exactness="reassoc"))
+    tree = schedule.realize(SPMV_REASSOC.y, tree=True)
+    assert [fact.statement for fact in tree.facts()] == [
+        "the accumulation into spmv.y is reassociated by "
+        "realize(spmv.y, tree=True), so its result is compared at 'reassoc'"
+    ]
+    assert list(schedule.realize(SPMV_REASSOC.y, tree=False).facts()) == []
+    split = tree.split(SPMV_REASSOC.j, 2)
+    assert [fact.kind for fact in split.facts()] == [
+        "exactness",
+        "bijective",
+        "monotone",
+    ]
+
+
 def test_a_tree_over_an_exact_accumulation_is_rejected() -> None:
     schedule = Schedule(ht.spmv_term(exactness="exact"))
     with pytest.raises(IllegalCast) as caught:
