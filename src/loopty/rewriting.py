@@ -1289,8 +1289,11 @@ def _drawn_terms(
             continue
         want, got = np.asarray(want), np.asarray(got)
         with np.errstate(all="ignore"):
-            finite = np.isfinite(want) & np.isfinite(got)
-            differs = np.asarray(disagreement(got, want, exactness)) & finite
+            # a cell where one side is finite and the other is not is a
+            # disagreement (Codex, #341); one where both left the float range
+            # is not compared, since a draw may break the theorem's conditions
+            either = np.isfinite(want) | np.isfinite(got)
+            differs = np.asarray(disagreement(got, want, exactness)) & either
         if differs.any():
             cell = tuple(int(k) for k in np.argwhere(differs)[0])
             return False, (

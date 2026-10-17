@@ -361,6 +361,27 @@ def test_the_compared_row_is_measured_and_notes_the_extremes() -> None:
     assert compared.provenance["outputs"]["out"]["measured"] < 1e-12
 
 
+def test_a_rewrite_finite_before_and_nan_after_at_a_draw_is_refuted() -> None:
+    """``log(x * x)`` as ``2 * log(x)``: NaN where x < 0, and the row says so.
+
+    A cell finite on one side and NaN on the other was left out of the
+    comparison of drawn inputs, so the step read tested (Codex, #341).
+    """
+
+    @theorem
+    def log_of_a_square(x: Real) -> log(x * x) == 2 * log(x):  # noqa: F821
+        """False for a negative x, where the right side is NaN."""
+
+    @kernel
+    def logs(x: Arr[Fin[n], Real], out: Arr[Fin[n], Real]):  # noqa: F821
+        for i in out.dom:
+            out[i] = log(x[i] * x[i])
+
+    (row,) = rows(Schedule(logs).rewrite(logs.out, by=log_of_a_square))["rewrite"]
+    assert row.status.value == "refuted", row.provenance
+    assert "nan after" in row.provenance["reason"], row.provenance
+
+
 def test_a_later_step_leaves_an_earlier_steps_compared_row_as_it_was() -> None:
     """A rewrite compares the schedule it made, asked of a later one (Codex, #341)."""
 
