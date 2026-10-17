@@ -1483,7 +1483,7 @@ def mode_agree(options: argparse.Namespace) -> None:
         )
     for name, program in (
         ("weak_grad", demo["passes"]),
-        ("weak_div", demo["weak_div"]),
+        ("weak_div", demo["div_passes"]),
     ):
         out = "grad" if name == "weak_grad" else "div"
         args = {k: Arr.from_numpy(np.array(v)) for k, v in inputs[name].items()}
