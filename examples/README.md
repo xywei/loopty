@@ -1268,7 +1268,7 @@ as sumpy computes it: rewrite(single_layer.out, by=(conjugate_form, log_of_the_m
   tested   interpreter rewrite(out, by=log_of_the_modulus): over the complex numbers, what out stores is unchanged wherever c[t] - y[s] != 0: log(abs(c[t] - y[s])) becomes log(real((c[t] - y[s])*conj(c[t] - y[s]))) / 2, in 1 place
   tested   run         c[t] - y[s] != 0 for every t and every s, which conjugate_form and log_of_the_modulus need, on the example inputs
   decided  type        after rewrite(out, ...), out is compared at approx (it was approx)
-  tested   run         the compiled as_sumpy_computes agrees with the native single_layer in out at approx, within 1e-06 of each value (measured 8e-16 of the largest), on its example inputs and 3 drawn ones; note: with the inputs scaled by 1e-170 (|c[t] - y[s]| about 1e-170), out[0] is nan where the native run gives 5.29e-168; with the inputs scaled by 1e+170 (|c[t] - y[s]| about 1e+170), out[0] is nan where the native run gives 5.29e+172
+...
 
 sumpy's tile, get_optimized_kernel(is_cpu=True): split(single_layer.t, 16).tag({single_layer.t.outer: 'g.0', single_layer.t.inner: 'l.0'}).split(single_layer.s, 256).prioritize(single_layer.s.outer, single_layer.t.inner)
   decided  isl  split(single_layer.t, 16) renames the instances of single_layer one for one
@@ -1328,7 +1328,7 @@ tested                     tested     run            layer_potential.py:388  sin
                                                                                                    and log_of_the_modulus need, on the example inputs
 decided                    decided    type           layer_potential.py:388  single_layer        after rewrite(out, ...), out is compared at approx (it was approx)
 tested                     tested     run            layer_potential.py:388  single_layer        the compiled as_sumpy_computes agrees with the native single_layer in out at approx,
-                                                                                                   within 1e-06 of each value (measured 8e-16 of the largest), on its example inputs
+...
                                                                                                    and 3 drawn ones; note: with the inputs scaled by 1e-170 (|c[t] - y[s]| about 1e-170),
                                                                                                    out[0] is nan where the native run gives 5.29e-168; with the inputs scaled by 1e+170
                                                                                                    (|c[t] - y[s]| about 1e+170), out[0] is nan where the native run gives 5.29e+172
@@ -1712,7 +1712,7 @@ derived from the math: Schedule(weak_grad, target='c').rewrite(weak_grad.grad, b
   decided  isl         for contract(weak_grad.r_pass), every cell of weak_grad.arrays.r_pass that weak_grad reads, r_pass[x, d, e, c, b, i] = reduce_sum(...) (hexahedra.py:394) has stored by the time it is read
   decided  isl         no read of weak_grad.arrays.r_pass sees its slot overwritten after contract(weak_grad.r_pass, lambda x, d, e, c, b, i: (b, i)): weak_grad.arrays.r_pass kept in n*n cells, r_pass[x, d, e, c, b, i] in slot (b, i)
   w: difference 0 within 1e-06 (approx) -> tested
-  grad: difference 7.22e-16 within 1.01e-06 (approx) -> tested
+...
 
 refused: fuse(passes.along_r.i, passes.along_s.i) illegal: v[q, e, k, j, i] = reduce_sum(...) (hexahedra.py:231) at q=8, e=0, k=1, j=1, i=1 writes v[8, 0, 1, 1, 1], read by vs[q, e, k, j, i] = reduce_sum(...) (hexahedra.py:244) at q=8, e=0, k=1, j=0, i=1, scheduled earlier (at n=2, ne=1, isl's choice); fuse(passes.along_r.k, passes.along_s.k) runs every dependence between them forward
 
@@ -1944,13 +1944,13 @@ WITHOUT MATHLIB: sum_factorization and 3 more rows are not proved, since only Le
 $ uv run loopty run examples/hexahedra.py
 weak_grad: Schedule(weak_grad, target='c').rewrite(weak_grad.grad, by=sum_factorization, keep=('r_pass', 's_pass'))
   w: difference 0 within 1e-06 (approx) -> tested
-  grad: difference 7.22e-16 within 1.01e-06 (approx) -> tested
+...
 weak_grad: Schedule(weak_grad, target='c').rewrite(weak_grad.grad, by=sum_factorization, keep=('r_pass', 's_pass')).fuse(weak_grad.r_pass.c, weak_grad.s_pass.c)
   w: difference 0 within 1e-06 (approx) -> tested
-  grad: difference 7.22e-16 within 1.01e-06 (approx) -> tested
+...
 weak_grad: Schedule(weak_grad, target='c').rewrite(weak_grad.grad, by=sum_factorization, keep=('r_pass', 's_pass')).fuse(weak_grad.r_pass.c, weak_grad.s_pass.c).contract(weak_grad.r_pass, lambda x, d, e, c, b, i: (b, i))
   w: difference 0 within 1e-06 (approx) -> tested
-  grad: difference 7.22e-16 within 1.01e-06 (approx) -> tested
+...
 passes: Schedule(passes, target='c').fuse(passes.metric.j, passes.along_r.j).fuse(passes.along_r.k, passes.along_s.k)
   grad: difference 0 within 1e-06 (approx) -> tested
 passes: Schedule(passes, target='c').fuse(passes.metric.j, passes.along_r.j).fuse(passes.along_r.k, passes.along_s.k).contract(passes.w, lambda q, e, k, j, i: i).contract(passes.v, lambda q, e, k, j, i: (j, i))
