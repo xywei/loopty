@@ -389,6 +389,14 @@ def test_a_condition_is_needed_only_where_the_statement_runs() -> None:
     )
     (condition,) = rows(schedule)["rewrite-condition"]
     assert condition.status.value == "tested", condition.provenance
+    assert condition.statement.startswith(
+        "a[i] != 0 for every i where a[i] != 0.0, which through_the_reciprocal needs"
+    )
+    # and Lean is asked T == T' where the statement runs, which the row tests
+    (equality,) = rows(schedule)["rewrite"]
+    (part,) = equality.term.lean_obligation().parts
+    guards = [render(guard) for guard in part.term.guard.children]
+    assert "a[i] != 0.0" in guards, guards
 
 
 def test_a_rewrite_finite_before_and_nan_after_at_a_draw_is_refuted() -> None:

@@ -349,6 +349,9 @@ class Condition:
     #: The statement as the source writes it, where the same claim is a row
     #: of more than one statement, and empty otherwise.
     statement: str = ""
+    #: The statement's guard where it reads data, which isl leaves out of the
+    #: domain: the condition is needed, and tested, only where it holds.
+    runs_where: str = ""
 
     @property
     def shown(self) -> str:
@@ -368,6 +371,8 @@ class Condition:
             text += " for " + " and ".join(
                 f"every {names.get(name, name)}" for name, _ in self.over
             )
+        if self.runs_where:
+            text += f" where {self.runs_where}"
         if self.statement:
             text += f", in {self.statement}"
         return text
@@ -836,6 +841,11 @@ def _conditions(
                 spelled=tuple(
                     zip(stmt.inames, stmt.spelled or stmt.inames, strict=False)
                 ),
+                runs_where=(
+                    render(_spelled_in(stmt.guard, stmt))
+                    if stmt.unnarrowed and stmt.guard is not None
+                    else ""
+                ),
             )
         )
     return tuple(out)
@@ -1161,6 +1171,13 @@ class MathRewrite(RewriteTerm):
             claim.hypotheses.append(theorem_term)
             try:
                 claim.hypotheses.extend(_domain_conditions(old))
+                if old.unnarrowed and old.guard is not None:
+                    # the statement runs only where its guard holds, which its
+                    # domain does not say, and its conditions are tested there
+                    # (failing_point): T == T' is claimed there too (Codex, #341)
+                    from loopty.math import as_stated
+
+                    claim.hypotheses.append(as_stated(old.guard))
                 for condition in _stmt_conditions(step, stmt_id):
                     claim.hypotheses.append(_quantified(condition, old))
                 goal = Comparison(
