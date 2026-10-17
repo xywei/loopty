@@ -51,6 +51,7 @@ of date or any command fails, naming the block.
 from __future__ import annotations
 
 import argparse
+import difflib
 import re
 import shlex
 import subprocess
@@ -234,6 +235,12 @@ def refresh(path: Path, root: Path, check: bool) -> tuple[bool, list[str]]:
         changed = True
         if check:
             print(f"  STALE: {block.command}")
+            # the lines that differ, so that a check on another machine says
+            # which of them the machine changes (the last digits of a float)
+            shown = lines[block.start : block.stop]
+            for line in difflib.unified_diff(shown, captured, n=0, lineterm=""):
+                if not line.startswith(("---", "+++")):
+                    print(f"    {line}")
             continue
         lines[block.start : block.stop] = captured
     if changed and not check:

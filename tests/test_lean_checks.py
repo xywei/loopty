@@ -68,7 +68,15 @@ def _files(*directories: Path) -> list[Path]:
 
 
 def load(path: Path) -> Any:
-    """Import an example or a test kernel's file as a module of its own."""
+    """Import an example or a test kernel's file as a module of its own.
+
+    A file that cites ``lanky.known`` is skipped where the lanky installed has
+    no library of known facts, as the released lanky CI also tests against.
+    """
+    if "from lanky.known import" in path.read_text(encoding="utf-8") and (
+        importlib.util.find_spec("lanky.known") is None
+    ):
+        pytest.skip(f"{path.name} cites lanky.known, which this lanky does not have")
     name = f"lean_checks_{path.parent.name}_{path.stem}"
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
