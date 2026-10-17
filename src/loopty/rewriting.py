@@ -346,6 +346,9 @@ class Condition:
     stmt: str
     #: How the source names the statement's loops, ``(("x_0", "x"), ...)``.
     spelled: tuple[tuple[str, str], ...] = ()
+    #: The statement as the source writes it, where the same claim is a row
+    #: of more than one statement, and empty otherwise.
+    statement: str = ""
 
     @property
     def shown(self) -> str:
@@ -354,13 +357,20 @@ class Condition:
 
     @property
     def text(self) -> str:
-        """``c[t] - y[s] != 0 for every t and every s``."""
-        if not self.over:
-            return self.shown
-        names = dict(self.spelled)
-        return f"{self.shown} for " + " and ".join(
-            f"every {names.get(name, name)}" for name, _ in self.over
-        )
+        """``c[t] - y[s] != 0 for every t and every s``.
+
+        With ``, in out[i] = x[i] / a[i]`` after it where another statement
+        needs the same claim over its own instances.
+        """
+        text = self.shown
+        if self.over:
+            names = dict(self.spelled)
+            text += " for " + " and ".join(
+                f"every {names.get(name, name)}" for name, _ in self.over
+            )
+        if self.statement:
+            text += f", in {self.statement}"
+        return text
 
 
 def _respelled(expr: Any, spelled: Sequence[tuple[str, str]]) -> Any:
@@ -914,19 +924,31 @@ class Rewritten:
 
     @property
     def conditions(self) -> tuple[Condition, ...]:
-        """Every condition of every match, once, with every theorem that needs it."""
+        """Every condition of every match, once, with every theorem that needs it.
+
+        Once per statement and per range: a condition is tested or decided
+        over the instances of its statement and the sums it is under, so the
+        same claim needed by two statements is two rows, each over its own
+        (Codex, #341). One row for both was tested over the first statement's
+        instances alone, and a failure among the second's passed.
+        """
         from loopty.hypotheses import structural_key
 
         found: dict[Any, Condition] = {}
         needs: dict[Any, list[str]] = {}
-        index: dict[str, list[Condition]] = {}
+        index: dict[str, list[Any]] = {}
         for match in self.matches:
             for condition in match.conditions:
-                key = (condition.kind, structural_key(condition.claim))
+                key = (
+                    condition.kind,
+                    condition.stmt,
+                    structural_key(condition.claim),
+                    structural_key(condition.over),
+                )
                 if key not in found and condition.kind == "index":
                     # a statement's conditions on indices are one row, as isl
                     # decides them in one question
-                    index.setdefault(condition.stmt, []).append(condition)
+                    index.setdefault(condition.stmt, []).append(key)
                 found.setdefault(key, condition)
                 names = needs.setdefault(key, [])
                 if condition.theorem not in names:
@@ -940,12 +962,10 @@ class Rewritten:
             if condition.stmt in merged:
                 continue
             merged.add(condition.stmt)
-            parts = index[condition.stmt]
+            parts = [found[part] for part in index[condition.stmt]]
             theorems = list(
                 dict.fromkeys(
-                    name
-                    for part in parts
-                    for name in needs[("index", structural_key(part.claim))]
+                    name for part in index[condition.stmt] for name in needs[part]
                 )
             )
             over = tuple(
@@ -961,7 +981,25 @@ class Rewritten:
                     theorem=_listed(theorems),
                 )
             )
-        return tuple(out)
+        return tuple(self._told_apart(out))
+
+    def _told_apart(self, conditions: list[Condition]) -> list[Condition]:
+        """Each condition another statement also needs, with its statement named."""
+        from loopty.hypotheses import structural_key
+
+        statements: dict[Any, set[str]] = {}
+        for condition in conditions:
+            key = (condition.kind, structural_key(condition.claim))
+            statements.setdefault(key, set()).add(condition.stmt)
+        out = []
+        for condition in conditions:
+            if len(statements[(condition.kind, structural_key(condition.claim))]) > 1:
+                stmt = self.before.stmt(condition.stmt)
+                condition = dataclasses.replace(
+                    condition, statement=stmt.text or stmt.id
+                )
+            out.append(condition)
+        return out
 
 
 def _listed(names: Sequence[str]) -> str:
@@ -1175,7 +1213,7 @@ def _stmt_conditions(step: Step, stmt_id: str) -> list[Condition]:
         if match.stmt != stmt_id:
             continue
         for condition in match.conditions:
-            key = structural_key(condition.claim)
+            key = (structural_key(condition.claim), structural_key(condition.over))
             if key not in seen:
                 seen.add(key)
                 out.append(condition)

@@ -147,20 +147,21 @@ def _tiled(knl: Any, target: str, source: str, group: int) -> Any:
     return lp.prioritize_loops(knl, f"{source}_outer,{target}_inner")
 
 
-def arithmetic(kern: Any, target: str) -> Any:
+def arithmetic(ex: Any, layer: str, target: str) -> Any:
     """The example's kernel in sumpy's arithmetic: its math steps.
 
     Each division through the conjugate, and the single layer's ``log|alpha|``
-    with no square root, as the example's schedules rewrite them.
+    with no square root, as the example's schedules rewrite them. The kernel
+    and its theorems are taken from ``ex``, one import of the example, by the
+    layer's name: :func:`example` imports the file afresh at each call, so a
+    kernel from one import is never the kernel of another.
     """
     from loopty import Schedule
 
-    ex = example()
-    by = (
-        (ex.conjugate_form, ex.log_of_the_modulus)
-        if kern is ex.single_layer
-        else ex.conjugate_form
-    )
+    if layer == "single":
+        kern, by = ex.single_layer, (ex.conjugate_form, ex.log_of_the_modulus)
+    else:
+        kern, by = ex.double_layer, ex.conjugate_form
     return Schedule(kern, target=target).rewrite(kern.out, by=by)
 
 
@@ -169,7 +170,7 @@ def loopty_schedule(tile: str, layer: str = "single") -> Any:
     ex = example()
     kern = ex.single_layer if layer == "single" else ex.double_layer
     return (
-        arithmetic(kern, "opencl")
+        arithmetic(ex, layer, "opencl")
         .split(kern.t, GROUP[tile])
         .tag({kern.t.outer: "g.0", kern.t.inner: "l.0"})
         .split(kern.s, 256)
@@ -243,9 +244,8 @@ def loopy_same_kernel(tile: str) -> Any:
                 return _natural_power(self.rec(expr.base, *args), exponent)
             return super().map_power(expr, *args)
 
-    ex = example()
     with declining():
-        lowered = arithmetic(ex.single_layer, "opencl").kernel
+        lowered = arithmetic(example(), "single", "opencl").kernel
     (insn,) = lowered.default_entrypoint.instructions
     knl = lp.make_kernel(
         "{[t, s]: 0 <= t < nt and 0 <= s < ns}",

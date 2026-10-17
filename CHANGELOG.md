@@ -47,8 +47,10 @@ All notable changes to loopty are recorded here. The format follows
   step is a row of the ledger: exact over the reals or the complex numbers
   where the theorem's conditions hold, proved by Lean with Mathlib (the
   theorem restated and rewritten into the goal under the sums too) and tested
-  on drawn inputs without it; each condition is a row by its kind, decided by
-  isl on indices and tested on the example inputs for data; the output's class
+  on drawn inputs without it; each condition is a row by its kind and its
+  statement, decided by isl on indices and tested on the example inputs for
+  data over the statement's own instances (one claim two statements need is a
+  row of each, naming the statement); the output's class
   is `approx`; and the compiled schedule is compared with the native kernel,
   measured on the example inputs and on drawn ones, with a note, not a
   failure, where inputs of extreme magnitude leave the float range the

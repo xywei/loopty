@@ -294,6 +294,51 @@ def test_a_data_condition_that_fails_on_the_example_inputs_is_refuted() -> None:
     )
 
 
+@theorem
+def through_the_reciprocal(x: Real, a: Real, nonzero: a != 0) -> (  # noqa: F821
+    x / a == x * (1 / a)  # noqa: F821
+):
+    """Division as multiplication by the reciprocal."""
+
+
+@kernel
+def two_branches(
+    x: Arr[Fin[n], Real],  # noqa: F821
+    a: Arr[Fin[n], Real],  # noqa: F821
+    out: Arr[Fin[n], Real],  # noqa: F821
+):
+    """Two statements store out, each dividing by a on its own cells."""
+    for i in out.dom:
+        if i < 2:
+            out[i] = x[i] / a[i]
+        else:
+            out[i] = 2.0 * x[i] / a[i]
+
+
+def test_a_condition_two_statements_need_is_tested_over_each() -> None:
+    """``a[i] != 0`` on the first two cells and on the rest: a row each (Codex, #341).
+
+    One row for both tested the claim over the first statement's cells alone,
+    so the zero at i = 3, which only the second statement divides by, passed.
+    """
+    a = np.ones(5)
+    a[3] = 0.0
+    schedule = (
+        Schedule(two_branches)
+        .rewrite(two_branches.out, by=through_the_reciprocal)
+        .example(
+            x=Arr.from_numpy(np.arange(5.0)), a=Arr.from_numpy(a), out=Arr.zeros(5)
+        )
+    )
+    first, second = rows(schedule)["rewrite-condition"]
+    assert (first.status.value, second.status.value) == ("tested", "refuted")
+    assert second.provenance["reason"] == "a[i] != 0 fails at i=3"
+    assert first.statement != second.statement
+    assert first.statement.startswith("a[i] != 0 for every i, in out[i] = ")
+    (equality,) = rows(schedule)["rewrite"]
+    assert {first.id, second.id} <= set(equality.rests_on)
+
+
 def test_the_compared_row_is_measured_and_notes_the_extremes() -> None:
     """The float range moves, as sumpy's does: a note at the extremes, not a failure.
 
