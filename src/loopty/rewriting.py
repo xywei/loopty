@@ -1758,7 +1758,6 @@ def _first_disagreement(
 
 def compared_fact(
     rows: Any,
-    schedule: Any,
     arguments: Mapping[str, Any] | None,
     identifier: str,
     owner: str,
@@ -1766,6 +1765,11 @@ def compared_fact(
     name: str,
 ) -> Fact:
     """The compiled rewritten schedule against the native kernel, measured.
+
+    The schedule compiled is ``rows.schedule``, the one the step made, and
+    not a later schedule the facts are asked of: a step after it, failing or
+    undoing it, leaves this row as it was. Only the example inputs come from
+    the schedule asked.
 
     On the example inputs, where a disagreement fails the row, and with the
     inputs scaled to the magnitude extremes of :data:`EXTREMES`, where a
@@ -2033,7 +2037,6 @@ class Rows:
         )
         compared = compared_fact(
             self,
-            schedule,
             arguments,
             self.compared_id,
             owner,

@@ -361,6 +361,25 @@ def test_the_compared_row_is_measured_and_notes_the_extremes() -> None:
     assert compared.provenance["outputs"]["out"]["measured"] < 1e-12
 
 
+def test_a_later_step_leaves_an_earlier_steps_compared_row_as_it_was() -> None:
+    """A rewrite compares the schedule it made, asked of a later one (Codex, #341)."""
+
+    @theorem
+    def wrong_form(x: Complex, alpha: Complex, nonzero: alpha != 0) -> (  # noqa: F821
+        x / alpha == x * alpha  # noqa: F821
+    ):
+        """False: what a later step should not refute the earlier row by."""
+
+    first = Schedule(layer).rewrite(layer.out, by=log_of_the_modulus)
+    first = first.example(**inputs())
+    later = first.rewrite(layer.out, by=wrong_form)
+    alone = rows(first)["rewrite-compared"][0]
+    earlier, wrong = rows(later)["rewrite-compared"]
+    assert alone.status.value == earlier.status.value == "tested", earlier.provenance
+    assert earlier.statement == alone.statement
+    assert wrong.status.value == "refuted"
+
+
 def test_without_examples_the_data_rows_say_what_they_need() -> None:
     found = rows(as_sumpy_computes())
     (condition,) = found["rewrite-condition"]
