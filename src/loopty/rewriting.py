@@ -958,7 +958,7 @@ class Rewritten:
 
         found: dict[Any, Condition] = {}
         needs: dict[Any, list[str]] = {}
-        index: dict[str, list[Any]] = {}
+        index: dict[Any, list[Any]] = {}
         for match in self.matches:
             for condition in match.conditions:
                 key = (
@@ -968,27 +968,29 @@ class Rewritten:
                     structural_key(condition.over),
                 )
                 if key not in found and condition.kind == "index":
-                    # a statement's conditions on indices are one row, as isl
-                    # decides them in one question
-                    index.setdefault(condition.stmt, []).append(key)
+                    # a statement's conditions on indices under the same sums
+                    # are one row, as isl decides them in one question; under
+                    # other sums they are rows of their own, since one sum's
+                    # empty range must not make another's condition vacuous
+                    # (Codex, #341)
+                    index.setdefault(_index_group(condition), []).append(key)
                 found.setdefault(key, condition)
                 names = needs.setdefault(key, [])
                 if condition.theorem not in names:
                     names.append(condition.theorem)
         out = []
-        merged: set[str] = set()
+        merged: set[Any] = set()
         for key, condition in found.items():
             if condition.kind != "index":
                 out.append(dataclasses.replace(condition, theorem=_listed(needs[key])))
                 continue
-            if condition.stmt in merged:
+            group = _index_group(condition)
+            if group in merged:
                 continue
-            merged.add(condition.stmt)
-            parts = [found[part] for part in index[condition.stmt]]
+            merged.add(group)
+            parts = [found[part] for part in index[group]]
             theorems = list(
-                dict.fromkeys(
-                    name for part in index[condition.stmt] for name in needs[part]
-                )
+                dict.fromkeys(name for part in index[group] for name in needs[part])
             )
             over = tuple(
                 dict.fromkeys(
@@ -1022,6 +1024,18 @@ class Rewritten:
                 )
             out.append(condition)
         return out
+
+
+def _index_group(condition: Condition) -> Any:
+    """Which index conditions share a row: one statement's, under the same sums.
+
+    The statement's own loops (no bound of their own) do not part them; the
+    sums a condition is under, each with its range, do.
+    """
+    from loopty.hypotheses import structural_key
+
+    sums = tuple((name, bound) for name, bound in condition.over if bound is not None)
+    return condition.stmt, structural_key(sums)
 
 
 def _listed(names: Sequence[str]) -> str:
@@ -1531,6 +1545,21 @@ def _sizes_of(term: Term, arguments: Mapping[str, Any]) -> dict[str, int]:
     from loopty.faithful import _sizes_of as sizes_of
 
     return sizes_of(term, arguments)
+
+
+def _fingerprint(arguments: Mapping[str, Any]) -> tuple:
+    """What the arguments hold, as a key: each array's dtype, shape and bytes hashed."""
+    import hashlib
+
+    out = []
+    for name, value in sorted(_values(arguments).items()):
+        array = np.asarray(value)
+        if array.dtype == object:
+            out.append((name, repr(value)))
+            continue
+        digest = hashlib.sha1(np.ascontiguousarray(array).tobytes()).hexdigest()
+        out.append((name, array.dtype.str, array.shape, digest))
+    return tuple(out)
 
 
 def _values(arguments: Mapping[str, Any]) -> dict[str, Any]:
@@ -2045,7 +2074,7 @@ class Rows:
         self.where = where
         self.identifier = identifier
         self.compared_id = compared_id
-        self._made: dict[int, tuple[Any, tuple[Fact, ...]]] = {}
+        self._made: dict[Any, tuple[Any, tuple[Fact, ...]]] = {}
 
     def magnitude(self, arguments: Mapping[str, Any], cell: tuple[int, ...]) -> str:
         """`` (|c[t] - y[s]| about 1e-170)``: a data condition's operand there."""
@@ -2079,13 +2108,15 @@ class Rows:
             if not hasattr(self, "_file"):
                 self._file = _file_examples(self.kernel)
             arguments = self._file
-        key = id(arguments) if arguments is not None else 0
+        key = (id(arguments), _fingerprint(arguments)) if arguments is not None else 0
         cached = self._made.get(key)
         if cached is not None and cached[0] is arguments:
             return cached[1]
         made = self._make(schedule, arguments)
         # the arguments are kept with their rows, so that their id is not
-        # reused by another schedule's while the entry lives (Codex, #341)
+        # reused by another schedule's while the entry lives, and what they
+        # hold is in the key, so that inputs changed in place are asked
+        # again (Codex, #341)
         self._made[key] = (arguments, made)
         return made
 

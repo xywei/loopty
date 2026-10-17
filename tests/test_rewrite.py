@@ -449,6 +449,40 @@ def test_a_condition_on_a_scalar_input_is_on_data() -> None:
     assert condition.status.value == "refuted", condition.provenance
 
 
+def test_rows_are_asked_again_when_the_example_inputs_change_in_place() -> None:
+    """The rows' cache reads what the inputs hold, not only which (Codex, #341)."""
+    given = inputs()
+    schedule = as_sumpy_computes().example(**given)
+    (condition,) = rows(schedule)["rewrite-condition"]
+    assert condition.status.value == "tested"
+    given["y"][2] = given["c"][1]
+    (condition,) = rows(schedule)["rewrite-condition"]
+    assert condition.status.value == "refuted", condition.provenance
+
+
+def test_index_conditions_under_different_sums_are_rows_of_their_own() -> None:
+    """``∀i. A(i)`` and ``∀j. B(j)`` stay apart: one's empty range proves nothing.
+
+    Merged, they read ``∀i, j. A(i) ∧ B(j)``, which isl shows true when either
+    range is empty (Codex, #341). The statement's own loops still merge.
+    """
+    from pymbolic.primitives import Comparison, Variable
+
+    from loopty.rewriting import Condition, Match, Rewritten, Step
+
+    def condition(claim, over):
+        return Condition("t", "h", claim, "index", over, "S0")
+
+    i, j, m, p, k = (Variable(name) for name in "ijmpk")
+    under_i = condition(Comparison(i, "<", 5), (("k", None), ("i", m)))
+    under_j = condition(Comparison(j, "<", 5), (("k", None), ("j", p)))
+    on_k = condition(Comparison(k, ">=", 0), (("k", None),))
+    match = Match(None, "S0", None, None, None, None, (), (), (under_i, under_j, on_k))
+    step = Step(None, None, None, (match,))
+    rows_ = Rewritten("out", "out", "t", None, None, (step,)).conditions
+    assert [render(row.claim) for row in rows_] == ["i < 5", "j < 5", "k >= 0"]
+
+
 def test_draws_that_break_the_theorems_condition_are_not_compared() -> None:
     """``log(x * x) == 2 * log(x)`` where ``x > 0``: draws with x <= 0 say nothing.
 
