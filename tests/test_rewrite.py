@@ -420,6 +420,30 @@ def test_a_rewrite_finite_before_and_nan_after_at_a_draw_is_refuted() -> None:
     assert "nan after" in row.provenance["reason"], row.provenance
 
 
+def test_draws_that_break_the_theorems_condition_are_not_compared() -> None:
+    """``log(x * x) == 2 * log(x)`` where ``x > 0``: draws with x <= 0 say nothing.
+
+    The theorem says nothing where its condition fails, so a draw there is
+    no evidence either way (Codex, #341): with every draw outside it, the
+    row says why it is not tested.
+    """
+
+    @theorem
+    def log_of_a_square(x: Real, positive: x > 0) -> log(x * x) == 2 * log(x):  # noqa: F821
+        """True where x > 0."""
+
+    @kernel
+    def logs(x: Arr[Fin[n], Real], out: Arr[Fin[n], Real]):  # noqa: F821
+        for i in out.dom:
+            out[i] = log(x[i] * x[i])
+
+    (row,) = rows(Schedule(logs).rewrite(logs.out, by=log_of_a_square))["rewrite"]
+    assert row.status.value in ("tested", "assumed"), row.provenance
+    if row.status.value == "assumed":
+        reason = row.provenance["reason"]
+        assert "broke a condition the theorems need, x[i] > 0" in reason, reason
+
+
 def test_a_later_step_leaves_an_earlier_steps_compared_row_as_it_was() -> None:
     """A rewrite compares the schedule it made, asked of a later one (Codex, #341)."""
 

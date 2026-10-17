@@ -1270,18 +1270,60 @@ def _drawn_equal(
 ) -> tuple[bool | None, str]:
     """``T == T'`` at drawn inputs, on the interpreter: agreed, differed or unknown."""
     return _drawn_terms(
-        step.before, step.after, rewritten.array, f"{step.identity.name}", seed
+        step.before,
+        step.after,
+        rewritten.array,
+        f"{step.identity.name}",
+        seed,
+        _data_conditions(match.conditions for match in step.matches),
     )
 
 
+def _data_conditions(groups: Any) -> tuple[Condition, ...]:
+    """The conditions on data among ``groups``, each once: what a draw has to meet."""
+    from loopty.hypotheses import structural_key
+
+    out: dict[Any, Condition] = {}
+    for conditions in groups:
+        for condition in conditions:
+            if condition.kind == "index":
+                continue
+            key = (
+                condition.stmt,
+                structural_key(condition.claim),
+                structural_key(condition.over),
+            )
+            out.setdefault(key, condition)
+    return tuple(out.values())
+
+
+def _meets(conditions: Sequence[Condition], term: Term, arguments: Any) -> bool:
+    """Whether a draw meets every condition at every point it is over."""
+    for condition in conditions:
+        try:
+            held, _detail = failing_point(condition, term, arguments)
+        except Exception:  # noqa: BLE001 - a draw that cannot be shown to meet it
+            return False
+        if not held:
+            return False
+    return True
+
+
 def _drawn_terms(
-    before: Term, after: Term, array: str, what: str, seed: int = 0
+    before: Term,
+    after: Term,
+    array: str,
+    what: str,
+    seed: int = 0,
+    conditions: Sequence[Condition] = (),
 ) -> tuple[bool | None, str]:
     """``before`` and ``after`` at drawn inputs agree in ``array``, on the interpreter.
 
     ``True`` when every draw agrees at the array's class, ``False`` with the
     first cell that differs, and ``None`` with why when nothing could be
-    compared. ``what`` names the step in the words.
+    compared. ``what`` names the step in the words. A draw that breaks one
+    of ``conditions``, the theorems' conditions on data, is not compared:
+    the theorems say nothing there (Codex, #341).
     """
     from loopty.faithful import _NoSample, sample_arguments
     from loopty.interpret import InterpretError, interpret
@@ -1291,11 +1333,15 @@ def _drawn_terms(
     if exactness == "exact":
         exactness = "approx"
     compared = 0
+    outside = 0
     for draw in range(3):
         try:
             arguments, _sizes = sample_arguments(before, seed=seed + draw)
         except _NoSample as exc:
             return None, f"no input could be drawn: {exc}"
+        if conditions and not _meets(conditions, before, arguments):
+            outside += 1
+            continue
         try:
             first = interpret(before, _copied(arguments), limit=2_000_000)
             second = interpret(after, _copied(arguments), limit=2_000_000)
@@ -1322,6 +1368,11 @@ def _drawn_terms(
             # nothing, and is no evidence (Codex, #341)
             compared += 1
     if not compared:
+        if outside:
+            return None, (
+                f"no drawn input was compared: {outside} broke a condition the "
+                f"theorems need, {_listed([c.shown for c in conditions])}"
+            )
         return None, "no drawn input was compared"
     return True, f"{compared} drawn inputs agree at {exactness}"
 
@@ -2844,7 +2895,11 @@ def structural_facts(
     """
     proof, assignment, detail_words = structural_proof(rewritten, owner, identifier)
     agreed, detail = _drawn_terms(
-        rewritten.before, rewritten.after, rewritten.array, _short_text(rewritten)
+        rewritten.before,
+        rewritten.after,
+        rewritten.array,
+        _short_text(rewritten),
+        conditions=_data_conditions(match.conditions for match in rewritten.matches),
     )
     status = (
         Status.TESTED
