@@ -1543,11 +1543,28 @@ def failing_point(
                 return found
         return None
 
+    guard = stmt.guard if stmt.unnarrowed else None
     for point in _statement_points(stmt, sizes):
-        found = walk({**values, **point}, sums)
+        env = {**values, **point}
+        if guard is not None and not _runs_at(guard, env):
+            # the statement does not run here, so it needs nothing here (Codex,
+            # #341): a guard that reads data, isl leaves out of the domain
+            continue
+        found = walk(env, sums)
         if found is not None:
             return found
     return True, f"{count} points"
+
+
+def _runs_at(guard: Any, env: Mapping[str, Any]) -> bool:
+    """Whether a statement's guard holds at a point; ``True`` where it cannot tell."""
+    from lanky.terms import evaluate
+
+    try:
+        held = evaluate(guard, env)
+    except Exception:  # noqa: BLE001 - a point that cannot be ruled out is tested
+        return True
+    return held is True or (isinstance(held, np.bool_) and bool(held))
 
 
 def condition_fact(
@@ -1590,8 +1607,10 @@ def condition_fact(
         decided, why = _decided_by_isl(condition, term)
         if decided is True:
             return fact(Status.DECIDED, "isl", statement, detail=why)
-        if decided is False:
+        if decided is False and not term.stmt(condition.stmt).unnarrowed:
             return fact(Status.REFUTED, "isl", statement, reason=why, detail=why)
+        # isl's point may be one a guard that reads data keeps the statement
+        # from running at: the condition is tested on the inputs instead
         if arguments is None:
             return fact(Status.ASSUMED, None, statement, reason=why)
     if condition.kind == "table":

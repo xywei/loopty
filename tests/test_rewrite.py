@@ -361,6 +361,36 @@ def test_the_compared_row_is_measured_and_notes_the_extremes() -> None:
     assert compared.provenance["outputs"]["out"]["measured"] < 1e-12
 
 
+def test_a_condition_is_needed_only_where_the_statement_runs() -> None:
+    """``x[i] / a[i]`` under ``if a[i] != 0``: a zero where it does not run is fine.
+
+    The condition was tested at every point of the domain, which a guard
+    that reads data does not narrow, and refuted at a zero the guard skips
+    (Codex, #341).
+    """
+
+    @kernel
+    def guarded(
+        x: Arr[Fin[n], Real],  # noqa: F821
+        a: Arr[Fin[n], Real],  # noqa: F821
+        out: Arr[Fin[n], Real],  # noqa: F821
+    ):
+        for i in out.dom:
+            if a[i] != 0.0:
+                out[i] = x[i] / a[i]
+
+    a = np.ones(5)
+    a[3] = 0.0
+    inputs_ = {"x": Arr.from_numpy(np.arange(5.0)), "a": Arr.from_numpy(a)}
+    schedule = (
+        Schedule(guarded)
+        .rewrite(guarded.out, by=through_the_reciprocal)
+        .example(**inputs_, out=Arr.zeros(5))
+    )
+    (condition,) = rows(schedule)["rewrite-condition"]
+    assert condition.status.value == "tested", condition.provenance
+
+
 def test_a_rewrite_finite_before_and_nan_after_at_a_draw_is_refuted() -> None:
     """``log(x * x)`` as ``2 * log(x)``: NaN where x < 0, and the row says so.
 
