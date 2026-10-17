@@ -549,6 +549,30 @@ def kron_inputs(n: int = 4, seed: int = 1) -> dict:
     }
 
 
+def test_keep_and_into_refuse_a_guarded_statement() -> None:
+    """A kept pass would run where the guard keeps the statement from (Codex, #341)."""
+
+    @kernel
+    def corner(
+        F: Arr[Fin[n], Fin[n], Real],  # noqa: F821
+        G: Arr[Fin[n], Fin[n], Real],  # noqa: F821
+        u: Arr[Fin[n], Fin[n], Real],  # noqa: F821
+        out: Arr[Fin[n], Fin[n], Real],  # noqa: F821
+    ):
+        for k, j in out.dom:
+            if k <= j:
+                out[k, j] = reduce_sum(
+                    F[k, b] * G[j, a] * u[b, a] for b in F.dom[k] for a in G.dom[j]
+                )
+
+    with pytest.raises(IllegalRewrite, match="runs only where k <= j"):
+        Schedule(corner).rewrite(corner.out, by=two_passes, keep=("v",))
+    with pytest.raises(IllegalRewrite, match="the program into= names runs at every"):
+        Schedule(corner).rewrite(corner.out, by=two_passes, into=kron_passes)
+    # without either, the rewrite stays inside the guarded statement
+    Schedule(corner).rewrite(corner.out, by=two_passes)
+
+
 def test_keep_stores_the_inner_sum_and_the_statement_reads_it() -> None:
     from loopty.executor import LoopyExecutor
 

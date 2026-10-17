@@ -1300,7 +1300,10 @@ def _drawn_terms(
                 f"at the inputs drawn with seed {seed + draw}, {array}{list(cell)} is "
                 f"{want[cell]} before {what} and {got[cell]} after"
             )
-        compared += 1
+        if either.any():
+            # a draw where both sides left the float range everywhere compared
+            # nothing, and is no evidence (Codex, #341)
+            compared += 1
     if not compared:
         return None, "no drawn input was compared"
     return True, f"{compared} drawn inputs agree at {exactness}"
@@ -2714,10 +2717,33 @@ def structural(
     shown: str,
     at: str = "",
 ) -> Rewritten:
-    """The rewrite with its nested sums stored (``keep=``), or into a program."""
+    """The rewrite with its nested sums stored (``keep=``), or into a program.
+
+    Raises:
+        IllegalRewrite: If both are given, or a rewritten statement runs
+            under a guard: the passes run at every instance, so a kept pass
+            would compute, and read, where the guard keeps the statement
+            from, and the claim Lean is asked would say more than the kernel
+            (Codex, #341).
+    """
     if keep is not None and into is not None:
         raise IllegalRewrite(
             f"{text}: keep= derives the passes and into= names them; give one"
+        )
+    for stmt_id in dict.fromkeys(match.stmt for match in rewritten.matches):
+        stmt = rewritten.before.stmt(stmt_id)
+        if stmt.guard is None:
+            continue
+        given, passes = (
+            ("keep=", "the passes keep= derives run")
+            if keep is not None
+            else ("into=", "the program into= names runs")
+        )
+        raise IllegalRewrite(
+            f"{text}: {stmt.text or stmt.id} runs only where "
+            f"{render(_spelled_in(stmt.guard, stmt))}, and {passes} at every "
+            "instance, computing what the guard keeps the statement from; rewrite "
+            f"{shown} without {given}"
         )
     if into is not None:
         return into_term(rewritten, into, source, text)
