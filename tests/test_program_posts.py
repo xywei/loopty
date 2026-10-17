@@ -209,7 +209,7 @@ def test_the_hexahedra_operators_cite_sum_factorization_backwards() -> None:
         for d in range(3)
     ]
     assert found[6][0] == "w[q, e, k, j, i]"
-    (div,) = facts(hexahedra.weak_div, "postcondition")
+    (div,) = facts(hexahedra.div_passes, "postcondition")
     assert (div.status, div.decided_by) == (Status.TESTED, "native")
     assert [arguments[4] for name, arguments, _ in steps(div) if arguments] == [
         "w[0, e]",
@@ -359,9 +359,9 @@ def test_with_mathlib_an_unfolded_claim_is_proved_resting_on_what_it_used(
 
 @pytest.mark.lean
 def test_with_mathlib_the_hexahedra_operators_are_proved(lean: Any) -> None:
-    """``passes`` and ``weak_div``: the dense operators, by ``sum_factorization``."""
+    """``passes`` and ``div_passes``: the dense operators, by ``sum_factorization``."""
     _mathlib(lean)
-    for program in (hexahedra.passes, hexahedra.weak_div):
+    for program in (hexahedra.passes, hexahedra.div_passes):
         (post,) = facts(program, "postcondition")
         proved = lean.establish(post)
         assert proved.status is Status.PROVED, proved.provenance.get("lean_reason")

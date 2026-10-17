@@ -17,13 +17,18 @@ One file holds the three layers of it:
   for every order, lanky's ``examples/line_taylor.py``: a table ``a`` that
   satisfies what the differential equation ``(alpha + tau * beta) f'(tau) ==
   beta`` says about its coefficients is the closed form ``coefficient``
-  writes, at the ratio ``-beta / alpha``. That the Taylor coefficients of
-  ``log(alpha + tau * beta)`` satisfy it is cited, not proved. The kernels
-  say the math as written, ``log|alpha|`` and ``coefficient(-beta / alpha,
-  k)``, so ``single_layer`` cites the theorem directly, and its ledger has
-  the row that links them: ``single_layer adds line_taylor's a(n) for n in
-  1..5``, about the term it evaluates read over the complex numbers, not
-  about the floats it produces.
+  writes, at the ratio ``-beta / alpha``. ``reciprocal_taylor`` is the same
+  for the double layer's series, the coefficients of ``alpha / (alpha + tau
+  * beta)``, which are the powers of that ratio. Each body is its proof, an
+  induction on the order that Lean checks. That the Taylor coefficients
+  satisfy the hypotheses, comparing the powers of ``tau``, is cited, not
+  proved: lanky has no power series (lanky#174). The kernels say the math as
+  written, ``log|alpha|``, ``coefficient(-beta / alpha, k)`` and ``(-beta /
+  alpha) ** k``, so each cites its theorem directly, and its ledger has the
+  row that links them: ``single_layer adds line_taylor's a(n) for n in
+  1..5`` and ``double_layer adds reciprocal_taylor's b(n) for n in 0..5``,
+  about the term each evaluates read over the complex numbers, not about the
+  floats it produces.
 - **The kernels and their transforms.** ``single_layer`` and ``double_layer``
   are pytential's ``S`` and ``D`` over complex points (lanky's ``Complex``,
   stored as ``complex128``). ``as_sumpy_computes`` is the single layer in
@@ -63,23 +68,24 @@ Run this file three ways.
     the panels shrink.
 
 ``lanky check examples/layer_potential.py``
-    The ledger. ``line_taylor`` reads ``proved`` by Lean where Mathlib is
-    installed, and ``assumed`` without it, since the property tester draws no
-    table over ``Nat``; ``conjugate_form`` reads ``proved`` with Mathlib and
-    ``tested`` without, and so does ``log_of_the_modulus``, by its written
-    proof, which lanky's search would not find alone; the two facts it cites
-    are rows of the ledger, from ``lanky.known``. The row that ``single_layer`` adds
-    the theorem's ``a(n)`` is ``decided`` by ``theorem``, and proved by Lean
-    with Mathlib. Each math step of ``as_sumpy_computes`` is a row, proved
-    by Lean with Mathlib and tested on drawn inputs without it; the
-    condition ``c[t] - y[s] != 0`` is tested on the example inputs; and the
-    compiled schedule's agreement with the native kernel is a row. Each
-    kernel's accesses are in bounds and its writes distinct, and each cast
-    of its tile on C keeps every dependence, decided by isl (proved by Lean
-    where it is installed); its trace is faithful to its body, its
-    agreement with sumpy is ``tested`` by ``upstream`` within ``1e-12`` of
-    the largest value, and the three accuracy rows are ``tested`` by their
-    run.
+    The ledger. ``line_taylor`` and ``reciprocal_taylor`` read ``proved`` by
+    Lean where Mathlib is installed, each by its written proof, and
+    ``assumed`` without it, since the property tester draws no table over
+    ``Nat``; ``conjugate_form`` reads ``proved`` with Mathlib and ``tested``
+    without, and so does ``log_of_the_modulus``, by its written proof, which
+    lanky's search would not find alone; the two facts it cites are rows of
+    the ledger, from ``lanky.known``. The rows that ``single_layer`` adds
+    the first theorem's ``a(n)``, and ``double_layer`` the second's
+    ``b(n)``, are ``decided`` by ``theorem``, and proved by Lean with
+    Mathlib. Each math step of ``as_sumpy_computes`` is a row, proved by
+    Lean with Mathlib and tested on drawn inputs without it; the condition
+    ``c[t] - y[s] != 0`` is tested on the example inputs; and the compiled
+    schedule's agreement with the native kernel is a row. Each kernel's
+    accesses are in bounds and its writes distinct, and each cast of its
+    tile on C keeps every dependence, decided by isl (proved by Lean where
+    it is installed); its trace is faithful to its body, its agreement with
+    sumpy is ``tested`` by ``upstream`` within ``1e-12`` of the largest
+    value, and the three accuracy rows are ``tested`` by their run.
 
 ``loopty run examples/layer_potential.py``
     Both kernels in sumpy's arithmetic and on their tile, compiled on the C
@@ -191,6 +197,35 @@ def line_taylor(
 
 
 @theorem
+def reciprocal_taylor(
+    alpha: Complex,
+    beta: Complex,
+    b: Fn[Nat, Complex],
+    nonzero: alpha != 0,
+    first_term: b[0] == 1,
+    ode: all(alpha * b[n + 1] + beta * b[n] == 0 for n in Nat),
+) -> all(b[n] == (-beta / alpha) ** n for n in Nat):
+    """The line-Taylor coefficients of ``alpha / (alpha + tau * beta)``, at every order.
+
+    ``g(tau) = alpha / (alpha + tau * beta)`` solves ``(alpha + tau * beta) *
+    g(tau) == alpha``; comparing the powers of ``tau`` in it gives
+    ``first_term`` and ``ode``. ``-1 / (alpha + tau * beta)`` is the
+    derivative of ``log(alpha + tau * beta)`` along the source, so these are
+    the coefficients of the double layer's series, :func:`double`'s, as
+    ``line_taylor``'s are the single layer's.
+    """
+    ratio = -beta / alpha
+
+    def claim(n):
+        if n == 0:
+            return first_term
+        recurrence = b[n].equals(ratio * b[n - 1], by=ode)
+        return recurrence, claim(n - 1)
+
+    return claim
+
+
+@theorem
 def conjugate_form(x: Complex, alpha: Complex, nonzero: alpha != 0) -> (
     x / alpha == x * conj(alpha) * (1 / real(alpha * conj(alpha)))
 ):
@@ -227,7 +262,8 @@ def double(alpha, beta, normal):
     The source is ``c - alpha``, so this is ``Re(normal * d/dy)`` of the
     series in ``y``: ``-Re(normal / alpha * (1 + ratio + ... +
     ratio**ORDER))`` with ``ratio = -beta / alpha``, the line-Taylor series of
-    ``Re(normal / (y - x))`` itself.
+    ``Re(normal / (y - x))`` itself, whose terms are
+    :func:`reciprocal_taylor`'s.
     """
     return -real(
         normal / alpha * reduce_sum((-beta / alpha) ** k for k in Fin[ORDER + 1])
@@ -260,7 +296,7 @@ def single_layer(
         )
 
 
-@kernel
+@kernel(uses=[reciprocal_taylor])
 def double_layer(
     z: Arr[Fin[nt], Complex],
     c: Arr[Fin[nt], Complex],
@@ -269,7 +305,10 @@ def double_layer(
     w: Arr[Fin[ns], Real],
     out: Arr[Fin[nt], Real],
 ):
-    """``D`` at each target: ``S``'s kernel differentiated along ``n[s]``."""
+    """``D`` at each target: ``S``'s kernel differentiated along ``n[s]``.
+
+    It cites ``reciprocal_taylor`` for the terms of its series.
+    """
     for t in out.dom:
         out[t] = SCALE * reduce_sum(
             w[s] * double(c[t] - y[s], z[t] - c[t], n[s]) for s in y.dom
@@ -599,10 +638,11 @@ def main() -> int:
         )
         ok = ok and fact.status.value == "tested"
 
-    # the theorem and the kernel, in one row
-    (series,) = [fact for fact in single_layer.facts() if fact.kind == "by-theorem"]
-    print(f"  {series.statement} -> {series.status.value}")
-    ok = ok and series.status.value in ("decided", "proved")
+    # each theorem and its kernel, in one row
+    for kern in (single_layer, double_layer):
+        (series,) = [fact for fact in kern.facts() if fact.kind == "by-theorem"]
+        print(f"  {series.statement} -> {series.status.value}")
+        ok = ok and series.status.value in ("decided", "proved")
 
     print()
     print(f"as sumpy computes it: {'.'.join(as_sumpy_computes.history)}")

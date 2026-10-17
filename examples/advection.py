@@ -100,6 +100,19 @@ fluxes first, three launches, one, and one from the metric.
 onto the face nodes alone, with a barrier between pairs of faces; without
 the barriers, ``lift_on_faces`` on a device is refused with the edge node
 two faces write from two work items.
+
+*What no kernel cites yet.* The three theorems are proved for every order,
+and no kernel or program cites them (#285). The kernels take ``D = M^-1
+S^T`` and the lift's columns ``L = M^-1 e`` as tables, where the theorems
+are about grudge's operator before the rearrangement, the inverse mass after
+the weak derivative and the face mass. The math-first form would be a kernel
+that says grudge's operator, with ``volume`` and ``lift`` derived from it by
+``rewrite(rhs, by=(inverse_mass_inward, lift_inward))``, as
+``examples/hexahedra.py`` derives its passes. That needs two things loopty
+does not have yet (#342): ``M^-1 M`` is the identity only for the tables a
+run is given, a condition on a table that a row would test at its digits;
+and ``D`` is a product of tables, which the derived passes would have to
+compute once and not per element.
 """
 
 from __future__ import annotations

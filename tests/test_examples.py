@@ -197,6 +197,7 @@ KERNELS = {
         "weak_grad",
         "passes",
         "weak_div",
+        "div_passes",
         "metric_along_r",
         "contravariant_along_r",
     },
@@ -1072,12 +1073,13 @@ def test_the_hexahedra_demo_decides_its_layouts_and_its_programs() -> None:
         ("as_row_major", "layout-same", "tested"),
     ]
     # every intermediate a program makes is read where its producer stored it
-    # (and the dense kernel's w, and the arrays its schedule keeps)
+    # (and the dense kernels' w, and the arrays their schedules keep)
     defined = [fact for fact in facts if fact["kind"] == "definedness"]
     assert {fact["owner"] for fact in defined} == {
         "weak_grad",
         "passes",
         "weak_div",
+        "div_passes",
         "metric_along_r",
         "contravariant_along_r",
     }
@@ -1087,7 +1089,7 @@ def test_the_hexahedra_demo_decides_its_layouts_and_its_programs() -> None:
     posts = {
         fact["owner"]: fact for fact in facts if fact["kind"] == "postcondition"
     }
-    assert set(posts) == {"passes", "weak_div"}
+    assert set(posts) == {"passes", "div_passes"}
     for post in posts.values():
         assert (post["status"], post["decided_by"]) in (
             ("tested", "native"),
@@ -1101,13 +1103,14 @@ def test_the_hexahedra_demo_decides_its_layouts_and_its_programs() -> None:
     stored = [
         (fact["owner"], fact["statement"].split(" stores")[0])
         for fact in facts
-        if fact["kind"] == "single-assignment" and fact["owner"] != "weak_grad"
+        if fact["kind"] == "single-assignment"
+        and fact["owner"] not in ("weak_grad", "weak_div")
     ]
     assert stored == [
         ("passes", call)
         for call in ("metric", "along_r", "along_s", "gradient_along_t")
     ] + [
-        ("weak_div", call)
+        ("div_passes", call)
         for call in ("contravariant", "along_r", "along_s", "divergence_along_t")
     ]
     # nothing in the file is left to an assumption
@@ -1223,8 +1226,9 @@ def test_the_hexahedra_demo_refuses_the_deeper_fusion_and_keeps_the_windows() ->
     assert result.returncode == 0, result.stdout + result.stderr
     out = result.stdout
     assert (
-        "the dense kernel and the passes are the dense Kronecker operators: True"
+        "the dense kernels and the passes are the dense Kronecker operators: True"
     ) in out
+    assert "the divergence, derived the same way: Schedule(weak_div" in out
     # each pass's statement by its text and line, at the names its loops have
     module = _module("hexahedra")
     along_r = where(module.along_r, "v[q, e, k, j, i] = reduce_sum(")
@@ -1279,6 +1283,37 @@ def test_the_hexahedra_demo_derives_the_passes_from_the_dense_kernel() -> None:
         "by=sum_factorization, keep=('r_pass', 's_pass'))"
         ".fuse(weak_grad.r_pass.c, weak_grad.s_pass.c)"
         ".contract(weak_grad.r_pass, lambda x, d, e, c, b, i: (b, i))"
+    )
+
+
+def test_the_hexahedra_demo_derives_the_divergences_passes_from_its_math() -> None:
+    """``factored_div``: the divergence's passes, by the gradient's rewrite.
+
+    ``weak_div`` sums the metric terms into the flux along each direction
+    first, ``w[d]``, and applies the direction's Kronecker product to it; the
+    rewrite keeps the two passes over ``(d, e, ...)``, with no ``x``, and the
+    row says what they leave in ``div``.
+    """
+    module = _module("hexahedra")
+    (rewritten,) = module.factored_div.rewrites
+    assert [(kept.name, kept.spelled) for kept in rewritten.kept] == [
+        ("r_pass", ("d", "e", "c", "b", "i")),
+        ("s_pass", ("d", "e", "c", "j", "i")),
+    ]
+    facts = module.factored_div.facts()
+    (row,) = [fact for fact in facts if fact.kind == "rewrite"]
+    assert row.statement == (
+        "rewrite(div, by=sum_factorization, keep=(r_pass, s_pass)): over the "
+        "reals, the passes leave in div what weak_div's statement says, unfolded "
+        "through r_pass and s_pass; sum_factorization at Fr := Fr[d], Fs := Fs[d], "
+        "Ft := Ft[d], u := w[d, e], for d = 0, 1 and 2"
+    )
+    assert row.status.value in ("tested", "proved"), row.provenance
+    assert not row.term.lean_obligation().declined
+    (compared,) = [fact for fact in facts if fact.kind == "rewrite-compared"]
+    assert compared.status.value == "tested"
+    assert compared.statement.startswith(
+        "the compiled factored_div agrees with the native weak_div in div at approx"
     )
 
 
@@ -1957,8 +1992,11 @@ def test_the_qbx_ledger_says_single_layer_adds_line_taylors_terms() -> None:
     the theorem applies to it directly, with no identity between them.
     """
     _result, facts = _invoke("layer_potential", "check")
-    (row,) = [fact for fact in facts if fact["kind"] == "by-theorem"]
-    assert row["owner"] == "single_layer"
+    (row,) = [
+        fact
+        for fact in facts
+        if fact["kind"] == "by-theorem" and fact["owner"] == "single_layer"
+    ]
     assert row["statement"] == (
         "single_layer adds line_taylor's a(n) for n in 1..5, for every a with "
         "nonzero, first_term and ode, read over the complex numbers"
@@ -1976,6 +2014,38 @@ def test_the_qbx_ledger_says_single_layer_adds_line_taylors_terms() -> None:
     source = _path("layer_potential").read_text(encoding="utf-8").splitlines()
     assert source[line - 1].strip() == "out[t] = SCALE * reduce_sum("
     assert "single(c[t] - y[s], z[t] - c[t])" in source[line]
+
+
+def test_the_qbx_ledger_says_double_layer_adds_reciprocal_taylors_terms() -> None:
+    """The double layer's series tied to a theorem (#281): its terms are b(n), from 0.
+
+    ``double`` adds ``(-beta / alpha) ** k`` for ``k`` from 0 to 5, the
+    coefficients of ``alpha / (alpha + tau * beta)``, which
+    ``reciprocal_taylor`` proves for every order by its written proof.
+    """
+    _result, facts = _invoke("layer_potential", "check")
+    (row,) = [
+        fact
+        for fact in facts
+        if fact["kind"] == "by-theorem" and fact["owner"] == "double_layer"
+    ]
+    assert row["statement"] == (
+        "double_layer adds reciprocal_taylor's b(n) for n in 0..5, for every b with "
+        "nonzero, first_term and ode, read over the complex numbers"
+    )
+    assert row["status"] in ("decided", "proved"), row
+    provenance = row["provenance"]
+    assert provenance["bindings"] == "alpha = c[t] - y[s], beta = z[t] - c[t]"
+    assert provenance["orders"] == [0, 1, 2, 3, 4, 5]
+    module = _module("layer_potential")
+    assert module.reciprocal_taylor.fact_id in row["rests_on"]
+    (theorem,) = [
+        fact
+        for fact in facts
+        if fact["owner"] == "reciprocal_taylor" and fact["kind"] == "theorem"
+    ]
+    # the property tester draws no table over Nat, and Lean proves it with Mathlib
+    assert theorem["status"] in ("assumed", "proved"), theorem
 
 
 def test_the_qbx_ledger_has_sumpys_arithmetic_as_math_steps() -> None:
@@ -2086,6 +2156,10 @@ def test_the_qbx_demo_prints_the_tile_the_fact_and_the_rows() -> None:
         assert line.endswith(", within 1e-12 of the largest value -> tested"), line
     assert (
         "  single_layer adds line_taylor's a(n) for n in 1..5, for every a with "
+        "nonzero, first_term and ode, read over the complex numbers -> decided"
+    ) in out.splitlines()
+    assert (
+        "  double_layer adds reciprocal_taylor's b(n) for n in 0..5, for every b with "
         "nonzero, first_term and ode, read over the complex numbers -> decided"
     ) in out.splitlines()
     assert (
