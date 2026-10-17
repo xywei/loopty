@@ -483,6 +483,30 @@ def test_index_conditions_under_different_sums_are_rows_of_their_own() -> None:
     assert [render(row.claim) for row in rows_] == ["i < 5", "j < 5", "k >= 0"]
 
 
+def test_a_disagreement_at_a_drawn_input_fails_the_compared_row() -> None:
+    """Example inputs that happen to agree do not hide a draw that does not.
+
+    A disagreement at a drawn input that meets the theorems' conditions was a
+    note on a row that read tested; only the magnitude extremes are notes
+    (Codex, #341).
+    """
+
+    @theorem
+    def abs_is_itself(x: Real) -> abs(x) == x:  # noqa: F821
+        """False for a negative x."""
+
+    @kernel
+    def magnitudes(x: Arr[Fin[n], Real], out: Arr[Fin[n], Real]):  # noqa: F821
+        for i in out.dom:
+            out[i] = abs(x[i])
+
+    given = {"x": Arr.from_numpy(np.arange(1.0, 5.0)), "out": Arr.zeros(4)}
+    schedule = Schedule(magnitudes).rewrite(magnitudes.out, by=abs_is_itself)
+    (compared,) = rows(schedule.example(**given))["rewrite-compared"]
+    assert compared.status.value == "refuted", compared.provenance
+    assert "at the inputs drawn with seed" in compared.provenance["reason"]
+
+
 def test_draws_that_break_the_theorems_condition_are_not_compared() -> None:
     """``log(x * x) == 2 * log(x)`` where ``x > 0``: draws with x <= 0 say nothing.
 

@@ -1324,10 +1324,15 @@ def _data_conditions(groups: Any) -> tuple[Condition, ...]:
 
 
 def _meets(conditions: Sequence[Condition], term: Term, arguments: Any) -> bool:
-    """Whether a draw meets every condition at every point it is over."""
+    """Whether a draw meets every condition at every point it is over.
+
+    With the term's constant tables beside the draw, which a condition on a
+    table reads, as :func:`condition_fact` gives them (Codex, #341).
+    """
+    given = {**dict(arguments), **dict(term.tables)}
     for condition in conditions:
         try:
-            held, _detail = failing_point(condition, term, arguments)
+            held, _detail = failing_point(condition, term, given)
         except Exception:  # noqa: BLE001 - a draw that cannot be shown to meet it
             return False
         if not held:
@@ -1983,6 +1988,7 @@ def compared_fact(
     notes: list[str] = []
     written = set(after.lowering.results)
     drawn = 0
+    conditions = _data_conditions(match.conditions for match in rows.rewritten.matches)
     for seed in range(DRAWS):
         try:
             from loopty.faithful import _NoSample, sample_arguments
@@ -1990,6 +1996,9 @@ def compared_fact(
             arguments_d, _sizes = sample_arguments(rows.rewritten.before, seed=seed)
         except _NoSample:
             break
+        if conditions and not _meets(conditions, rows.rewritten.before, arguments_d):
+            # the theorems say nothing where their conditions fail
+            continue
         try:
             got_d, want_d = _runs(kernel, after, arguments_d)
         except Exception:  # noqa: BLE001 - a draw the native body refuses is skipped
@@ -1999,7 +2008,9 @@ def compared_fact(
             exactness = exactness_of_output(after.term, after, output)
             cell = _first_disagreement(got_d[output], want_d[output], exactness)
             if cell is not None:
-                notes.append(
+                # a draw that meets the conditions is as good as the example
+                # inputs: a disagreement there fails the row (Codex, #341)
+                failures.append(
                     f"at the inputs drawn with seed {seed}, {output}{list(cell)} is "
                     f"{got_d[output][cell]} compiled and {want_d[output][cell]} "
                     f"natively, beyond {exactness}"
@@ -2008,6 +2019,8 @@ def compared_fact(
         words = words.replace(
             "on its example inputs", f"on its example inputs and {drawn} drawn ones"
         )
+    if failures:
+        return fact(Status.REFUTED, words, outputs=outputs, reason="; ".join(failures))
     for factor in EXTREMES:
         scaled = _scaled(arguments, factor, written)
         try:
