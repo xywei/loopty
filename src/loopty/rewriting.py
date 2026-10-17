@@ -858,11 +858,23 @@ def _conjunction(parts: Sequence[Any]) -> Any:
 
 
 def _condition_kind(claim: Any, term: Term) -> str:
-    """``index``, ``table`` or ``data``: who settles a condition."""
+    """``index``, ``table`` or ``data``: who settles a condition.
+
+    A condition on a scalar input of numbers, ``a != 0`` for ``a: Real``,
+    is on data, as one on an array is: isl would read ``a`` as an integer
+    parameter (Codex, #341).
+    """
+    from loopty.summands import _number_sort
     from loopty.unfolding import _read
 
     arrays = _read(claim)
     if not arrays:
+        named = _names(claim)
+        if any(
+            name in named and _number_sort(typ) is not None
+            for name, typ in term.params
+        ):
+            return "data"
         return "index"
     tables = {name for name, _ in term.tables}
     if arrays <= tables:
@@ -2033,7 +2045,7 @@ class Rows:
         self.where = where
         self.identifier = identifier
         self.compared_id = compared_id
-        self._made: dict[int, tuple[Fact, ...]] = {}
+        self._made: dict[int, tuple[Any, tuple[Fact, ...]]] = {}
 
     def magnitude(self, arguments: Mapping[str, Any], cell: tuple[int, ...]) -> str:
         """`` (|c[t] - y[s]| about 1e-170)``: a data condition's operand there."""
@@ -2068,10 +2080,13 @@ class Rows:
                 self._file = _file_examples(self.kernel)
             arguments = self._file
         key = id(arguments) if arguments is not None else 0
-        made = self._made.get(key)
-        if made is None:
-            made = self._make(schedule, arguments)
-            self._made[key] = made
+        cached = self._made.get(key)
+        if cached is not None and cached[0] is arguments:
+            return cached[1]
+        made = self._make(schedule, arguments)
+        # the arguments are kept with their rows, so that their id is not
+        # reused by another schedule's while the entry lives (Codex, #341)
+        self._made[key] = (arguments, made)
         return made
 
     def _make(

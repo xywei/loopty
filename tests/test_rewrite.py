@@ -420,6 +420,35 @@ def test_a_rewrite_finite_before_and_nan_after_at_a_draw_is_refuted() -> None:
     assert "nan after" in row.provenance["reason"], row.provenance
 
 
+def test_facts_asked_through_short_lived_schedules_are_each_their_own() -> None:
+    """Rows are kept with the inputs they were made from, not by an id (Codex, #341)."""
+    base = Schedule(layer).rewrite(layer.out, by=conjugate_form)
+    for apart, status in ((True, "tested"), (False, "refuted"), (True, "tested")):
+        (condition,) = rows(base.example(**inputs(apart=apart)))["rewrite-condition"]
+        assert condition.status.value == status, (apart, condition.provenance)
+
+
+def test_a_condition_on_a_scalar_input_is_on_data() -> None:
+    """``a != 0`` for ``a: Real`` is tested on the inputs, not by isl (Codex, #341)."""
+
+    @kernel
+    def scaled(
+        x: Arr[Fin[n], Real],  # noqa: F821
+        a: Real,
+        out: Arr[Fin[n], Real],  # noqa: F821
+    ):
+        for i in out.dom:
+            out[i] = x[i] / a
+
+    base = Schedule(scaled).rewrite(scaled.out, by=through_the_reciprocal)
+    x = Arr.from_numpy(np.arange(4.0))
+    (condition,) = rows(base.example(x=x, a=2.0, out=Arr.zeros(4)))["rewrite-condition"]
+    assert condition.provenance["kind"] == "data"
+    assert (condition.status.value, condition.decided_by) == ("tested", "run")
+    (condition,) = rows(base.example(x=x, a=0.0, out=Arr.zeros(4)))["rewrite-condition"]
+    assert condition.status.value == "refuted", condition.provenance
+
+
 def test_draws_that_break_the_theorems_condition_are_not_compared() -> None:
     """``log(x * x) == 2 * log(x)`` where ``x > 0``: draws with x <= 0 say nothing.
 
