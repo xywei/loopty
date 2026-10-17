@@ -890,7 +890,9 @@ interface can change in a minor release; the CHANGELOG says when one does.
   nonzero, first_term and ode, read over the complex numbers`: about the term it
   evaluates, read over the complex numbers, and not about the floats it
   produces. With Mathlib, Lean checks it a term at a time, the theorem
-  applied, restated from the text its own command proved.
+  applied, restated from the text its own command proved. `double_layer`
+  adds `(-beta / alpha) ** k` from `k = 0` and cites `reciprocal_taylor`,
+  whose row reads `double_layer adds reciprocal_taylor's b(n) for n in 0..5`.
 - Equations of reals at their class (`loopty.reals`). An equation of a
   postcondition that rounds, a closed form the kernel computes another way,
   is compared after each native run as the compiled run is with the native
@@ -1216,9 +1218,9 @@ interface can change in a minor release; the CHANGELOG says when one does.
   reals), and `decided` by isl from what each call stores where that decides
   it; otherwise Lean is asked to prove it from the same equations and the
   theorems the program cites, unfolding a call at a time (`loopty.unfolding`).
-  `examples/hexahedra.py`'s `weak_grad` claims the dense Kronecker operators
-  grudge's escape hatch applies, and Lean proves it with Mathlib from what
-  the three passes store and `sum_factorization`.
+  `examples/hexahedra.py`'s `passes` and `div_passes` claim the dense
+  Kronecker operators grudge's escape hatch applies, and Lean proves them
+  with Mathlib from what the four calls store and `sum_factorization`.
 - A program lowers sequentially: its calls' loops run one after another, as
   the program runs them, until a schedule fuses them. A fusion moves the
   outer loops of each side, as many as both have or as `loops` says, and a

@@ -28,14 +28,14 @@ marked with `...` is an excerpt and the lines it keeps are checked verbatim.
 | `travel.py` | facts that travel between a program's calls: a requirement decided under the postcondition of the call before, one checked by the compiled program between the calls, and a flat access in bounds where it follows the scan |
 | `fusion.py` | the program of `composition.py` with its two loops fused into one, a fusion one step too early refused with its pair, the intermediate computed where it is read instead of stored, and kept in the three cells live at once, a window of two refused with the read that sees its slot overwritten |
 | `quadrature.py` | firedrake's P1 mass kernel cell by cell, its quadrature rule and basis held in constant tables, read-only arrays written into the compiled code, and its gathers through the cell map in bounds by type |
-| `layer_potential.py` | pytential's QBX on its own curve: the line-Taylor theorem tied by a row to the terms the single layer adds, through the identity that its ratio by the conjugate is `-beta / alpha`, the single and double layer over complex points, sumpy's CPU tile checked and the write sumpy silences a fact, each kernel's agreement with sumpy's own as an `upstream` row within `1e-12` of the largest value, and pytential's Green identity and the jump relations as tested rows |
+| `layer_potential.py` | pytential's QBX on its own curve: the line-Taylor theorems of the single and the double layer, each proved by the proof in its body and tied by a row to the terms its kernel adds, the single and double layer over complex points as the math says them, sumpy's arithmetic as two math steps each a theorem, sumpy's CPU tile checked and the write sumpy silences a fact, each kernel's agreement with sumpy's own as an `upstream` row within `1e-12` of the largest value, and pytential's Green identity and the jump relations as tested rows |
 | `sum_factorization.py` | grudge's two passes of a sum-factorized operator, fused on the element and the row and no deeper: the deeper fusion refused with its pair, the fusion of fewer loops it names, and what passes between them kept one row at a time |
 | `storage_layouts.py` | where cells are stored, as checked maps: sumpy's compressed-Taylor storage index in two pieces, one for one onto its buffer, and grudge's `dim_tags` `N3,N0,N1,N2` the same layout as modepy's reshape of the DOFArray, a wrong nesting refuted with a cell; two kernels read through them |
 | `assembly.py` | firedrake's PyOP2 assembly loop with FFC's P1 mass kernel called per cell and the cell's matrix added into the nodes, `y[cell[c, a]] += ...`: the rule's exactness, the element's mass and the scatter's total as theorems, the element's mass as `mass_ffc`'s postcondition to the approx tolerance, an update that owes the class of its sum and not distinct writes, PyOP2's GPU split refused with the node its two triangles share, and accepted once the updates are atomic |
 | `calls.py` | kernels calling kernels inside their loops: a rule with a loop of its own (`dot`, loopy #1044) in a matrix-vector and a sparse product, and firedrake's P1 quadrature rule applied per element through a rule that takes the integrand (#1043), each call inlined with binders of its own and owing the caller what the callee's contract checks |
 | `taylor_reconstruction.py` | sumpy's compressed Taylor reconstruction in one file, theorem, kernel and schedule: the theorem proved for every order, the kernel's postcondition decided from what it stores, the theorem applied to it, and the schedule's casts, in one ledger |
 | `l2p.py` | the demo's flagship, sumpy's L2P for the 2-D Laplace kernel (`E2PFromSingleBox`): the compressed Taylor theorem proved for every order and its form box by box, sumpy's storage index a checked layout, the kernel that reconstructs each box's triangle with the theorem applied to its postcondition, the interchange of the triangle's loops refused with its pair, the three calls fused box by box with each box's triangle and table in windows of its own, sumpy's own schedule for a GPU with each box a work group, and a row that compares the program with sumpy's own kernel, within `1e-14` of the largest value |
-| `hexahedra.py` | grudge #418's weak gradient and weak divergence on hexahedra, the kernels for every order: the metric product, a pass per reference axis and the three directions summed, each a kernel and together a program; the Kronecker theorem the passes rest on, for every `n`; the DOFArray's layout at every order, the same as #418's `dim_tags` `N3,N0,N1,N2` and as the kernels' row-major arrays; the passes fused as deep as each pair allows, one loop deeper refused with its pair, and what passes between them kept a row and a slab at a time; and the three launches a device runs, every node on a work item, which `benchmarks/hexahedra.py` times |
+| `hexahedra.py` | grudge #418's weak gradient and weak divergence on hexahedra, the kernels for every order: each operator as the math says it, a dense kernel, with its passes derived from it by the Kronecker theorem; the metric product, a pass per reference axis and the three directions summed, each a kernel and together a program, written by hand; the Kronecker theorem the passes rest on, for every `n`; the DOFArray's layout at every order, the same as #418's `dim_tags` `N3,N0,N1,N2` and as the kernels' row-major arrays; the passes fused as deep as each pair allows, one loop deeper refused with its pair, and what passes between them kept a row and a slab at a time; and the three launches a device runs, every node on a work item, which `benchmarks/hexahedra.py` times |
 | `advection.py` | grudge #418's weak advection right-hand side on hexahedra, from grudge's own geometry: the upwind flux at every face node, the neighbor's value gathered through the face maps and in bounds by type; the volume term and the lift with the inverse mass pushed inward, the rearrangement two theorems state for every order, and a third that the lift onto the face nodes is the face gather's transpose; the kernels fused on the element and one loop deeper refused with its pair, the fluxes kept an element at a time; every split a device runs (libParanumal's volume and surface, the fluxes first, three launches, one, one from the metric terms) checked before it runs; and libParanumal's lift onto the face nodes, refused without its barriers with the edge node two faces update, and accepted atomic. `benchmarks/advection.py` times them |
 
 Run them with `uv run` from the repository root:
@@ -1199,7 +1199,8 @@ log|alpha| + Re( a(1) + ... + a(5) ),   a(k) = -(-beta / alpha)**k / k
   `examples/line_taylor.py`, here in the same file. A table `a` that
   satisfies what `(alpha + tau * beta) f'(tau) == beta` says about its
   coefficients is `a(k)`; that the Taylor coefficients of `log(alpha + tau *
-  beta)` satisfy that equation is cited, not proved. With Mathlib, Lean
+  beta)` satisfy that equation is cited, not proved, since lanky has no power
+  series (lanky#174). With Mathlib, Lean
   proves it; without, it is `assumed`, since the property tester draws no
   table over `Nat`. Its body is its proof, as a reader says it: the claim at
   `n` is `first_term` where `n` is 1, and otherwise the recurrence `a[n] ==
@@ -1213,6 +1214,18 @@ log|alpha| + Re( a(1) + ... + a(5) ),   a(k) = -(-beta / alpha)**k / k
   with Mathlib, proved by Lean, the theorem applied a term at a time. It is
   about the term read over the complex numbers, not about the floats the
   kernel produces.
+- `reciprocal_taylor` is the same for the double layer (#281). `D`'s kernel
+  is the single layer's differentiated along the normal at the source, and
+  its series is that of `alpha / (alpha + tau * beta)`, whose coefficients are
+  the powers of the ratio: a table `b` with `b[0] == 1` and `alpha * b[n +
+  1] + beta * b[n] == 0` is `b(n) == (-beta / alpha)**n`. Its body is its
+  proof, the same induction: "Let ratio be -beta / alpha. The claim at n: if
+  n is 0, it is the first term. Otherwise, the recurrence: b[n] equals ratio
+  times b[n - 1], by the ODE. By the recurrence and the claim at n - 1."
+  `double_layer` adds `(-beta / alpha) ** k` for `k` from 0 to 5 and cites
+  it, `@kernel(uses=[reciprocal_taylor])`, so its row is `double_layer adds
+  reciprocal_taylor's b(n) for n in 0..5, for every b with nonzero,
+  first_term and ode, read over the complex numbers`.
 - `single_layer` and `double_layer` are pytential's `S` and `D` on the
   five-armed starfish, over complex points, lanky's `Complex`.
   `as_sumpy_computes` is the single layer in sumpy's arithmetic, two math
@@ -1633,7 +1646,7 @@ terms `J dr_d/dx_x`, then a pass per reference axis with the factors
 mass `M` on the others, then the three directions summed: the kernels
 `metric` (or `contravariant`, for the divergence), `along_r`, `along_s` and
 `gradient_along_t` (`divergence_along_t`), and the programs `passes` and
-`weak_div` that chain them. A node `(i, j, k)` of element `e`, `i` along `r`,
+`div_passes` that chain them. A node `(i, j, k)` of element `e`, `i` along `r`,
 is `u[e, k, j, i]`: grudge's DOFArray is row-major with modepy's reshape of
 each element in F order, which is #418's `dim_tags` `N3,N0,N1,N2`, and both
 are the kernels' row-major arrays, three layouts that are one, each a fact.
@@ -1642,7 +1655,7 @@ operator: `Ft (x) Fs (x) Fr` at a node is three sums of `n` terms, proved for
 every `n` by Lean with Mathlib, and tested without it. The programs say so:
 `passes` claims that `grad` is the dense operator of each direction
 applied to `u` times the direction's metric term, the three directions
-summed, and `weak_div` the same of the flux. isl does not decide such a
+summed, and `div_passes` the same of the flux. isl does not decide such a
 claim, so Lean is asked: with Mathlib it proves each from what the four
 calls store, a `single-assignment` row each, and the theorem, taken at each
 direction's sections (`Fr (3 * x + 0)` for its `Fr`, `w (3 * x + 0) e` for
@@ -1664,6 +1677,17 @@ cell stored before it is read, decided by isl; and the compiled `factored`
 agrees with the native dense kernel. `fused` runs the two passes a slab of
 `c` at a time, `fuse(factored.r_pass.c, factored.s_pass.c)`, and
 `contracted` keeps the `r` pass one slab at a time.
+
+`weak_div` is the divergence the same way, as grudge's `weak_local_div` says
+it: the flux along each direction first, `w[d] = sum_x G[x, d] * f[x]`, then
+the Kronecker product of the direction's tables applied to it, the three
+directions summed. `factored_div`, `rewrite(weak_div.div,
+by=sum_factorization, keep=("r_pass", "s_pass"))`, derives its passes, over
+`(d, e, ...)` with no component `x`, and its rows say the same as
+`factored`'s: what the passes leave in `div`, proved by Lean with Mathlib,
+the kept arrays' facts, and the compiled schedule compared with the native
+dense kernel. The passes written by hand, `div_passes`, are what it is timed
+against.
 
 The passes written by hand fuse as deep as each pair allows. `along_s` reads a whole column
 of a `k`-slab `along_r` stored, so the two fuse on `(q, e, k)`, and fused on
@@ -2091,7 +2115,14 @@ order. A third, `lift_is_the_gather_transposed`, says that adding each face
 node's value into the node it sits on, as `lift_on_faces` lifts with the
 GLL quadrature's mass, is the transpose of the face gather the flux reads
 through, for any face map and every order; with the field `1`, the lift
-keeps the element's total. With Mathlib all three read `proved`.
+keeps the element's total. With Mathlib all three read `proved`. No kernel
+cites them yet (#285): the kernels take `D` and the lift's columns already
+multiplied, where the theorems are about grudge's operator before the
+rearrangement. The math-first form, a kernel that says grudge's operator
+with `volume` and `lift` derived from it by `rewrite(rhs,
+by=(inverse_mass_inward, lift_inward))`, needs a condition on a table, that
+`M^-1 M` is the identity for the tables a run is given, tested at their
+digits, and a product of tables computed once (#342).
 `benchmarks/advection.py` compares the right-hand side with grudge's
 own on a warped periodic mesh, where it agrees to a few units in the 15th
 digit.
@@ -2628,7 +2659,10 @@ so (`..., to the approx tolerance`): `tested` on its runs, and, with Mathlib,
 `proved` by Lean over the reals from what the kernel stores, with each table
 at the value it holds, resting on `no cell of A is stored twice, or read
 before its store` and on the kernel's trace. After each call it is restated
-of the cell's `Ae[c]`.
+of the cell's `Ae[c]`. It does not cite `element_mass`: the theorem is about
+the rule, and FFC's tables round it. Citing it would take the tables'
+values as a condition, `FE0` the P1 basis at the rule's points and `W3` its
+weights to their digits, which `python` checks and no row states yet (#342).
 
 Two cells that share a node add into one cell of `y`. Such a statement is an
 update: either order of two updates of one cell gives the same sum, to the

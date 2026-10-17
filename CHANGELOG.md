@@ -25,6 +25,25 @@ All notable changes to loopty are recorded here. The format follows
   Without Lean, each link is drawn, and the proof reads `NOT CHECKED` with
   why.
 
+- **The demos prove and derive more of what they claim** (the user,
+  2026-10-16).
+  - `examples/layer_potential.py`'s double layer is tied to a theorem
+    (#281). `reciprocal_taylor` gives the line-Taylor coefficients of `alpha
+    / (alpha + tau * beta)`, the powers of `-beta / alpha`, proved by its
+    body, the induction `line_taylor` writes. `double_layer` cites it, and
+    its ledger reads `double_layer adds reciprocal_taylor's b(n) for n in
+    0..5, for every b with nonzero, first_term and ode, read over the complex
+    numbers`, proved by Lean with Mathlib, a term at a time.
+  - `examples/hexahedra.py`'s `weak_div` is the divergence as grudge's
+    `weak_local_div` says it, a dense kernel with the metric terms summed
+    into the flux first. `factored_div` derives its passes by the rewrite
+    that derives `weak_grad`'s, `rewrite(weak_div.div, by=sum_factorization,
+    keep=("r_pass", "s_pass"))`. The passes written by hand are
+    `div_passes`, which `benchmarks/hexahedra.py` times.
+  - `examples/advection.py` and `examples/assembly.py` say why no kernel
+    cites their theorems yet: each would take a condition on a table (#285,
+    #342).
+
 - **The theorem matcher's higher-order rule**, shared with lanky
   (`lanky.matching.higher_order_value`). With `higher_order=True`, a
   theorem's family applied to the variables its own sums bind matches a
