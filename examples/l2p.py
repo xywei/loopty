@@ -16,6 +16,12 @@ L2P, read top to bottom, in three layers:
    form for a kernel of order ``p``: box by box, on the triangle ``a + b <=
    p``, what sumpy stores taken as a table ``c[i, a, b]``. Lean proves both,
    for every order, with Mathlib; ``lanky check --show-lean`` prints the Lean.
+   ``compressed_taylor``'s body is its proof, as a textbook writes it: the
+   claim at ``(a, b)`` is what is stored where ``a < 2``, and otherwise a
+   calculation, a line to a step, each with its reason: ``R[a, b]`` equals
+   ``-R[a - 2, b + 2]`` by the recurrence, ``-D[a - 2, b + 2]`` by the claim
+   at ``(a - 2, b + 2)``, and ``D[a, b]`` by the PDE. ``claim`` calling
+   itself closer to ``a < 2`` is the induction.
 2. **The kernels, in loopty.** ``unpack`` reads each box's ``2p + 1``
    coefficients, in sumpy's storage order, into that table: through sumpy's
    storage index, ``storage_index``, a layout whose three facts say it is one
@@ -139,9 +145,20 @@ def compressed_taylor(
     ``D[a, b]`` is any table that satisfies Laplace's equation at every
     order, as the derivatives ``d^(a+b) G / dx^a dy^b`` of a harmonic ``G``
     do. ``R`` agrees with it where sumpy stores, ``a < 2``, and follows the
-    recurrence everywhere else. By induction on ``a``, two at a time: the
-    recurrence, the induction hypothesis at ``(a, b + 2)`` and the PDE.
+    recurrence everywhere else.
     """
+
+    def claim(a, b):
+        if a < 2:
+            return stored
+        return (
+            R[a, b]
+            .equals(-R[a - 2, b + 2], by=recurrence)
+            .equals(-D[a - 2, b + 2], by=claim(a - 2, b + 2))
+            .equals(D[a, b], by=pde)
+        )
+
+    return claim
 
 
 @theorem

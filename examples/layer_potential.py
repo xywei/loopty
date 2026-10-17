@@ -9,29 +9,41 @@ the center through the target, ``log |alpha + tau * beta|`` with ``alpha = c -
 y`` and ``beta = z - c``, expanded in ``tau`` to the QBX order and summed at
 ``tau = 1``. Read ``alpha`` and ``beta`` as complex numbers and that is::
 
-    log|alpha| + Re( c(1) + ... + c(5) ),   c(k) = -(-beta / alpha)**k / k
+    log|alpha| + Re( a(1) + ... + a(5) ),   a(k) = -(-beta / alpha)**k / k
 
 One file holds the three layers of it:
 
-- **The algorithm.** ``line_taylor`` is the theorem behind the ``c(k)``, for
-  every order, lanky's ``examples/line_taylor.py``: a table that satisfies
-  what the differential equation ``(alpha + tau * beta) f'(tau) == beta`` says
-  about its coefficients is the closed form ``coefficient`` writes, at the
-  ratio ``-beta / alpha``. That the Taylor coefficients of ``log(alpha + tau
-  * beta)`` satisfy it is cited, not proved. The kernels add
-  ``coefficient(ratio(alpha, beta), k)``, the same function, with the ratio
-  computed by the conjugate, ``-beta * conj(alpha) / |alpha|**2``, which
-  ``by_the_conjugate`` proves is ``-beta / alpha``. ``single_layer`` cites
-  both, and its ledger has the row that links them: ``single_layer adds
-  line_taylor's c(n) for n in 1..5``, about the term it evaluates read over
-  the complex numbers, not about the floats it produces.
+- **The algorithm.** ``line_taylor`` is the theorem behind the coefficients,
+  for every order, lanky's ``examples/line_taylor.py``: a table ``a`` that
+  satisfies what the differential equation ``(alpha + tau * beta) f'(tau) ==
+  beta`` says about its coefficients is the closed form ``coefficient``
+  writes, at the ratio ``-beta / alpha``. That the Taylor coefficients of
+  ``log(alpha + tau * beta)`` satisfy it is cited, not proved. The kernels
+  say the math as written, ``log|alpha|`` and ``coefficient(-beta / alpha,
+  k)``, so ``single_layer`` cites the theorem directly, and its ledger has
+  the row that links them: ``single_layer adds line_taylor's a(n) for n in
+  1..5``, about the term it evaluates read over the complex numbers, not
+  about the floats it produces.
 - **The kernels and their transforms.** ``single_layer`` and ``double_layer``
-  are pytential's ``S`` and ``D`` as sumpy computes them, over complex points.
-  ``sumpy_tile()`` is sumpy's CPU schedule, as ``get_optimized_kernel`` writes
-  it, and ``tiled`` the same tile on the C target. sumpy silences loopy's
-  ``write_race(write_lpot*)`` warning on this kernel; here the ledger has the
-  fact that stands in its place, ``distinct instances of S0 write distinct
-  cells of out``, decided by isl and, with Lean, proved.
+  are pytential's ``S`` and ``D`` over complex points (lanky's ``Complex``,
+  stored as ``complex128``). ``as_sumpy_computes`` is the single layer in
+  sumpy's arithmetic: each division by ``alpha`` through its conjugate, one
+  real division where a complex one takes three (``conjugate_form``), and
+  ``log|alpha|`` with no square root (``log_of_the_modulus``), two math steps
+  of the schedule, each a theorem. lanky proves ``conjugate_form`` alone;
+  ``log_of_the_modulus`` has its proof written out, a two-line chain through
+  ``log(abs(alpha) ** 2) / 2`` that cites two facts lanky knows,
+  ``log_of_a_power`` and ``modulus_squared``. Lean proves each step exact over the
+  complex numbers wherever ``c[t] - y[s] != 0``, which is tested on the
+  example inputs; the compiled run is compared with the native one, and at
+  inputs of extreme magnitude the row notes where ``alpha * conj(alpha)``
+  underflows or overflows and ``log|alpha|`` does not, as sumpy's arithmetic
+  does. ``sumpy_tile()`` is sumpy's CPU schedule on that arithmetic, as
+  ``get_optimized_kernel`` writes it, and ``tiled`` the same tile on the C
+  target. sumpy silences loopy's ``write_race(write_lpot*)`` warning on this
+  kernel; here the ledger has the fact that stands in its place, ``distinct
+  instances of S0 write distinct cells of out``, decided by isl and, with
+  Lean, proved.
 - **The agreement and the accuracy.** ``sumpy_single_layer`` and
   ``sumpy_double_layer`` are what sumpy's own ``LayerPotential`` returns on
   the same inputs, called as pytential calls it, and each kernel's
@@ -46,26 +58,33 @@ Run this file three ways.
 
 ``python examples/layer_potential.py``
     Evaluates both layer potentials natively and compiled on the starfish,
-    prints the facts of sumpy's tile and its run on the C target, and measures
-    Green's identity and the two jumps as the panels shrink.
+    prints the rows of sumpy's arithmetic, the facts of sumpy's tile and its
+    run on the C target, and measures Green's identity and the two jumps as
+    the panels shrink.
 
 ``lanky check examples/layer_potential.py``
-    The ledger. The theorem reads ``proved`` by Lean where Mathlib is
+    The ledger. ``line_taylor`` reads ``proved`` by Lean where Mathlib is
     installed, and ``assumed`` without it, since the property tester draws no
-    table over ``Nat``; the identity ``by_the_conjugate`` reads ``proved``
-    with Mathlib and ``tested`` without. The row that ``single_layer`` adds
-    the theorem's ``c(n)`` is ``decided`` by ``theorem``, and proved by Lean
-    with Mathlib. Each kernel's accesses are in bounds and its writes
-    distinct, and each cast of its tile on C keeps every dependence, decided
-    by isl (proved by Lean where it is installed); its trace is faithful to
-    its body, its agreement with sumpy is ``tested`` by ``upstream`` within
-    ``1e-12`` of the largest value, and the three accuracy rows are
-    ``tested`` by their run.
+    table over ``Nat``; ``conjugate_form`` reads ``proved`` with Mathlib and
+    ``tested`` without, and so does ``log_of_the_modulus``, by its written
+    proof, which lanky's search would not find alone; the two facts it cites
+    are rows of the ledger, from ``lanky.known``. The row that ``single_layer`` adds
+    the theorem's ``a(n)`` is ``decided`` by ``theorem``, and proved by Lean
+    with Mathlib. Each math step of ``as_sumpy_computes`` is a row, proved
+    by Lean with Mathlib and tested on drawn inputs without it; the
+    condition ``c[t] - y[s] != 0`` is tested on the example inputs; and the
+    compiled schedule's agreement with the native kernel is a row. Each
+    kernel's accesses are in bounds and its writes distinct, and each cast
+    of its tile on C keeps every dependence, decided by isl (proved by Lean
+    where it is installed); its trace is faithful to its body, its
+    agreement with sumpy is ``tested`` by ``upstream`` within ``1e-12`` of
+    the largest value, and the three accuracy rows are ``tested`` by their
+    run.
 
 ``loopty run examples/layer_potential.py``
-    Both kernels on their tile, compiled on the C target and compared with
-    the native run. ``sumpy_tile()``, with its work items, runs on a device
-    in ``benchmarks/qbx_layer_potential.py``.
+    Both kernels in sumpy's arithmetic and on their tile, compiled on the C
+    target and compared with the native run. ``sumpy_tile()``, with its work
+    items, runs on a device in ``benchmarks/qbx_layer_potential.py``.
 
 What it mirrors, at the commits the demonstration pins
 ------------------------------------------------------
@@ -94,8 +113,8 @@ What it mirrors, at the commits the demonstration pins
 
 What differs: sumpy computes the expansion in real arithmetic, straight-line
 code sympy writes for each order; here it is the same series in complex
-arithmetic, one sum over the order that the trace writes out, with the
-ratio's division multiplied out by the conjugate. The curve here is the
+arithmetic, one sum over the order that the trace writes out, with each
+division multiplied out by the conjugate by a math step. The curve here is the
 parametrization itself at Gauss-Legendre points, where meshmode interpolates
 it by polynomials and pytential refines its panels first, so the accuracy
 rows measure this discretization and not pytential's. What sumpy's kernel
@@ -119,6 +138,7 @@ from pathlib import Path
 
 import numpy as np
 from lanky import theorem
+from lanky.known import log_of_a_power, modulus_squared
 from lanky.prelude import Complex, Fn, Nat, Real
 
 from loopty import Arr, Fin, Schedule, kernel, reduce_sum, tested, upstream
@@ -146,57 +166,59 @@ def coefficient(ratio, k):
 def line_taylor(
     alpha: Complex,
     beta: Complex,
-    c: Fn[Nat, Complex],
-    away: alpha != 0,
-    first: alpha * c(1) == beta,
-    ode: all((n + 1) * alpha * c(n + 1) + n * beta * c(n) == 0 for n in Nat if n >= 1),
-) -> all(c(n) == coefficient(-beta / alpha, n) for n in Nat if n >= 1):
-    """The line-Taylor coefficients of ``log(alpha + tau * beta)``, for every order.
+    a: Fn[Nat, Complex],
+    nonzero: alpha != 0,
+    first_term: alpha * a[1] == beta,
+    ode: all((n + 1) * alpha * a[n + 1] + n * beta * a[n] == 0 for n in Nat if n >= 1),
+) -> all(a[n] == coefficient(-beta / alpha, n) for n in Nat if n >= 1):
+    """The line-Taylor coefficients of ``log(alpha + tau * beta)``, at every order.
 
     ``f(tau) = log(alpha + tau * beta)`` solves ``(alpha + tau * beta) * f'(tau)
-    == beta``. Comparing the powers of ``tau`` in it gives ``first`` and
+    == beta``; comparing the powers of ``tau`` in it gives ``first_term`` and
     ``ode`` (L. V. Ahlfors, Complex Analysis, 3rd ed., 1979, chs. 2 and 5;
     lanky's ``examples/line_taylor.py`` states the equation as an axiom and
     checks sumpy's own coefficients against the closed form through order 6).
-    The induction is two orders at a time; Python finds the linear combination
-    of the hypotheses each step needs, and Lean checks it with Mathlib.
     """
+    ratio = -beta / alpha
 
+    def claim(n):
+        if n == 1:
+            return first_term
+        recurrence = a[n].equals((n - 1) / n * ratio * a[n - 1], by=ode)
+        return recurrence, claim(n - 1)
 
-def ratio(alpha, beta):
-    """``-beta / alpha``, by the conjugate: ``-beta * conj(alpha) / |alpha|**2``.
-
-    As sumpy's real arithmetic has it: one real division where a complex
-    division takes three, and a branch.
-    """
-    return -beta * conj(alpha) * (1 / real(alpha * conj(alpha)))
+    return claim
 
 
 @theorem
-def by_the_conjugate(
-    alpha: Complex, beta: Complex, away: alpha != 0
-) -> ratio(alpha, beta) == -beta / alpha:
-    """The kernels' ratio is the theorem's: ``-beta / alpha``, by the conjugate.
+def conjugate_form(x: Complex, alpha: Complex, nonzero: alpha != 0) -> (
+    x / alpha == x * conj(alpha) * (1 / real(alpha * conj(alpha)))
+):
+    """Division by alpha through its conjugate.
 
-    ``alpha * conj(alpha)`` is ``|alpha|**2``, a real number, so ``conj(alpha)
-    / |alpha|**2`` is ``1 / alpha``. Lean proves it with Mathlib, writing the
-    division as the conjugate over ``|alpha|**2`` and both sides as one
-    expression in it, which ``ring`` closes.
+    alpha times its conjugate is ``|alpha|**2``, a real number, so dividing by
+    alpha is multiplying by ``conj(alpha)`` and by the reciprocal of
+    ``|alpha|**2``: one real division where a complex one takes three.
     """
+
+
+@theorem
+def log_of_the_modulus(alpha: Complex, nonzero: alpha != 0) -> (
+    log(abs(alpha)) == log(real(alpha * conj(alpha))) / 2
+):
+    """``log|alpha|`` with no square root: half the log of alpha times its conjugate."""
+    return (
+        log(abs(alpha))
+        .equals(log(abs(alpha) ** 2) / 2, by=log_of_a_power)
+        .equals(log(real(alpha * conj(alpha))) / 2, by=modulus_squared)
+    )
 
 
 def single(alpha, beta):
-    """``log|alpha + beta|``: ``log|alpha|`` and the series through ``ORDER``.
-
-    With ``r2 = |alpha|**2``, ``log|alpha|`` is ``log(r2) / 2``, and the
-    series is in :func:`ratio`, the theorem's ``-beta / alpha`` multiplied out
-    by the conjugate.
-    """
-    r2 = real(alpha * conj(alpha))
-    series = reduce_sum(
-        coefficient(ratio(alpha, beta), k) for k in Fin[ORDER + 1] if k >= 1
+    """``log|alpha + beta|``: ``log|alpha|``, and the series in ``-beta / alpha``."""
+    return log(abs(alpha)) + real(
+        reduce_sum(coefficient(-beta / alpha, k) for k in Fin[ORDER + 1] if k >= 1)
     )
-    return log(r2) / 2 + real(series)
 
 
 def double(alpha, beta, normal):
@@ -204,25 +226,25 @@ def double(alpha, beta, normal):
 
     The source is ``c - alpha``, so this is ``Re(normal * d/dy)`` of the
     series in ``y``: ``-Re(normal / alpha * (1 + ratio + ... +
-    ratio**ORDER))``, the line-Taylor series of ``Re(normal / (y - x))``
-    itself, divided out by the conjugate as :func:`single` does.
+    ratio**ORDER))`` with ``ratio = -beta / alpha``, the line-Taylor series of
+    ``Re(normal / (y - x))`` itself.
     """
-    r2 = real(alpha * conj(alpha))
-    powers = reduce_sum(ratio(alpha, beta) ** k for k in Fin[ORDER + 1])
-    return -real(normal * conj(alpha) * (1 / r2) * powers)
+    return -real(
+        normal / alpha * reduce_sum((-beta / alpha) ** k for k in Fin[ORDER + 1])
+    )
 
 
 # }}}
 
 
-# {{{ the kernels: pytential's S and D, as sumpy's LayerPotential computes them
+# {{{ the kernels: pytential's S and D, as the math says them
 
 
-@kernel(uses=[line_taylor, by_the_conjugate])
+@kernel(uses=[line_taylor])
 def single_layer(
-    z: Arr[Fin[nt], np.complex128],
-    c: Arr[Fin[nt], np.complex128],
-    y: Arr[Fin[ns], np.complex128],
+    z: Arr[Fin[nt], Complex],
+    c: Arr[Fin[nt], Complex],
+    y: Arr[Fin[ns], Complex],
     w: Arr[Fin[ns], Real],
     out: Arr[Fin[nt], Real],
 ):
@@ -230,8 +252,7 @@ def single_layer(
 
     ``y`` holds the sources and ``w`` the quadrature weight times the density
     at each, as pytential hands sumpy its strengths. It cites ``line_taylor``
-    for the terms of its series, which ``by_the_conjugate`` says are at the
-    theorem's ratio.
+    for the terms of its series.
     """
     for t in out.dom:
         out[t] = SCALE * reduce_sum(
@@ -241,10 +262,10 @@ def single_layer(
 
 @kernel
 def double_layer(
-    z: Arr[Fin[nt], np.complex128],
-    c: Arr[Fin[nt], np.complex128],
-    y: Arr[Fin[ns], np.complex128],
-    n: Arr[Fin[ns], np.complex128],
+    z: Arr[Fin[nt], Complex],
+    c: Arr[Fin[nt], Complex],
+    y: Arr[Fin[ns], Complex],
+    n: Arr[Fin[ns], Complex],
     w: Arr[Fin[ns], Real],
     out: Arr[Fin[nt], Real],
 ):
@@ -361,20 +382,29 @@ def example_inputs() -> dict:
 
 # {{{ the schedules
 
+#: As sumpy computes it: divisions through the conjugate, log|alpha| with no root.
+as_sumpy_computes = (
+    Schedule(single_layer, target="c")
+    .rewrite(single_layer.out, by=(conjugate_form, log_of_the_modulus))
+    .example(**example_inputs()["single_layer"])
+)
+
 
 def sumpy_tile(target: str = "opencl") -> Schedule:
     """sumpy's CPU schedule, as ``get_optimized_kernel(is_cpu=True)`` writes it.
 
-    16 targets to a work group, a work item each, the sources 256 at a time,
-    and the sources' loop outside the targets'. It is a schedule for a device,
-    PoCL's CPU device being the one ``is_cpu`` is written for; on the C
-    target its casts are decided as well, and it does not build, which is
-    why it is a function: a file's schedules are run by ``loopty run`` and
-    listed by ``lanky check``, and this one runs where pyopencl does
+    sumpy's arithmetic first (:data:`as_sumpy_computes`), then 16 targets to a
+    work group, a work item each, the sources 256 at a time, and the sources'
+    loop outside the targets'. It is a schedule for a device, PoCL's CPU
+    device being the one ``is_cpu`` is written for; on the C target its casts
+    are decided as well, and it does not build, which is why it is a
+    function: a file's schedules are run by ``loopty run`` and listed by
+    ``lanky check``, and this one runs where pyopencl does
     (``benchmarks/qbx_layer_potential.py``).
     """
     return (
         Schedule(single_layer, target=target)
+        .rewrite(single_layer.out, by=(conjugate_form, log_of_the_modulus))
         .split(single_layer.t, 16)
         .tag({single_layer.t.outer: "g.0", single_layer.t.inner: "l.0"})
         .split(single_layer.s, 256)
@@ -382,20 +412,21 @@ def sumpy_tile(target: str = "opencl") -> Schedule:
     )
 
 
-#: The same tile on the C target, the 16 targets an ``ilp`` loop, which gives
-#: each an accumulator of its own.
+#: sumpy's CPU tile, on that arithmetic, on the C target: the 16 targets an
+#: ``ilp`` loop, which gives each an accumulator of its own.
 tiled = (
-    Schedule(single_layer, target="c")
+    as_sumpy_computes
     .split(single_layer.t, 16)
     .tag(single_layer.t.inner, "ilp")
     .split(single_layer.s, 256)
     .prioritize(single_layer.s.outer, single_layer.t.inner)
-    .example(**example_inputs()["single_layer"])
 )
 
-#: The double layer on the same tile, which the accuracy rows run as well.
+#: The double layer on the same tile, divided through the conjugate, which the
+#: accuracy rows run as well.
 tiled_double = (
     Schedule(double_layer, target="c")
+    .rewrite(double_layer.out, by=conjugate_form)
     .split(double_layer.t, 16)
     .tag(double_layer.t.inner, "ilp")
     .split(double_layer.s, 256)
@@ -574,12 +605,24 @@ def main() -> int:
     ok = ok and series.status.value in ("decided", "proved")
 
     print()
+    print(f"as sumpy computes it: {'.'.join(as_sumpy_computes.history)}")
+    math = set()
+    for fact in as_sumpy_computes.facts():
+        math.add(fact.id)
+        # Lean, where Mathlib is, proves each step exact over the complex numbers
+        fact = prove(fact) if fact.kind == "rewrite" else fact
+        print(f"  {fact.status.value:8} {fact.decided_by or '-':11} {fact.statement}")
+        ok = ok and fact.status.value != "refuted"
+
+    print()
     tile = sumpy_tile("c")
-    print(f"sumpy's tile, get_optimized_kernel(is_cpu=True): {'.'.join(tile.history)}")
+    casts = [step for step in tile.history if not step.startswith("rewrite(")]
+    print(f"sumpy's tile, get_optimized_kernel(is_cpu=True): {'.'.join(casts)}")
     writes = [fact for fact in single_layer.facts() if fact.kind == "disjoint-writes"]
     oracle = IslOracle()
     for fact in [*tile.facts(), *writes]:
-        if fact.kind == "buildable":
+        if fact.kind == "buildable" or fact.id in math:
+            # the arithmetic's rows, said above
             continue
         # Lean, where it is installed, proves each cast, that no dependence
         # joins two work items included, and the writes; isl decides the rest

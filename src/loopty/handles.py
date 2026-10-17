@@ -121,6 +121,7 @@ if TYPE_CHECKING:
 __all__ = [
     "Array",
     "Call",
+    "Kept",
     "Condition",
     "Handle",
     "Loop",
@@ -748,6 +749,25 @@ class Call(_Scoped):
         writes the array, ``fuse(p.reverse_quiet.i, p.gather.checks.idx)``.
         """
         return Names(self._index, self._labels, "check")
+
+
+class Kept(Call):
+    """An array a math step keeps, and the nest that stores it (``keep=``).
+
+    ``factored.r_pass`` is both: a step that takes an array takes it,
+    ``contract(factored.r_pass)``, and its loops are the nest's, by the names
+    the source gives them, ``factored.r_pass.c``
+    (:meth:`loopty.schedule.Schedule.rewrite`).
+    """
+
+    def __init__(self, index: _Index, labels: tuple[str, ...], name: str) -> None:
+        super().__init__(index, labels)
+        self._name = name
+
+    @property
+    def name(self) -> str:
+        """The term's array this is."""
+        return self._name
 
 
 #: What a call's short form yields to: its own attributes.

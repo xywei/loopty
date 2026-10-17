@@ -6,7 +6,104 @@ All notable changes to loopty are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **The demos write their proofs.** `examples/l2p.py`'s `compressed_taylor`
+  proves itself as a textbook does: the claim at `(a, b)` is what is stored
+  where `a < 2`, and otherwise a chain, `R[a, b]` equals `-R[a - 2, b + 2]`
+  by the recurrence, `-D[a - 2, b + 2]` by the claim at `(a - 2, b + 2)`,
+  and `D[a, b]` by the PDE. `examples/layer_potential.py`'s `line_taylor`
+  names the recurrence on the way and cites it with the claim at `n - 1`,
+  and takes the names of the proof interface's design: the family `a`, the
+  hypotheses `nonzero` and `first_term`. Its `log_of_the_modulus`, which
+  lanky's search does not prove alone, is proved by its body, a chain of two
+  links that cite `log_of_a_power` and `modulus_squared` from `lanky.known`;
+  the two facts are rows of the file's ledger, marked with their module. The
+  bodies are lanky's chains, which `lanky check` traces and Lean checks:
+  with Mathlib each row says `by its proof, ...` and what the proof is, and
+  `lanky check --steps` prints its outline, a row per step at its line.
+  Without Lean, each link is drawn, and the proof reads `NOT CHECKED` with
+  why.
+
+- **The theorem matcher's higher-order rule**, shared with lanky
+  (`lanky.matching.higher_order_value`). With `higher_order=True`, a
+  theorem's family applied to the variables its own sums bind matches a
+  term of the program as a function of them, `f` in `sum(f[k] for k in
+  Fin[n])` against `sum(x[k] * y[k] for k in Fin[m])` binding `k ↦ x[k] *
+  y[k]`, and the theorem in the program's terms applies the function. A
+  family is still bound to an array where it can be, and the rule is off by
+  default: the one-statement `weak_grad` kernel of the design is its first
+  use.
+
+- **Math steps: `Schedule(k).rewrite(k.out, by=theorem)`.** A schedule step
+  that changes what a statement computes by an identity, citing the theorem
+  that makes it exact. Wherever what `out` stores contains the theorem's left
+  side, the schedule computes its right side; `by=(f, g)` applies theorems in
+  order, each to what the one before left. The kernel's body stays the math
+  as written and the reference (`Schedule.traced`), and the schedule compiles
+  the rewritten term (`Schedule.term`), lowered as any other. A theorem's
+  variable binds only a term of its sort, so `conjugate_form`'s complex
+  `alpha` binds `c[t] - y[s]` and never the order `k` a sum writes out. Each
+  step is a row of the ledger: exact over the reals or the complex numbers
+  where the theorem's conditions hold, proved by Lean with Mathlib (the
+  theorem restated and rewritten into the goal under the sums too) and tested
+  on drawn inputs without it; each condition is a row by its kind and its
+  statement, decided by isl on indices and tested on the example inputs for
+  data over the statement's own instances (one claim two statements need is a
+  row of each, naming the statement); the output's class
+  is `approx`; and the compiled schedule is compared with the native kernel,
+  measured on the example inputs and on drawn ones, with a note, not a
+  failure, where inputs of extreme magnitude leave the float range the
+  rewrite keeps. A rewrite after a cast, a theorem stated the other way round
+  or found nowhere, a left side that is a bare variable and an exact output
+  are refused, each naming the fix (`IllegalRewrite`).
+  `examples/layer_potential.py` computes the single layer as sumpy does,
+  `as_sumpy_computes`, from kernels that say the math as written, and
+  `line_taylor` applies to them directly. A step's part names its theorem as
+  a citation, so lanky restates it from the text the theorem's command
+  proved, as the parts below are; `log_of_the_modulus`, proved by its
+  written proof after the kernels' facts are established, is restated from
+  its text when its proof is checked.
+
+- **Passes derived from the math: `rewrite(..., keep=(...))` and
+  `into=`.** `keep=("r_pass", "s_pass")` stores the sums a theorem's right
+  side nests in arrays of the schedule's own, innermost first, each over the
+  loops it reads; the matches one written-out sum gave, one per term, are
+  folded back into one nest over the sum's binder. The kept arrays and their
+  loops have handles, `factored.r_pass` and `factored.r_pass.c`, which
+  `fuse` and `contract` take. The row says what the passes leave: the
+  kernel's statement, proved by Lean as a program's postcondition is, by
+  unfolding what the passes store and rewriting with the theorem at each
+  direction's tables; the kept arrays' accesses are in bounds, their writes
+  distinct and each cell stored before it is read, decided by isl.
+  `into=passes` compiles a program the file has, which takes the kernel's
+  arguments, and proves it leaves the kernel's statement the same way. A
+  rewrite that nests sums and keeps none says on its compared row that each
+  cell still adds every term, and names `keep=`. `examples/hexahedra.py`'s
+  `weak_grad` is now the dense kernel, as grudge's `weak_local_grad` says
+  it, and `factored`, `fused` and `contracted` derive the passes from it;
+  the four-call program is `passes`, and its schedules `passes_fused` and
+  `passes_contracted`.
+
+- **lanky's `Complex` is an element type**, stored as `complex128`, as `Real`
+  is stored as `float64`: `Arr[Fin[nt], Complex]`.
+
 ### Fixed
+
+- **A cited theorem is restated from the text Lean proved of it.** A theorem
+  applied to a kernel's postcondition, the theorem and identities of a
+  series row, and the theorems a program's postcondition unfolds through are
+  hypotheses of the part loopty states for Lean, and were printed again from
+  the theorem's term: a printer that dropped a condition of the theorem
+  would have handed the part a hypothesis that proves anything (a theorem
+  restated without its recurrence proves that any offsets that start at
+  zero increase). Each part now names those hypotheses as citations, and
+  lanky's Lean oracle restates each from the `as_cited` text the theorem's
+  own command proved, before any variable of the part, and refuses a part
+  whose citation is not the theorem's statement. A theorem with no proved
+  text, an axiom or one only tested, is restated as before, and the row
+  says so. Needs the lanky of the same name; against lanky 0.4.0 the parts
+  are what they were.
 
 - **A run leaves no `tmp_loopy*` directory behind (#335).** loopy 2025.2's C
   compiler makes a directory in `$TMPDIR` with each C target and never

@@ -722,11 +722,14 @@ class RunVerb:
         # facts above; where Lean is installed it checks each once, a cast
         # from the steps' records, and a fact it proves reads proved; one
         # loopty states for isl only says why under --verbose
-        # (loopty.obligations).
+        # (loopty.obligations). A math step's row was tested on drawn inputs
+        # when it was made, and Lean proves it over the reals or the complex
+        # numbers (loopty.rewriting).
         from loopty.obligations import prove
+        from loopty.rewriting import KIND as REWRITE
 
         for fact in list(ledger):
-            if fact.decided_by == "isl" and callable(
+            if (fact.decided_by == "isl" or fact.kind == REWRITE) and callable(
                 getattr(fact.term, "lean_obligation", None)
             ):
                 ledger.add(prove(fact))
@@ -831,6 +834,24 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="TEXT",
         help="print the Lean of every row that has some (as lanky check does)",
     )
+    check_parser.add_argument(
+        "--proofs",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="TEXT",
+        help="print the proof lanky found of each proved theorem, in Python "
+        "(as lanky check does)",
+    )
+    check_parser.add_argument(
+        "--steps",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="TEXT",
+        help="print the outline of each proof, as written or as lanky found it "
+        "(as lanky check does)",
+    )
     return parser
 
 
@@ -844,6 +865,8 @@ def check(args: Any) -> int:
         json=getattr(args, "json_out", None),
         verbose=getattr(args, "verbose", False),
         show_lean=getattr(args, "show_lean", None),
+        proofs=getattr(args, "proofs", None),
+        steps=getattr(args, "steps", None),
     )
     return verb.run(namespace)
 

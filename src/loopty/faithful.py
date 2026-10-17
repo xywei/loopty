@@ -1263,6 +1263,9 @@ def _draw(
         return rng.integers(0, 2, size=shape).astype(bool)
     if name == "Real":
         return rng.standard_normal(shape)
+    if name == "Complex":
+        pair = rng.standard_normal((*shape, 2))
+        return pair[..., 0] + 1j * pair[..., 1]
     try:
         dtype = np.dtype(base)
     except TypeError as exc:
