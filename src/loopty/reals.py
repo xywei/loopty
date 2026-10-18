@@ -739,7 +739,7 @@ def _concluded_side(
 
 
 #: How many draws tell two values of the inputs apart.
-_DRAWS = 3
+_DRAWS = 8
 
 
 def _one_value(concluded: Any, claimed: Any) -> bool:
@@ -747,9 +747,11 @@ def _one_value(concluded: Any, claimed: Any) -> bool:
 
     Each cell at a point with a value, ``x[2, 1]``, and each free name is
     drawn at random, the same in both, and both sides are evaluated; they
-    have to agree to rounding at every draw. A side with a cell at a point
-    with no value, or one that cannot be evaluated, is not shown to be the
-    other, and ``False`` is returned.
+    have to agree to rounding at every draw. The draws take both signs, all
+    negative once, all positive once and mixed after, at magnitudes between
+    a half and two, so ``abs(x)`` is not taken for ``x``. A side with a cell
+    at a point with no value, or one that cannot be evaluated at a draw, is
+    not shown to be the other, and ``False`` is returned.
     """
     from lanky.terms import evaluate, free_variables
 
@@ -780,8 +782,18 @@ def _one_value(concluded: Any, claimed: Any) -> bool:
         left, right = atoms(concluded), atoms(claimed)
         free = sorted(set(free_variables(left)) | set(free_variables(right)))
         rng = np.random.default_rng(20261018)
-        for _ in range(_DRAWS):
-            context = {name: float(rng.uniform(0.5, 2.0)) for name in free}
+        for draw in range(_DRAWS):
+            signs = (
+                [-1.0] * len(free)
+                if draw == 0
+                else [1.0] * len(free)
+                if draw == 1
+                else rng.choice([-1.0, 1.0], size=len(free)).tolist()
+            )
+            context = {
+                name: sign * float(rng.uniform(0.5, 2.0))
+                for name, sign in zip(free, signs, strict=True)
+            }
             a, b = complex(evaluate(left, context)), complex(evaluate(right, context))
             if not abs(a - b) <= 1e-12 * (abs(a) + abs(b) + 1e-300):
                 return False

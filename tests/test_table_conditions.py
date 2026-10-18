@@ -466,6 +466,24 @@ def test_a_theorem_that_concludes_another_right_side_is_not_cited_for_it() -> No
     assert "rewrite-condition" not in facts
 
 
+def test_a_right_side_is_compared_at_draws_of_both_signs() -> None:
+    """``abs(x)`` is not ``x``, though they agree at every positive draw (Codex, #348).
+
+    Drawn only between a half and two, the comparison took a theorem
+    concluding ``abs(x)`` for a claim of ``x``.
+    """
+    from lanky.terms import Abs, Subscript, Var
+
+    from loopty.reals import _one_value
+
+    x = Subscript(Var("x"), 0)
+    J = Var("J")
+    assert not _one_value(Abs(x), x)
+    assert not _one_value(Abs(x - Subscript(Var("x"), 1)), x - Subscript(Var("x"), 1))
+    assert _one_value(Abs(J) * 2 / 24, Abs(J) / 12)
+    assert _one_value(Abs(-x), Abs(x))
+
+
 def test_weights_off_beyond_their_digits_refute_the_condition() -> None:
     """Close enough for the runs at approx, and not the rule to 15 digits."""
     facts = {fact.kind: fact for fact in sixth_rounded.facts()}
