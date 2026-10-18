@@ -47,12 +47,7 @@ def compressed_taylor(
         if a < 2:
             yield by(stored)
         else:
-            assert R[a, b] == -R[a - 2, b + 2] == -D[a - 2, b + 2] == D[a, b], by(
-                recurrence[a - 2, b],
-                compressed_taylor.conclusion[a - 2, b + 2],
-                pde[a - 2, b],
-            )
-            yield by()
+            yield by(recurrence, compressed_taylor.conclusion[a - 2, b + 2], pde)
 
 
 @kernel(uses=[on_every_triangle])  # compressed_taylor, box by box on a + b <= P
@@ -91,9 +86,9 @@ one box's triangle, and runs the schedule compiled:
 ```console
 $ python examples/l2p.py
 ...
-refused: interchange(reconstruct.b, reconstruct.a) illegal: R[box, a, b] = C[box, a, b] (l2p.py:288) at box=0, a=1, b=9 writes R[0, 1, 9], read by R[box, a, b] = -R[box, a - 2, b + 2] (l2p.py:290) at box=0, a=3, b=7, scheduled earlier (at nb=1, isl's choice)
+refused: interchange(reconstruct.b, reconstruct.a) illegal: R[box, a, b] = C[box, a, b] (l2p.py:283) at box=0, a=1, b=9 writes R[0, 1, 9], read by R[box, a, b] = -R[box, a - 2, b + 2] (l2p.py:285) at box=0, a=3, b=7, scheduled earlier (at nb=1, isl's choice)
 
-refused: contract(l2p.R, lambda box, a, b: b) illegal: R[box, a, b] = -R[box, a - 2, b + 2] (l2p.py:290) at box=0, a=9, b=0 reads R[0, 7, 2], which the same statement at box=0, a=7, b=2 stored in slot 2, after the same statement at box=0, a=8, b=2 stored R[0, 8, 2] there (at nb=1, isl's choice); contract(l2p.R) finds the smallest window that keeps every read, lambda box, a, b: (a, b)
+refused: contract(l2p.R, lambda box, a, b: b) illegal: R[box, a, b] = -R[box, a - 2, b + 2] (l2p.py:285) at box=0, a=9, b=0 reads R[0, 7, 2], which the same statement at box=0, a=7, b=2 stored in slot 2, after the same statement at box=0, a=8, b=2 stored R[0, 8, 2] there (at nb=1, isl's choice); contract(l2p.R) finds the smallest window that keeps every read, lambda box, a, b: (a, b)
 
 schedule: Schedule(l2p, target='c').fuse(l2p.unpack.box, l2p.reconstruct.box, l2p.evaluate.box).contract(l2p.R, lambda box, a, b: (a, b)).contract(l2p.C, lambda box, a, b: (a, b))
 ...
@@ -110,22 +105,23 @@ how each claim is known and who settled it. Six of its 56 rows:
 $ lanky check examples/l2p.py
 STATUS   EFFECTIVE  BY           WHERE       OWNER              STATEMENT
 -------  ---------  -----------  ----------  -----------------  ----------------------------------------------------------------------------------------------------
-proved   tested     lean         l2p.py:135  compressed_taylor  D : Fn[Nat, Nat, Real], R : Fn[Nat, Nat, Real]
+proved   tested     lean         l2p.py:137  compressed_taylor  D : Fn[Nat, Nat, Real], R : Fn[Nat, Nat, Real]
                                                                 | pde: forall a in Nat, b in Nat. D[a + 2, b] + D[a, b + 2] == 0
                                                                 | stored: forall a in Nat, b in Nat where a < 2. R[a, b] == D[a, b]
                                                                 | recurrence: forall a in Nat, b in Nat. R[a + 2, b] == -R[a, b + 2]
                                                                 |- forall a in Nat, b in Nat. R[a, b] == D[a, b]
+                                                                by its proof, l2p.py:152-156: induction on a, 2 cases, 2 steps
 ...
-proved   proved     lean         l2p.py:215  storage_index      storage_index stores a cell at every address of Fin(21)
+proved   proved     lean         l2p.py:210  storage_index      storage_index stores a cell at every address of Fin(21)
 ...
-proved   tested     lean         l2p.py:263  reconstruct        by on_every_triangle, for every D with pde and stored:
+proved   tested     lean         l2p.py:258  reconstruct        by on_every_triangle, for every D with pde and stored:
                                                                   forall i in Fin(nb), a in Nat, b in Nat where a + b <= 10. R[i, a, b] == D[i, a, b]
 ...
-proved   proved     lean         l2p.py:351  l2p                no read of l2p.R sees its slot overwritten after contract(l2p.R, lambda box, a, b: (a, b)):
+proved   proved     lean         l2p.py:346  l2p                no read of l2p.R sees its slot overwritten after contract(l2p.R, lambda box, a, b: (a, b)):
                                                                   l2p.R kept in 121 cells, R[box, a, b] in slot (a, b)
 ...
-proved   proved     lean         l2p.py:359  l2p                the order after on_groups(l2p.unpack.box) runs every dependence of l2p forward, within one work item
-tested   tested     upstream     l2p.py:481  l2p                the native run of l2p agrees with sumpy_l2p in pot within 1e-14 of the largest value,
+proved   proved     lean         l2p.py:354  l2p                the order after on_groups(l2p.unpack.box) runs every dependence of l2p forward, within one work item
+tested   tested     upstream     l2p.py:476  l2p                the native run of l2p agrees with sumpy_l2p in pot within 1e-14 of the largest value,
                                                                   on its example inputs
 
 56 facts: 3 decided, 46 proved, 7 tested
@@ -134,10 +130,10 @@ LEAN proved all 44 facts isl decided. Lean's statements are loopty's, from its o
 ```
 
 `STATUS` is how a claim was settled, and `EFFECTIVE` what it is worth given
-what it rests on. The claim is proved for every order, by an induction
-whose steps sympy found and Lean checked, and is worth `tested` because
-lanky reads its annotations by running them. The application rests on the
-claim and on `reconstruct`'s postcondition, which isl decided from what
+what it rests on. The claim is proved for every order by its own proof, the
+loop above, whose induction Lean checked with the multipliers sympy found,
+and is worth `tested` because lanky reads its annotations by running them.
+The application rests on the claim and on `reconstruct`'s postcondition, which isl decided from what
 the kernel stores and Lean proved again. The window's fact and the GPU
 schedule's cast rest on nothing weaker, and are worth `proved`. The last row
 is the agreement with sumpy's own kernel. The three rows left `decided` are
@@ -162,8 +158,8 @@ has what each prints. "Proved" below is with Lean and Mathlib.
 |---|---|---|---|
 | `l2p.py` | sumpy's L2P for the 2-D Laplace kernel, `E2PFromSingleBox`, and its schedule for a GPU | the compressed Taylor recurrence proved for every order and applied to the kernel's postcondition; sumpy's storage index one for one; the interchange refused with its pair; each box's triangle in a window that no read sees overwritten | the potential sumpy's own kernel computes, to round-off (an `upstream` row); unrolled, the checked schedule times as plain loopy's, and looped, as plain loopy given the same expression ([#270](https://github.com/xywei/loopty/issues/270)) |
 | `hexahedra.py` | grudge PR #418's sum-factorized weak gradient and divergence on hexahedra | the programs' postconditions, the dense Kronecker operators, proved for every order from what the passes store and `sum_factorization`; the DOFArray the same layout as #418's `dim_tags`, for every order; a fusion one loop too deep refused with its pair; the intermediates kept a row and a slab at a time | #418's own `weak_local_grad` and `weak_local_div`, to 5e-15 of the largest value; each device launch times as the same launch in plain loopy, within 1% at the median and 8% at worst, where loopty keeps the program's rounding order |
-| `advection.py` | grudge #418's weak advection right-hand side, upwind flux, lift and inverse mass, and libParanumal's split of it | the inverse mass pushed inward, and the lift the face gather's transpose, proved for every order; five device splits checked before they run; libParanumal's lift onto the face nodes, without its barriers, refused with the edge node two faces update | grudge's `WeakAdvectionOperator`, to 7e-15; the launches time as plain loopy's, within 1% at the median and 13% at worst, for the same reason |
-| `layer_potential.py` | pytential's direct QBX: sumpy's `LayerPotential` with a line-Taylor expansion, and its CPU tile | the line-Taylor coefficients from their recurrence, proved for every order (that a logarithm's coefficients satisfy it is cited), and tied by a row to the terms `single_layer` adds; sumpy's tile checked cast by cast; the write race sumpy silences, a proved fact | sumpy's kernel as pytential calls it, within 1e-12 of the largest value (`upstream` rows); pytential's Green identity and jump relations converge at order 3.5 to 3.9, above the 3.4 its test asks; times as plain loopy given the same expression |
+| `advection.py` | grudge #418's weak advection right-hand side, upwind flux, lift and inverse mass, and libParanumal's split of it | the inverse mass pushed inward, under the condition `inverse_of_the_mass` that `M^-1 M` is the identity, each step a proved row (the two claims themselves are tested: lanky finds no proof of them alone); the lift the face gather's transpose, proved for every order; five device splits checked before they run; libParanumal's lift onto the face nodes, without its barriers, refused with the edge node two faces update | grudge's `WeakAdvectionOperator`, to 7e-15; the launches time as plain loopy's, within 1% at the median and 13% at worst, for the same reason |
+| `layer_potential.py` | pytential's direct QBX: sumpy's `LayerPotential` with a line-Taylor expansion, and its CPU tile | the line-Taylor coefficients from their recurrence, under `away_from_zero`, proved for every order by the proofs in their bodies (that a logarithm's coefficients satisfy it is cited), and tied by a row to the terms `single_layer` adds; sumpy's tile checked cast by cast; the write race sumpy silences, a proved fact | sumpy's kernel as pytential calls it, within 1e-12 of the largest value (`upstream` rows); pytential's Green identity and jump relations converge at order 3.5 to 3.9, above the 3.4 its test asks; times as plain loopy given the same expression |
 | `assembly.py` | PyOP2's assembly loop around FFC's P1 mass kernel, from firedrake's tests | the element mass `abs(J) (1 + delta_jk) / 24` as `mass_ffc`'s postcondition, proved over the reals; the rule exact on quadratics; the scatter keeps the total; PyOP2's GPU split refused with the node its two triangles share, and accepted once the updates are atomic | PyOP2's own `par_loop` and firedrake's `assemble`, to 5e-15; times as plain loopy given the same transforms and loop nesting, within a few percent |
 
 The timings are `benchmarks/`'s drivers, run on a GPU and on CPUs beside

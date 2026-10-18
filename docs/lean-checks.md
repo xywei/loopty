@@ -7,7 +7,7 @@ decided reads `decided`. Where lanky's Lean oracle is installed (`pip install
 is also stated as a Lean theorem and proved there, by `omega`, and then reads
 `proved`, by `lean`.
 
-That is worth something only because the theorem does not come from isl. It is
+That is worth something only because the Lean theorem does not come from isl. It is
 built from loopty's own description of the kernel: the loops' names, bounds
 and guards as loopty wrote them for isl, the subscripts as the trace recorded
 them, the source order as the 2d+1 vectors `loopty.flow` defines, and each
@@ -152,15 +152,15 @@ its own, in parallel.
 | a cast on a hardware axis (`g.*`, `l.*`) | dependence class, and a statement's sum that reads what its own instruction writes | besides the order, the two instances run on one work item of every axis: each one's loop on the axis, counted from where loopy starts it (`0`, mostly); an access that runs on every work item of an axis (a statement with no loop on it, the body of a sum on it) shares one with no other, so the two never touch one cell |
 | a cast after a substitution | class of a read it computes again and a write of what it reads | the instance of the producer that stored the cell read, before or after the write in the source's order, puts the read on that side of the write after every step |
 | a cast after a window | pair of accesses to one slot | two instances that touch one slot, in the order the window was taken in, keep it after every step |
-| what a program's call may assume | requirement, or flat access | the claim at every point of its domain, under the hypotheses isl used (a callee's postcondition, a theorem the program cites, a type the contract checks) |
+| what a program's call may assume | requirement, or flat access | the claim at every point of its domain, under the hypotheses isl used (a callee's postcondition, a claim the program cites, a type the contract checks) |
 | a row passed to a kernel called in a loop, or a cell read for a scalar it is passed, is in bounds | row, or cell | the row's indices are a point of the array's leading axes, at every point of the call |
 | an integral argument of such a call is in its sort | argument | `0 ≤ v`, and `v < m` for `Fin[m]`, at every point of the call |
 | two rows of one array passed to one call, one of them written, are apart | pair of rows | the rows' indices differ on an axis both fix, at every point of the call |
 | single assignment | pair of statements that store into the array; read of the array and statement that stores into it | two instances, distinct where they are of one statement, store into cells that differ; an instance that stores the cell an instance reads runs before it, in the source order, and so is not the instance that reads it |
 | a kernel's postcondition | conjunct | the conjunct at every point of its binders' domain, under what each statement stores, its value equation, with the instances isl took of the equations as hints; one about reals is stated with Mathlib's `ℝ` and closed by `linarith` |
-| a cited theorem, applied | (one part) | the theorem as it was proved, and the conjuncts of the postcondition it was matched with, imply the claim: Lean applies the theorem with the arrays and sizes loopty bound given by name, and each premise left is a hypothesis |
-| a program's postcondition, where isl does not decide it | conjunct | the conjunct, under what each call stores (the equations that still hold when the program returns) and the theorems the program cites: the arrays the claim reads unfolded into what was stored in them (`simp only`), a theorem rewritten where one of its sides is, its families given as the sections of the arrays they stand for (`rw [← h n (Fr (3 * x + 0)) ... (w (3 * x + 0) e) ...]`), the sums over a literal range written out, then `ring_nf`; one about reals with Mathlib |
-| a cited theorem about a series, applied to the terms a kernel adds | term the kernel adds | the theorem and the identities the kernel cites, as they were proved, and the theorem's hypotheses at the expressions loopty bound, imply that the family at the term's order is the term: Lean rewrites the goal by the identities, then applies the theorem, or rewrites by it and leaves the numerals to `norm_num`; Mathlib's, over the reals or the complex numbers |
+| a cited claim, applied | (one part) | the cited claim as it was proved, and the conjuncts of the postcondition it was matched with, imply the row's statement: Lean applies the cited claim with the arrays and sizes loopty bound given by name, and each premise left is a hypothesis |
+| a program's postcondition, where isl does not decide it | conjunct | the conjunct, under what each call stores (the equations that still hold when the program returns) and the claims the program cites: the arrays the claim reads unfolded into what was stored in them (`simp only`), a claim rewritten where one of its sides is, its families given as the sections of the arrays they stand for (`rw [← h n (Fr (3 * x + 0)) ... (w (3 * x + 0) e) ...]`), the sums over a literal range written out, then `ring_nf`; one about reals with Mathlib |
+| a cited claim about a series, applied to the terms a kernel adds | term the kernel adds | the claim and the identities the kernel cites, as they were proved, and the claim's hypotheses at the expressions loopty bound, imply that the family at the term's order is the term: Lean rewrites the goal by the identities, then applies the claim, or rewrites by it and leaves the numerals to `norm_num`; Mathlib's, over the reals or the complex numbers |
 | a postcondition of reals at its class (not isl's: `tested` by its runs) | conjunct | the conjunct within its class's tolerance, `\|a - b\| ≤ 1e-6 (\|b\| + 1)`, of the cells read as what their statements store there, sums written out and tables at their values; Mathlib's, closed by `linarith` with the bounds of each absolute value |
 | an assumption of a schedule | (a hypothesis of every later cast) | |
 
@@ -250,22 +250,22 @@ statement stores there, the sum written out and each table read at its
 value, and proves it at the tolerance with Mathlib, a proof of the term read
 over the reals.
 
-A theorem a kernel cites, `@kernel(uses=[on_the_triangle])`, is applied to its
-postcondition: Lean is handed the theorem as it was proved, as a hypothesis,
+A claim a kernel cites, `@kernel(uses=[on_the_triangle])`, is applied to its
+postcondition: Lean is handed the claim as it was proved, as a hypothesis,
 and applies it to the claim with the arrays loopty matched to its families,
 `apply h1 (p := p) (c := c) (R := R)`, so that a wrong match is a part Lean
 does not prove.
 
-A theorem about a series is applied to the terms a kernel adds
+A claim about a series is applied to the terms a kernel adds
 (`loopty.summands`): `examples/layer_potential.py`'s `single_layer` adds
 `coefficient(-beta / alpha, k)`, `-(-beta / alpha)**k / k`, for `k` from 1
 to 5, and `line_taylor` concludes `a(n) == -(-beta / alpha)**n / n`. Each
-term is a part with the theorem as a hypothesis, restated from the text the
-theorem's own command proved, and Lean applies it, so that a kernel whose
-terms are not the theorem's is a part Lean does not prove. An identity the
+term is a part with the claim as a hypothesis, restated from the text the
+claim's own command proved, and Lean applies it, so that a kernel whose
+terms are not the claim's is a part Lean does not prove. An identity the
 kernel cites is rewritten into the goal first, the kernel's way of computing
 the term; the math steps of a schedule (`Schedule.rewrite`) are parts of
-their own, one per theorem, each restating its theorem the same way.
+their own, one per claim, each restating its claim the same way.
 
 ## What isl gives Lean, which Lean checks
 
@@ -343,7 +343,7 @@ stays `decided`.
   the same point is the same proposition too. The two readings part where a
   value is not equal to itself: a `NaN` a kernel stores, or is given, so a
   postcondition decided `R[a, b] == c[a, b]` is false natively at a `NaN` of
-  `c` (#227). A theorem a kernel cites is about the reals, and is given as
+  `c` (#227). A claim a kernel cites is about the reals, and is given as
   hypotheses only the conjuncts in which nothing rounds, copies and sign
   changes, whose two readings agree: `s[i] == a[i] + b[i]` holds of the
   floats a kernel stores, and not of them read as reals.
@@ -363,7 +363,7 @@ back: the stencil's ledger takes 2.5 s the first time on the machine the
 coverage report ran on, and 1.3 s the next, against 0.6 s without Lean; the
 slowest example, `travel.py`, 8.5 s, 4.4 s and 2.1 s.
 A check whose every answer is in the cache starts no Lean at all (lanky
-#118), a lanky theorem's attempts and the parts about reals included: the
+#118), a lanky claim's attempts and the parts about reals included: the
 cache is keyed by the version a session would run, and with Mathlib by the
 project's toolchain and Mathlib revision, which lanky reads without starting
 one, so a warm check costs what a check without Lean does. `LANKY_LEAN_DISABLE=1` turns Lean off, and the ledger reads `decided` as
@@ -376,7 +376,7 @@ and test kernel to Lean, the casts each file's `rejected*` functions refuse
 included, from an empty proof cache. Its report, with Lean v4.29.1 (a
 file's time is Lean's on all its facts, a part's on one declaration):
 
-Of 1699 facts isl decides in 34 files (11 of them a theorem a kernel cites, applied to what isl decided), Lean proved 1635; 26 stay decided; 37 refuted facts have their negation proved at isl's counterexample; 1 refuted facts are stated for isl only. 572 more facts are not isl's to decide (by type, tested, assumed).
+Of 1699 facts isl decides in 34 files (11 of them a claim a kernel cites, applied to what isl decided), Lean proved 1635; 26 stay decided; 37 refuted facts have their negation proved at isl's counterexample; 1 refuted facts are stated for isl only. 572 more facts are not isl's to decide (by type, tested, assumed).
 
 Not all of them are equally hard. The 205 `ordering` facts, that the source
 order runs every dependence forward, hold by the definition of a dependence
@@ -502,9 +502,9 @@ face nodes without atomics, whose two updates of one cell at the same time
 loopty states for isl only (see below).
 
 With Mathlib (`LANKY_LEAN_MATHLIB`), the 26 claims about reals,
-postconditions and the theorems applied to them, the terms a kernel adds
+postconditions and the claims applied to them, the terms a kernel adds
 among them, are proved too: 1661 proved, none left decided, and the same 37
-refuted facts proved false. The slowest part about reals is a theorem's
+refuted facts proved false. The slowest part about reals is a claim's
 application to the terms a kernel adds, 2.01 s, and a postcondition's,
 1.22 s.
 
@@ -515,7 +515,7 @@ asked about, and claims core Lean has no words for; each says so with
 `--verbose`, and the coverage report lists them.
 
 - **A claim about reals, in core Lean:** a kernel's postcondition over a
-  `Real` array, and a theorem applied to it, are stated with Mathlib's `ℝ`;
+  `Real` array, and a claim applied to it, are stated with Mathlib's `ℝ`;
   without Mathlib they stay `decided`, saying why, and with it Lean proves
   them. Issue [#227](https://github.com/xywei/loopty/issues/227) is what an
   equation of floats means at a `NaN`.

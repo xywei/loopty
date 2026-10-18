@@ -24,7 +24,7 @@ loopty and lanky installed from PyPI as the README's
 
 ## The sparse product
 
-`examples/spmv.py` holds two kernels, one theorem and one program. The kernel
+`examples/spmv.py` holds two kernels, one claim and one program. The kernel
 worth reading is four lines:
 
 ```python
@@ -179,9 +179,10 @@ Read the `BY` column.
   exactness class of the reduction, read off what it sums; `realize` is what
   lowers it to `reassoc`, and that lowering is the fact that later licenses the
   tolerance in the differential run.
-- `property-test` established the theorem. In a checkout with `lanky[lean]`
-  installed this row reads `proved lean` instead. loopty does not pull the Lean
-  extra, so a plain `uv sync --group dev` here gives the tested row.
+- `property-test` established the claim `scan_monotone`. In a checkout with
+  `lanky[lean]` installed this row reads `proved lean` instead. loopty does not
+  pull the Lean extra, so a plain `uv sync --group dev` here gives the tested
+  row.
 - `interpreter` tested the last fact of each kernel and of the program, the
   only one about the trace itself: every other row is about the term tracing
   recorded, and this one asks whether that term is the body. The term is run
@@ -207,7 +208,7 @@ Read the `BY` column.
   the call `solve` makes. It rests on `scan`'s own fact,
   `postcondition:spmv.scan@69`, and is worth what that is worth. The id names
   `scan`'s definition, the module `spmv` that the file's path gives it, and
-  line 69, as lanky names a theorem's, so a program that calls a `scan` of
+  line 69, as lanky names a claim's, so a program that calls a `scan` of
   another file rests on that file's fact, whatever it imported it as, and
   never on a kernel of its own file that happens to share the name. A later
   call of the program may assume it too: `examples/travel.py` has programs
@@ -542,7 +543,7 @@ The same file applies firedrake's quadrature rule to an integrand,
   pyopencl. `--target` *retargets* every schedule in the file, re-checking each
   cast against the new target, and says by name which ones it could not; it
   does not quietly run a C-pinned schedule on C and call it a device run.
-- Write a theorem for an obligation that came back `assumed`, and install
+- Write a claim for an obligation that came back `assumed`, and install
   `lanky[lean]` to try to prove it.
 
 ## Where things are
@@ -581,4 +582,4 @@ commands if you want the whole thing.
 
 The ledger, the statuses and the oracle protocol belong to
 [lanky](https://github.com/xywei/lanky); its own quickstart walks through a file
-of theorems.
+of claims.

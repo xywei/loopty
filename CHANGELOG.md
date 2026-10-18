@@ -68,9 +68,13 @@ before.
   so `Arr[Fin[max], Real]` is refused as `the type of x has the size max,
   which is neither a name nor a number`, where 0.5 refused it as one of
   isl's keywords.
-- **examples/README.md's `layer_potential.py` paragraph** names all three
-  written proofs, the file for `--steps`, and the proof line of
-  `compressed_taylor`'s row in the README's excerpt (#351).
+- **What the docs say a check prints with Mathlib is what it prints**
+  (#351): examples/README.md's `layer_potential.py` paragraph has the
+  ledger's count and the proof line of each of its three written proofs,
+  and names the file for `--steps`; the README's `l2p.py` excerpt has
+  `compressed_taylor`'s proof line; and the README's table says that
+  `inverse_mass_inward` and `lift_inward` are tested, as their rows have
+  read since 0.5, while each step they license is proved.
 
 ## [0.5.0] - 2026-10-18
 

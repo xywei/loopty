@@ -18,13 +18,12 @@ L2P, read top to bottom, in three layers:
    for every order, with Mathlib; ``lanky check --show-lean`` prints the Lean.
    ``compressed_taylor``'s body is its proof, as a textbook writes it: a
    loop over the points ``(a, b)`` of its conclusion, in order. Where
-   ``a < 2`` the point holds by what is stored; otherwise by a calculation,
-   one ``assert`` with a reason for each link: ``R[a, b]`` equals
-   ``-R[a - 2, b + 2]`` by the recurrence, ``-D[a - 2, b + 2]`` by the
-   conclusion at ``(a - 2, b + 2)``, and ``D[a, b]`` by the PDE. The point
-   ``(a - 2, b + 2)`` comes earlier in the loop than ``(a, b)``, since
-   ``a``, the outer variable, is smaller, and citing the conclusion there
-   is the induction.
+   ``a < 2`` the point holds by what is stored; otherwise by the
+   recurrence, the conclusion at ``(a - 2, b + 2)`` and the PDE:
+   ``R[a, b]`` is ``-R[a - 2, b + 2]``, which is ``-D[a - 2, b + 2]``,
+   which is ``D[a, b]``. The point ``(a - 2, b + 2)`` comes earlier in the
+   loop than ``(a, b)``, since ``a``, the outer variable, is smaller, and
+   citing the conclusion there is the induction.
 2. **The kernels, in loopty.** ``unpack`` reads each box's ``2p + 1``
    coefficients, in sumpy's storage order, into that table: through sumpy's
    storage index, ``storage_index``, a layout whose three facts say it is one
@@ -154,12 +153,7 @@ def compressed_taylor(
         if a < 2:
             yield by(stored)
         else:
-            assert R[a, b] == -R[a - 2, b + 2] == -D[a - 2, b + 2] == D[a, b], by(
-                recurrence[a - 2, b],
-                compressed_taylor.conclusion[a - 2, b + 2],
-                pde[a - 2, b],
-            )
-            yield by()
+            yield by(recurrence, compressed_taylor.conclusion[a - 2, b + 2], pde)
 
 
 @claim
