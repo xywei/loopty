@@ -128,7 +128,10 @@ All notable changes to loopty are recorded here. The format follows
   whose citation is not the theorem's statement. A theorem with no proved
   text, an axiom or one only tested, is restated as before, and the row
   says so. Needs the lanky of the same name; against lanky 0.4.0 the parts
-  are what they were.
+  are what they were. Each citation is lanky's one record of a fact cited,
+  `lanky.citations.Citation(theorem, hypothesis=position)`, the theorem at
+  the hypothesis that restates it (`loopty.obligations.cited`); a lanky of
+  before it gets `lanky.obligations.Citation`, as it did.
 
 - **A run leaves no `tmp_loopy*` directory behind (#335).** loopy 2025.2's C
   compiler makes a directory in `$TMPDIR` with each C target and never
