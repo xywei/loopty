@@ -94,12 +94,15 @@ and not 3.
 The schedule at the bottom of the file is built at import time, and building it
 is what checks it. `split(spmv.j, 2)` cuts a row's entries into pieces and
 `realize(spmv.y, tree=True)` sums the pieces separately, which reassociates a
-floating-point accumulation. That is why the last line compares at `1.48e-06`
-rather than at zero: the tolerance comes from the `reassoc` fact, not from a
+floating-point accumulation. That is why the last line allows `1e-06` rather
+than zero: the tolerance comes from the classes the types and the `reassoc`
+fact state, the weakest of them, `approx` for a `Real` output, not from a
 number somebody picked. It is a per-element tolerance,
 `eps_class * (|expected| + 1)`, so it is the accuracy claimed for *that* cell of
-`y` and does not grow when the matrix does; the printed pair names the element
-that came closest to its own allowance.
+`y` and does not grow when the matrix does. The difference is said in words
+every machine prints alike, `0` here, or `at roundoff`, since the digits of
+roundoff are the processor's; `loopty run --verbose` adds the figures, those of
+the element that came closest to its own allowance.
 
 The second schedule printed is the design's device schedule, and it is the
 interesting failure. Every cast is `decided`: putting the rows on work groups

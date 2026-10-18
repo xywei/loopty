@@ -540,12 +540,12 @@ dense    = [5.402 0.965 3.771 2.404 2.019 0.928]
 both layouts agree with the dense reference: True
 
 schedule: Schedule(pairs, target='c')
-  f: difference 0 within 1.04e-06 (approx) -> tested
-  e: difference 0 within 1.93e-06 (approx) -> tested
+  f: difference 0 within 1e-06 (approx) -> tested
+  e: difference 0 within 1e-06 (approx) -> tested
 
 schedule: Schedule(pairs, target='c').pack(pairs.f)
-  f: difference 0 within 1.04e-06 (approx) -> tested
-  e: difference 0 within 1.93e-06 (approx) -> tested
+  f: difference 0 within 1e-06 (approx) -> tested
+  e: difference 0 within 1e-06 (approx) -> tested
 ```
 
 ### lanky check examples/pairs.py
@@ -592,11 +592,11 @@ WITHOUT LEAN: 14 rows are not proved. To have Lean prove what it can: pip instal
 ```console
 $ uv run loopty run examples/pairs.py
 pairs: Schedule(pairs, target='c')
-  f: difference 0 within 1.04e-06 (approx) -> tested
-  e: difference 0 within 1.93e-06 (approx) -> tested
+  f: difference 0 within 1e-06 (approx) -> tested
+  e: difference 0 within 1e-06 (approx) -> tested
 pairs: Schedule(pairs, target='c').pack(pairs.f)
-  f: difference 0 within 1.04e-06 (approx) -> tested
-  e: difference 0 within 1.93e-06 (approx) -> tested
+  f: difference 0 within 1e-06 (approx) -> tested
+  e: difference 0 within 1e-06 (approx) -> tested
 
 STATUS  BY     WHERE         OWNER  STATEMENT
 ------  -----  ------------  -----  -------------------------------------------------------------------------------------
@@ -764,7 +764,7 @@ permuted:
   the elements of perm are points of Fin(n) where gather is called at travel.py:99, after number at travel.py:98 wrote perm
     decided under the postcondition of number, after number at travel.py:98
   perm: difference 0 within 0 (exact) -> tested
-  y: difference 0 within 1.1e-05 (approx) -> tested
+  y: difference 0 within 1e-06 (approx) -> tested
 through:
   off holds the offsets the counts in cnt give the rows of val (off[0] == 0 and off[r + 1] == off[r] + cnt[r]) where rowsums is called at travel.py:152, after scan at travel.py:151 wrote off
     decided under the postcondition of scan, after scan at travel.py:151
@@ -774,7 +774,7 @@ checked:
   the elements of perm are points of Fin(n) where gather is called at travel.py:106, after number_quiet at travel.py:105 wrote perm
     checked when it runs
   perm: difference 0 within 0 (exact) -> tested
-  y: difference 0 within 1.1e-05 (approx) -> tested
+  y: difference 0 within 1e-06 (approx) -> tested
 flat:
   off holds the offsets the counts in cnt give the rows of wt (off[0] == 0 and off[r + 1] == off[r] + cnt[r]) where weigh is called at travel.py:193, after scan_flat at travel.py:192 wrote off
     decided under the postcondition of scan_flat, after scan_flat at travel.py:192
@@ -858,13 +858,13 @@ number: Schedule(number, target='c')
 number_quiet: Schedule(number_quiet, target='c')
   perm: difference 0 within 0 (exact) -> tested
 gather: Schedule(gather, target='c')
-  y: difference 0 within 1.1e-05 (approx) -> tested
+  y: difference 0 within 1e-06 (approx) -> tested
 permuted: Schedule(permuted, target='c')
   perm: difference 0 within 0 (exact) -> tested
-  y: difference 0 within 1.1e-05 (approx) -> tested
+  y: difference 0 within 1e-06 (approx) -> tested
 checked: Schedule(checked, target='c')
   perm: difference 0 within 0 (exact) -> tested
-  y: difference 0 within 1.1e-05 (approx) -> tested
+  y: difference 0 within 1e-06 (approx) -> tested
 scan: Schedule(scan, target='c')
   off: difference 0 within 0 (exact) -> tested
 rowsums: Schedule(rowsums, target='c')
@@ -1121,7 +1121,7 @@ static double PHI[3 * 3] = { 0.6666666666666666, 0.16666666666666666, 0.16666666
 static double W[3] = { 0.16666666666666666, 0.16666666666666666, 0.16666666666666666 };
 
 schedule: Schedule(mass_action, target='c').split(mass_action.c, 32)
-  yl: difference 0 within 1.01e-06 (approx) -> tested
+  yl: difference 0 within 1e-06 (approx) -> tested
 ```
 
 ### lanky check examples/quadrature.py
@@ -1169,7 +1169,7 @@ WITHOUT LEAN: 12 rows are not proved. To have Lean prove what it can: pip instal
 ```console
 $ uv run loopty run examples/quadrature.py
 mass_action: Schedule(mass_action, target='c').split(mass_action.c, 32)
-  yl: difference 0 within 1.01e-06 (approx) -> tested
+  yl: difference 0 within 1e-06 (approx) -> tested
 
 STATUS   BY     WHERE              OWNER        STATEMENT
 -------  -----  -----------------  -----------  -------------------------------------------------------------------------------------------
@@ -1268,7 +1268,7 @@ as sumpy computes it: rewrite(single_layer.out, by=(conjugate_form, log_of_the_m
   tested   interpreter rewrite(out, by=log_of_the_modulus): over the complex numbers, what out stores is unchanged wherever c[t] - y[s] != 0: log(abs(c[t] - y[s])) becomes log(real((c[t] - y[s])*conj(c[t] - y[s]))) / 2, in 1 place
   tested   run         c[t] - y[s] != 0 for every t and every s, which conjugate_form and log_of_the_modulus need, on the example inputs
   decided  type        after rewrite(out, ...), out is compared at approx (it was approx)
-...
+  tested   run         the compiled as_sumpy_computes agrees with the native single_layer in out at approx, within 1e-06 of each value (measured at roundoff), on its example inputs and 3 drawn ones; note: with the inputs scaled by 1e-170 (|c[t] - y[s]| about 1e-170), out[0] is nan where the native run gives 5.29e-168; with the inputs scaled by 1e+170 (|c[t] - y[s]| about 1e+170), out[0] is nan where the native run gives 5.29e+172
 
 sumpy's tile, get_optimized_kernel(is_cpu=True): split(single_layer.t, 16).tag({single_layer.t.outer: 'g.0', single_layer.t.inner: 'l.0'}).split(single_layer.s, 256).prioritize(single_layer.s.outer, single_layer.t.inner)
   decided  isl  split(single_layer.t, 16) renames the instances of single_layer one for one
@@ -1328,9 +1328,9 @@ tested                     tested     run            layer_potential.py:388  sin
                                                                                                    and log_of_the_modulus need, on the example inputs
 decided                    decided    type           layer_potential.py:388  single_layer        after rewrite(out, ...), out is compared at approx (it was approx)
 tested                     tested     run            layer_potential.py:388  single_layer        the compiled as_sumpy_computes agrees with the native single_layer in out at approx,
-...
-                                                                                                   and 3 drawn ones; note: with the inputs scaled by 1e-170 (|c[t] - y[s]| about 1e-170),
-                                                                                                   out[0] is nan where the native run gives 5.29e-168; with the inputs scaled by 1e+170
+                                                                                                   within 1e-06 of each value (measured at roundoff), on its example inputs and 3 drawn ones; note:
+                                                                                                   with the inputs scaled by 1e-170 (|c[t] - y[s]| about 1e-170), out[0] is nan
+                                                                                                   where the native run gives 5.29e-168; with the inputs scaled by 1e+170
                                                                                                    (|c[t] - y[s]| about 1e+170), out[0] is nan where the native run gives 5.29e+172
 decided                    decided    isl            layer_potential.py:419  single_layer        split(single_layer.t, 16) renames the instances of single_layer one for one
 decided                    decided    isl            layer_potential.py:419  single_layer        the order after split(single_layer.t, 16) runs every dependence of single_layer forward
@@ -1359,7 +1359,7 @@ tested                     tested     interpreter    layer_potential.py:429  dou
 tested                     tested     run            layer_potential.py:429  double_layer        c[t] - y[s] != 0 for every t and every s, which conjugate_form needs, on the example inputs
 decided                    decided    type           layer_potential.py:429  double_layer        after rewrite(out, ...), out is compared at approx (it was approx)
 tested                     tested     run            layer_potential.py:429  double_layer        the compiled double_layer after rewrite(out, ...) agrees with the native double_layer in out at
-                                                                                                   approx, within 1e-06 of each value (measured 1e-15 of the largest), on its example inputs
+                                                                                                   approx, within 1e-06 of each value (measured at roundoff), on its example inputs
                                                                                                    and 3 drawn ones; note: with the inputs scaled by 1e-170 (|c[t] - y[s]| about 1e-170),
                                                                                                    out[0] is nan where the native run gives -3.45e-166; with the inputs scaled by 1e+170
                                                                                                    (|c[t] - y[s]| about 1e+170), out[0] is nan where the native run gives -3.45e+174
@@ -1508,7 +1508,7 @@ weak_derivative: Schedule(weak_derivative, target='c').fuse(weak_derivative.alon
 weak_derivative: Schedule(weak_derivative, target='c').fuse(weak_derivative.along_r.a, weak_derivative.along_s.a).contract(weak_derivative.v, lambda e, a, b: b)
   w: difference 0 within 1e-06 (approx) -> tested
 along_r: Schedule(along_r, target='c')
-  v: difference 0 within 1.02e-06 (approx) -> tested
+  v: difference 0 within 1e-06 (approx) -> tested
 along_s: Schedule(along_s, target='c')
   w: difference 0 within 1e-06 (approx) -> tested
 
@@ -1684,7 +1684,7 @@ the passes one after another on the C target, with the same flags.
 
 ```console
 $ uv run python examples/hexahedra.py
-order 3, 2 hexahedra: the dense kernel and the passes are the dense Kronecker operators: True (largest difference 5e-16 of the largest)
+order 3, 2 hexahedra: the dense kernel and the passes are the dense Kronecker operators, to 1e-13 of the largest value: True
 
 derived from the math: Schedule(weak_grad, target='c').rewrite(weak_grad.grad, by=sum_factorization, keep=('r_pass', 's_pass')).fuse(weak_grad.r_pass.c, weak_grad.s_pass.c).contract(weak_grad.r_pass, lambda x, d, e, c, b, i: (b, i))
   r_pass kept in lambda x, d, e, c, b, i: (b, i)
@@ -1706,13 +1706,13 @@ derived from the math: Schedule(weak_grad, target='c').rewrite(weak_grad.grad, b
   decided  isl         every cell of s_pass that grad[x, e, k, j, i] = reduce_sum(...) (hexahedra.py:377) reads was written before the read, by s_pass[x, d, e, c, j, i] = reduce_sum(...) (hexahedra.py:394)
   decided  isl         n >= 0 and (k >= 0 and k < n) and (j >= 0 and j < n) and (i >= 0 and i < n) for every k and every j and every i, which sum_factorization needs
   decided  type        after rewrite(grad, ...), grad is compared at approx (it was approx)
-  tested   run         the compiled factored agrees with the native weak_grad in grad at approx, within 1e-06 of each value (measured 4e-16 of the largest), on its example inputs and 3 drawn ones
+  tested   run         the compiled factored agrees with the native weak_grad in grad at approx, within 1e-06 of each value (measured at roundoff), on its example inputs and 3 drawn ones
   decided  isl         fuse(weak_grad.r_pass.c, weak_grad.s_pass.c) renames the instances of weak_grad one for one
   decided  isl         the order after fuse(weak_grad.r_pass.c, weak_grad.s_pass.c) runs every dependence of weak_grad forward
   decided  isl         for contract(weak_grad.r_pass), every cell of weak_grad.arrays.r_pass that weak_grad reads, r_pass[x, d, e, c, b, i] = reduce_sum(...) (hexahedra.py:394) has stored by the time it is read
   decided  isl         no read of weak_grad.arrays.r_pass sees its slot overwritten after contract(weak_grad.r_pass, lambda x, d, e, c, b, i: (b, i)): weak_grad.arrays.r_pass kept in n*n cells, r_pass[x, d, e, c, b, i] in slot (b, i)
   w: difference 0 within 1e-06 (approx) -> tested
-...
+  grad: difference at roundoff within 1e-06 (approx) -> tested
 
 refused: fuse(passes.along_r.i, passes.along_s.i) illegal: v[q, e, k, j, i] = reduce_sum(...) (hexahedra.py:231) at q=8, e=0, k=1, j=1, i=1 writes v[8, 0, 1, 1, 1], read by vs[q, e, k, j, i] = reduce_sum(...) (hexahedra.py:244) at q=8, e=0, k=1, j=0, i=1, scheduled earlier (at n=2, ne=1, isl's choice); fuse(passes.along_r.k, passes.along_s.k) runs every dependence between them forward
 
@@ -1918,7 +1918,7 @@ decided  isl            hexahedra.py:394  weak_grad              n >= 0 and (k >
                                                                    and every i, which sum_factorization needs
 decided  type           hexahedra.py:394  weak_grad              after rewrite(grad, ...), grad is compared at approx (it was approx)
 tested   run            hexahedra.py:394  weak_grad              the compiled factored agrees with the native weak_grad in grad at approx,
-                                                                   within 1e-06 of each value (measured 4e-16 of the largest), on its example inputs and 3 drawn ones
+                                                                   within 1e-06 of each value (measured at roundoff), on its example inputs and 3 drawn ones
 decided  isl            hexahedra.py:399  weak_grad              fuse(weak_grad.r_pass.c, weak_grad.s_pass.c) renames the instances of weak_grad one for one
 decided  isl            hexahedra.py:399  weak_grad              the order after fuse(weak_grad.r_pass.c, weak_grad.s_pass.c) runs every dependence of
                                                                    weak_grad forward
@@ -1944,13 +1944,13 @@ WITHOUT MATHLIB: sum_factorization and 3 more rows are not proved, since only Le
 $ uv run loopty run examples/hexahedra.py
 weak_grad: Schedule(weak_grad, target='c').rewrite(weak_grad.grad, by=sum_factorization, keep=('r_pass', 's_pass'))
   w: difference 0 within 1e-06 (approx) -> tested
-...
+  grad: difference at roundoff within 1e-06 (approx) -> tested
 weak_grad: Schedule(weak_grad, target='c').rewrite(weak_grad.grad, by=sum_factorization, keep=('r_pass', 's_pass')).fuse(weak_grad.r_pass.c, weak_grad.s_pass.c)
   w: difference 0 within 1e-06 (approx) -> tested
-...
+  grad: difference at roundoff within 1e-06 (approx) -> tested
 weak_grad: Schedule(weak_grad, target='c').rewrite(weak_grad.grad, by=sum_factorization, keep=('r_pass', 's_pass')).fuse(weak_grad.r_pass.c, weak_grad.s_pass.c).contract(weak_grad.r_pass, lambda x, d, e, c, b, i: (b, i))
   w: difference 0 within 1e-06 (approx) -> tested
-...
+  grad: difference at roundoff within 1e-06 (approx) -> tested
 passes: Schedule(passes, target='c').fuse(passes.metric.j, passes.along_r.j).fuse(passes.along_r.k, passes.along_s.k)
   grad: difference 0 within 1e-06 (approx) -> tested
 passes: Schedule(passes, target='c').fuse(passes.metric.j, passes.along_r.j).fuse(passes.along_r.k, passes.along_s.k).contract(passes.w, lambda q, e, k, j, i: i).contract(passes.v, lambda q, e, k, j, i: (j, i))
@@ -1966,7 +1966,7 @@ along_s: Schedule(along_s, target='c')
 gradient_along_t: Schedule(gradient_along_t, target='c')
   grad: difference 0 within 1e-06 (approx) -> tested
 divergence_along_t: Schedule(divergence_along_t, target='c')
-  div: difference 0 within 1.01e-06 (approx) -> tested
+  div: difference 0 within 1e-06 (approx) -> tested
 weak_div: Schedule(weak_div, target='c')
   div: difference 0 within 1e-06 (approx) -> tested
 metric_along_r: Schedule(metric_along_r, target='c')
@@ -2010,7 +2010,7 @@ decided                                               decided    isl          he
                                                                                                                          and every i, which sum_factorization needs
 decided                                               decided    type         hexahedra.py:394  weak_grad              after rewrite(grad, ...), grad is compared at approx (it was approx)
 tested                                                tested     run          hexahedra.py:394  weak_grad              the compiled factored agrees with the native weak_grad in grad at approx,
-                                                                                                                         within 1e-06 of each value (measured 4e-16 of the largest), on its example inputs and 3 drawn ones
+                                                                                                                         within 1e-06 of each value (measured at roundoff), on its example inputs and 3 drawn ones
 tested                                                tested     loopy        hexahedra.py:394  weak_grad              the scheduled run of weak_grad agrees with the native run to the accuracy its types state
 decided                                               decided    isl          hexahedra.py:399  weak_grad              fuse(weak_grad.r_pass.c, weak_grad.s_pass.c) renames the instances of weak_grad one for one
 decided                                               decided    isl          hexahedra.py:399  weak_grad              the order after fuse(weak_grad.r_pass.c, weak_grad.s_pass.c) runs every dependence of
@@ -2120,7 +2120,7 @@ refused: fuse(advection_rhs.upwind.b, advection_rhs.volume.i) illegal: flux[e, f
 
 accepted: Schedule(advection_rhs, target='c').substitute(advection_rhs.V).substitute(advection_rhs.vn).fuse(advection_rhs.volume.i, advection_rhs.lift.i).fuse(advection_rhs.upwind.e, advection_rhs.volume.e).contract(advection_rhs.flux, lambda e, f, a, b: (f, a, b))
   flux kept in lambda e, f, a, b: (f, a, b)
-  rhs: difference 0 within 1.01e-06 (approx) -> tested
+  rhs: difference 0 within 1e-06 (approx) -> tested
 
 libParanumal's lift onto the face nodes, a face's nodes on the work items:
   refused: tag({lift_on_faces.e: 'g.0', lift_on_faces.a: 'l.1', lift_on_faces.b: 'l.0'}) illegal: rhs[e, last, a, b] -= ... (advection.py:383) at e=0, a=1, b=0 and rhs[e, a, b, 0] -= ... (advection.py:385) at e=0, a=3, b=1 both update rhs[0, 3, 1, 0] (at n=4, ne=8, as hinted), and the loop lift_on_faces.b on l.0 runs them on two work items, so one can overwrite what the other added; make the updates atomic, with atomic(lift_on_faces.rhs) before this step
@@ -2334,27 +2334,27 @@ WITHOUT MATHLIB: inverse_mass_inward, lift_inward and lift_is_the_gather_transpo
 ```console
 $ uv run loopty run examples/advection.py
 advection_rhs: Schedule(advection_rhs, target='c').substitute(advection_rhs.V).substitute(advection_rhs.vn).fuse(advection_rhs.volume.i, advection_rhs.lift.i).fuse(advection_rhs.upwind.e, advection_rhs.volume.e)
-  rhs: difference 0 within 1.01e-06 (approx) -> tested
+  rhs: difference 0 within 1e-06 (approx) -> tested
 advection_rhs: Schedule(advection_rhs, target='c').substitute(advection_rhs.V).substitute(advection_rhs.vn).fuse(advection_rhs.volume.i, advection_rhs.lift.i).fuse(advection_rhs.upwind.e, advection_rhs.volume.e).contract(advection_rhs.flux, lambda e, f, a, b: (f, a, b))
-  rhs: difference 0 within 1.01e-06 (approx) -> tested
+  rhs: difference 0 within 1e-06 (approx) -> tested
 reference_velocity: Schedule(reference_velocity, target='c')
-  V: difference 0 within 1.07e-06 (approx) -> tested
+  V: difference 0 within 1e-06 (approx) -> tested
 normal_velocity: Schedule(normal_velocity, target='c')
-  vn: difference 0 within 1.07e-06 (approx) -> tested
+  vn: difference 0 within 1e-06 (approx) -> tested
 upwind: Schedule(upwind, target='c')
   flux: difference 0 within 1e-06 (approx) -> tested
 volume: Schedule(volume, target='c')
   rhs: difference 0 within 1e-06 (approx) -> tested
 lift: Schedule(lift, target='c')
-  rhs: difference 0 within 1.35e-06 (approx) -> tested
+  rhs: difference 0 within 1e-06 (approx) -> tested
 lift_on_faces: Schedule(lift_on_faces, target='c')
-  rhs: difference 0 within 1.04e-06 (approx) -> tested
+  rhs: difference 0 within 1e-06 (approx) -> tested
 folded_rhs: Schedule(folded_rhs, target='c')
-  rhs: difference 0 within 1.01e-06 (approx) -> tested
+  rhs: difference 0 within 1e-06 (approx) -> tested
 surface: Schedule(surface, target='c')
-  rhs: difference 0 within 1.01e-06 (approx) -> tested
+  rhs: difference 0 within 1e-06 (approx) -> tested
 volume_and_lift: Schedule(volume_and_lift, target='c')
-  rhs: difference 0 within 1.03e-06 (approx) -> tested
+  rhs: difference 0 within 1e-06 (approx) -> tested
 
 STATUS   BY     WHERE             OWNER               STATEMENT
 -------  -----  ----------------  ------------------  --------------------------------------------------------------------------------------------------
@@ -2455,7 +2455,7 @@ the loop nest loopy generates for it:
 refused: matvec_by calls dot at calls.py:211: axis 0 of its b is n long there, and z, which it is given, has p; nothing says the two agree
 
 schedule: Schedule(matvec, target='c').split(matvec.i, 4)
-  y: difference 0 within 1.01e-06 (approx) -> tested
+  y: difference 0 within 1e-06 (approx) -> tested
 ```
 
 ### lanky check examples/calls.py
@@ -2574,15 +2574,15 @@ rule on its own writes its value into a one-cell array, `result`.
 $ uv run loopty run examples/calls.py
 integrate: takes the function f, so it is compiled where a kernel calls it, inlined
 matvec: Schedule(matvec, target='c').split(matvec.i, 4)
-  y: difference 0 within 1.01e-06 (approx) -> tested
+  y: difference 0 within 1e-06 (approx) -> tested
 dot: Schedule(dot, target='c')
-  result: difference 0 within 1.26e-06 (approx) -> tested
+  result: difference 0 within 1e-06 (approx) -> tested
 csr: Schedule(csr, target='c')
   y: difference 0 within 1e-06 (approx) -> tested
 element_mass: Schedule(element_mass, target='c')
-  Me: difference 0 within 1.08e-06 (approx) -> tested
+  Me: difference 0 within 1e-06 (approx) -> tested
 mass_matrices: Schedule(mass_matrices, target='c')
-  M: difference 0 within 1.02e-06 (approx) -> tested
+  M: difference 0 within 1e-06 (approx) -> tested
 
 STATUS   BY     WHERE         OWNER          STATEMENT
 -------  -----  ------------  -------------  ---------------------------------------------------------------------------------------------
@@ -2670,7 +2670,7 @@ accepted: Schedule(mass_action, target='c').assume(mass_action.nc >= 1).atomic(m
 
 schedule: Schedule(mass_action, target='c').assume(mass_action.nc % 4 == 0).atomic(mass_action.y).split(mass_action.c, 4).tag(mass_action.c.inner, 'ilp')
   Ae: difference 0 within 1e-06 (approx) -> tested
-  y: difference 0 within 1.01e-06 (approx) -> tested
+  y: difference 0 within 1e-06 (approx) -> tested
 ```
 
 ### lanky check examples/assembly.py
@@ -2826,9 +2826,9 @@ WITHOUT MATHLIB: exact_to_degree_two, element_mass, conservation and 1 more row 
 $ uv run loopty run examples/assembly.py
 mass_action: Schedule(mass_action, target='c').assume(mass_action.nc % 4 == 0).atomic(mass_action.y).split(mass_action.c, 4).tag(mass_action.c.inner, 'ilp')
   Ae: difference 0 within 1e-06 (approx) -> tested
-  y: difference 0 within 1.01e-06 (approx) -> tested
+  y: difference 0 within 1e-06 (approx) -> tested
 mass_ffc: Schedule(mass_ffc, target='c')
-  A: difference 0 within 1.13e-06 (approx) -> tested
+  A: difference 0 within 1e-06 (approx) -> tested
 
 STATUS                                         EFFECTIVE  BY     WHERE            OWNER        STATEMENT
 ---------------------------------------------  ---------  -----  ---------------  -----------  --------------------------------------------------------------------------------------------
@@ -2929,7 +2929,7 @@ schedule: Schedule(l2p, target='c').fuse(l2p.unpack.box, l2p.reconstruct.box, l2
   decided  isl  the order after fuse(l2p.unpack.box, l2p.reconstruct.box, l2p.evaluate.box) runs every dependence of l2p forward
   decided  isl  no read of l2p.R sees its slot overwritten after contract(l2p.R, lambda box, a, b: (a, b)): l2p.R kept in 121 cells, R[box, a, b] in slot (a, b)
   decided  isl  no read of l2p.C sees its slot overwritten after contract(l2p.C, lambda box, a, b: (a, b)): l2p.C kept in 22 cells, C[box, a, b] in slot (a, b)
-  pot: difference 0 within 1.1e-06 (approx) -> tested
+  pot: difference 0 within 1e-06 (approx) -> tested
 
 on a device, each box a work group keeping its windows: on_groups(l2p.unpack.box): 2 facts, all decided by isl
 
@@ -3081,9 +3081,9 @@ NOT CHECKED compressed_taylor at l2p.py:135: its proof, l2p.py:151-161, was not 
 ```console
 $ uv run loopty run examples/l2p.py
 l2p: Schedule(l2p, target='c').fuse(l2p.unpack.box, l2p.reconstruct.box, l2p.evaluate.box)
-  pot: difference 0 within 1.1e-06 (approx) -> tested
+  pot: difference 0 within 1e-06 (approx) -> tested
 l2p: Schedule(l2p, target='c').fuse(l2p.unpack.box, l2p.reconstruct.box, l2p.evaluate.box).contract(l2p.R, lambda box, a, b: (a, b)).contract(l2p.C, lambda box, a, b: (a, b))
-  pot: difference 0 within 1.1e-06 (approx) -> tested
+  pot: difference 0 within 1e-06 (approx) -> tested
 l2p: Schedule(l2p, target='opencl').fuse(l2p.unpack.box, l2p.reconstruct.box, l2p.evaluate.box).on_groups(l2p.unpack.box)
   not run here: running on a device needs pyopencl, which is not installed; its facts are checked all the same
 unpack: Schedule(unpack, target='c')
