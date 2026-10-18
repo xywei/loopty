@@ -6,6 +6,72 @@ All notable changes to loopty are recorded here. The format follows
 
 ## [Unreleased]
 
+The demos read as engineers write checks, in lanky 0.6's claims. A claim is
+`@claim`, and its body, where it has one, is its proof: a loop over the
+points of its conclusion, `for n in line_taylor.conclusion.domain:`, with
+each step an `assert` and its reason after it, `by(...)`, and each case
+closed with `yield by(...)`. Conditions several claims share are named once,
+`@condition`, and the claims that hold under them are written in a `with`
+block; a row that applies such a claim says what it holds under. Kernels
+and schedules cite claims as they cited theorems: `@kernel(uses=[...])`,
+`@program(uses=[...])` and `Schedule.rewrite(..., by=...)` are spelled as
+before.
+
+### Breaking
+
+- **Requires lanky 0.6.0**, which refuses lanky 0.5's `@theorem`,
+  `@axiom(cite=...)` and its proofs, each with the line to write. A file of
+  kernels that cites a claim changes its decorators and its proofs, and
+  nothing else:
+
+  | lanky 0.5, in a loopty file | lanky 0.6 |
+  |---|---|
+  | `from lanky import theorem`, `@theorem` | `from lanky import claim`, `@claim` |
+  | `@axiom(cite=...)` | `@claim(cite=...)` |
+  | the same conditions restated in each theorem | `@condition`, and the claims in a `with name as (...):` block |
+  | `def claim(a, b): ...` and `return claim` | `for a, b in name.conclusion.domain:`, each case closed with `yield by(...)` |
+  | `x.equals(y, by=f).equals(z, by=g)` | `assert x == y == z, by(f, g)` |
+  | `return recurrence, claim(n - 1)` | `yield by(name.conclusion[n - 1])`, after the step's `assert` |
+  | a hypothesis at a point, `pde(a - 2, b)` | `pde[a - 2, b]` |
+  | `@kernel(uses=[t])`, `rewrite(..., by=t)` | unchanged |
+
+- **The demos' spelling.** `layer_potential.py` states its one assumption
+  once, `@condition away_from_zero` (`alpha`, the center less the source, is
+  not zero), and writes `line_taylor` and `reciprocal_taylor` in `with
+  away_from_zero as (alpha, beta, nonzero):`; `advection.py` does the same
+  for `inverse_mass_inward` and `lift_inward` under `inverse_of_the_mass`
+  (`M^-1 M` is the identity). The written proofs, `compressed_taylor` in
+  `l2p.py` and `line_taylor`, `reciprocal_taylor` and `log_of_the_modulus`
+  in `layer_potential.py`, are loops and `assert` steps. Every other claim
+  of the demos, tests and docs is `@claim`.
+- **Rows and messages say claim.** A row a cited claim decides reads
+  `decided` by `claim` (0.5: `theorem`), and every message that named a
+  theorem names a claim: `uses= of the kernel names claims`, `by= takes
+  claims`, `the cited claim scan_monotone_cited is assumed on its source`.
+  A claim's fact id is lanky's, `claim:module.name@line` (0.5:
+  `theorem:...`), so a `uses=` that named one by its id names it so. The
+  kinds of loopty's own facts, `by-theorem` among them, are unchanged.
+
+### Changed
+
+- **A row that applies a claim held under a condition says so**, after the
+  claim's name, as lanky's own rows do, and does not list the condition's
+  named conditions again: `single_layer adds line_taylor's a(n) for n in
+  1..5, under away_from_zero, for every a with first_term and ode, read over
+  the complex numbers`; `by on_the_triangle_of_a_harmonic_table under
+  harmonic, for every D with stored: ...`; `rewrite(rhs,
+  by=inverse_mass_inward), under inverse_of_the_mass: over the reals, ...`.
+  What Lean is handed is unchanged: the condition's parts are hypotheses of
+  the claim as it was proved.
+- **A size spelled like a builtin lanky reads** is refused by its name. lanky
+  0.6 reads `max` and `min` in an annotation as its own, as it reads `abs`,
+  so `Arr[Fin[max], Real]` is refused as `the type of x has the size max,
+  which is neither a name nor a number`, where 0.5 refused it as one of
+  isl's keywords.
+- **examples/README.md's `layer_potential.py` paragraph** names all three
+  written proofs, the file for `--steps`, and the proof line of
+  `compressed_taylor`'s row in the README's excerpt (#351).
+
 ## [0.5.0] - 2026-10-18
 
 The math and the computation live in one file, and the file proves both.

@@ -905,7 +905,7 @@ def applicable(term: Term, written: set[str], array: str, codomain: Any) -> str 
     if array in written:
         return (
             f"{term.name} writes {array}, and nothing says its cells are points of "
-            f"{codomain}: a theorem about them is over Int"
+            f"{codomain}: a claim about them is over Int"
         )
     if name == "Nat" and (
         isinstance(element, FinType) or getattr(element, "name", None) == "Nat"
@@ -1276,7 +1276,7 @@ def _nothing_matched(
                 return (
                     f"the conjunct {render(conjunct)} would be its hypothesis "
                     f"{name}, and it is about reals and rounds in floating point, "
-                    "so a theorem about the reals is not given it"
+                    "so a claim about the reals is not given it"
                 )
     if stopped:
         return (
@@ -1473,7 +1473,7 @@ class Applied:
         lanky = _lanky_obligations()
         if not hasattr(lanky, "Application"):
             return _declined(
-                "this lanky's Lean oracle applies no theorem a hypothesis of a part "
+                "this lanky's Lean oracle applies no claim a hypothesis of a part "
                 "is; lanky 0.3 does"
             )
         from lanky.prelude import FnType
@@ -1504,7 +1504,7 @@ class Applied:
                 sorts[value] = sort
         theorem_term = getattr(application.theorem, "term", None)
         if theorem_term is None:
-            return _declined("the theorem has no statement to apply")
+            return _declined("the claim has no statement to apply")
         claim = Claim(self.term, sorts=sorts)
         claim.hypotheses.append(theorem_term)
         for _k, position in application.matched:
@@ -1514,7 +1514,7 @@ class Applied:
         try:
             index = guards.index(render(theorem_term))
         except ValueError:
-            return _declined("the theorem is no hypothesis of its own part")
+            return _declined("the claim is no hypothesis of its own part")
         values = tuple(
             (name, Var(value) if isinstance(value, str) else value)
             for name, value in application.bindings
@@ -1548,16 +1548,20 @@ def applied_statement(name: str, application: Application) -> str:
     the theorem gives them, which the full claim (:attr:`Application.claim`)
     spells out.
     """
+    from loopty.hypotheses import held_under
+
     conclusion = application.conclusion
     if conclusion is None:
         conclusion = application.claim
-    words = f"by {name}"
+    under, given = held_under(application.theorem)
+    unmatched = [name for name in application.unmatched if name not in given]
+    words = f"by {name} {under}" if under else f"by {name}"
     if application.free:
         words += f", for every {', '.join(application.free)}"
-        if application.unmatched:
-            words += f" with {' and '.join(application.unmatched)}"
-    elif application.unmatched:
-        words += f", given {' and '.join(application.unmatched)}"
+        if unmatched:
+            words += f" with {' and '.join(unmatched)}"
+    elif unmatched:
+        words += f", given {' and '.join(unmatched)}"
     return f"{words}: {render(conclusion)}"
 
 
@@ -1596,7 +1600,7 @@ def application_facts(
                 statement=applied_statement(name, application),
                 term=Applied(term, application, tuple(given), owner),
                 status=Status.DECIDED,
-                decided_by="theorem",
+                decided_by="claim",
                 provenance={
                     "theorem": identifier,
                     "bindings": bindings,
@@ -1667,7 +1671,7 @@ def unapplied_facts(
             reasons.append(raised[id(theorem)])
         elif _identity(theorem) is not None:
             reasons.append(
-                "it is an identity, which puts a series theorem's terms in the "
+                "it is an identity, which puts a series claim's terms in the "
                 f"kernel's spelling, and no series {term.name} adds is read with it"
             )
         else:
@@ -1684,7 +1688,7 @@ def unapplied_facts(
                     )
             elif post.status is Status.REFUTED:
                 reasons.append(
-                    f"the postcondition of {term.name} is refuted, and a theorem is "
+                    f"the postcondition of {term.name} is refuted, and a claim is "
                     "applied to one that holds"
                 )
             else:

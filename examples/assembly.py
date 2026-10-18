@@ -119,7 +119,7 @@ kernel that hypothesis is a condition on the tables, a row of its own
 tested at their 15 digits: ``0.666666666666667`` is ``2/3`` to the last
 digit. The postcondition is then ``element_mass``'s conclusion: proved by
 Lean with Mathlib over the reals, from what the kernel stores, with its
-tables as the theorem takes them; tested on the runs at the approx
+tables as the claim takes them; tested on the runs at the approx
 tolerance, ``|a - b| <= 1e-6 (|b| + 1)``, as its compiled run is compared
 with its native one, since the floats it computes round.
 """
@@ -129,7 +129,7 @@ from __future__ import annotations
 from fractions import Fraction
 
 import numpy as np
-from lanky import theorem
+from lanky import claim
 from lanky.prelude import Fn, Nat, Real
 
 from loopty import Arr, Fin, Schedule, kernel, reduce_sum, table
@@ -160,7 +160,7 @@ def field_at(u, x, y):
     return u[0] * P1[0](x, y) + u[1] * P1[1](x, y) + u[2] * P1[2](x, y)
 
 
-@theorem
+@claim
 def exact_to_degree_two(
     a: Real, b: Real, c: Real, d: Real, e: Real, f: Real
 ) -> rule(lambda x, y: a + b * x + c * y + d * x * x + e * x * y + f * y * y) == (
@@ -173,7 +173,7 @@ def exact_to_degree_two(
     """
 
 
-@theorem
+@claim
 def element_mass(
     J: Real,
     FE: Fn[Fin[3], Fin[3], Real],
@@ -196,7 +196,7 @@ def element_mass(
     """
 
 
-@theorem
+@claim
 def conservation(
     nc: Nat,
     nv: Nat,

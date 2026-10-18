@@ -16,7 +16,7 @@ in the program, and an axiom. Each is checked when the program runs.
 
 from __future__ import annotations
 
-from lanky import axiom, theorem
+from lanky import claim
 from lanky.prelude import Fn, Int, Nat, Real
 
 from loopty import Arr, Fin, kernel, program, reduce_sum
@@ -380,7 +380,7 @@ def up_to_a(perm: Arr[Fin[a], Fin[a]]) -> all(perm[j] == j + 1 for j in Fin[a]):
         perm[i] = i + 1
 
 
-@theorem
+@claim
 def bounded(
     n: Nat,
     f: Fn[Fin[n], Int],
@@ -449,7 +449,7 @@ def scan_unit(
         off[r + 1] = off[r] + cnt[r]
 
 
-@axiom(cite="any book on prefix sums")
+@claim(cite="any book on prefix sums")
 def scan_monotone_cited(
     n: Nat,
     cnt: Fn[Fin[n], Nat],

@@ -65,7 +65,7 @@ def nothing(kernel: Any) -> dict[str, str]:
 NO_SERIES = {
     "halves": "no sum of {k} adds the terms of its series c(n)",
     "halved": (
-        "it is an identity, which puts a series theorem's terms in the kernel's "
+        "it is an identity, which puts a series claim's terms in the kernel's "
         "spelling, and no series {k} adds is read with it"
     ),
 }
@@ -78,7 +78,7 @@ def test_the_terms_a_kernel_adds_are_the_theorems_through_the_identity() -> None
         "power_sum adds halves's c(n) for n in 0..3, for every c with first and "
         "step, read over the reals"
     )
-    assert (row.status, row.decided_by) == (Status.DECIDED, "theorem")
+    assert (row.status, row.decided_by) == (Status.DECIDED, "claim")
     assert row.provenance["bindings"] == "x = x[i]"
     assert row.provenance["orders"] == [0, 1, 2, 3]
     assert row.provenance["terms"][2] == "(x[i]*0.5)**2"

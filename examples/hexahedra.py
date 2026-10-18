@@ -56,7 +56,7 @@ Run this file three ways.
     launches a device runs.
 
 ``lanky check examples/hexahedra.py``
-    The theorem, every kernel's facts, the programs', with what each program
+    The claim, every kernel's facts, the programs', with what each program
     leaves, and the layout's.
 
 ``loopty run examples/hexahedra.py``
@@ -69,7 +69,7 @@ What is worth reading here
 
 *Every order at once.* The kernels are written for ``n`` nodes per axis, so
 each fact about them and their schedules is decided for every order, the
-Kronecker theorem is proved for every ``n``, and so are the layouts: isl tests
+Kronecker claim is proved for every ``n``, and so are the layouts: isl tests
 them at ``n`` from 1 to 6, as ``n * j`` is not linear, and Lean proves them.
 
 *The math, and the passes derived from it.* ``weak_grad`` is the dense
@@ -80,7 +80,7 @@ rewrites ``grad`` by ``sum_factorization`` and keeps the pass along ``r``
 and the pass along ``s`` in arrays of their own, ``r_pass`` and ``s_pass``;
 ``fused`` runs the two passes a slab of ``c`` at a time, and ``contracted``
 keeps the ``r`` pass one slab at a time. The ledger says, proved by Lean
-with Mathlib from what the derived passes store and the theorem at each
+with Mathlib from what the derived passes store and the claim at each
 direction's tables, that they leave in ``grad`` what ``weak_grad``'s
 statement says; the kept arrays' accesses in bounds, their writes distinct,
 and each cell stored before it is read; and that the compiled ``factored``
@@ -96,7 +96,7 @@ divergence's. ``passes`` claims that ``grad`` is the dense operator of each
 direction applied to the field times its metric term, the three summed, and
 ``div_passes`` the same of the flux. Lean proves each, with Mathlib, from
 what the four calls store and ``sum_factorization``, taken at each
-direction's sections: ``Fr[3*x + 0]`` for the theorem's ``Fr`` and ``w[3*x
+direction's sections: ``Fr[3*x + 0]`` for the claim's ``Fr`` and ``w[3*x
 + 0, e]`` for its ``u``. Without Mathlib the claims are tested on the
 programs' runs, compared at the class of ``grad``, since the passes sum in
 another order than the dense operator does. They are what the derived
@@ -127,7 +127,7 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
-from lanky import theorem
+from lanky import claim
 from lanky.prelude import Fn, Nat, Real
 
 from loopty import Arr, Fin, IllegalCast, Schedule, kernel, layout, program, reduce_sum
@@ -140,10 +140,10 @@ N = ORDER + 1
 ELEMENTS = 2
 
 
-# {{{ the theorem: three passes are the Kronecker operator, at every order
+# {{{ the claim: three passes are the Kronecker operator, at every order
 
 
-@theorem
+@claim
 def sum_factorization(
     n: Nat,
     Fr: Fn[Fin[n], Fin[n], Real],

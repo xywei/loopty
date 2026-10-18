@@ -269,7 +269,7 @@ def test_with_mathlib_the_rewrites_restate_both_theorems_from_proved_text() -> N
     from lanky.check import check_path
 
     ledger = check_path(ROOT / "examples" / "layer_potential.py")
-    by_owner = {fact.owner: fact for fact in ledger if fact.kind == "theorem"}
+    by_owner = {fact.owner: fact for fact in ledger if fact.kind == "claim"}
     modulus = by_owner["log_of_the_modulus"]
     assert modulus.status is Status.PROVED, modulus.provenance
     assert modulus.provenance["proof"]["closed"] is True

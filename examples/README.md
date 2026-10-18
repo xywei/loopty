@@ -18,7 +18,7 @@ marked with `...` is an excerpt and the lines it keeps are checked verbatim.
 
 | file | what it shows |
 |---|---|
-| `spmv.py` | a ragged sparse product: an indirection in bounds by type, a scan with a postcondition, the theorem that postcondition needs, and a schedule whose reassociation is recorded |
+| `spmv.py` | a ragged sparse product: an indirection in bounds by type, a scan with a postcondition, the claim that postcondition needs, and a schedule whose reassociation is recorded |
 | `stencil_skew.py` | a rectangular tiling of a Jacobi stencil refused with a witness pair, and the skew that makes the same tiling legal |
 | `wavefront_acoustic.py` | two coupled statements in one acoustic-wave nest: a rectangular tiling refused with a witness that crosses them, the skew that makes it a legal wavefront block, the diamond map, accepted and run, whose tiling is refused, and the diamond with a map per statement, whose tiling is accepted and run |
 | `reshape_layouts.py` | `Fin[n * m]` as `Fin[n] x Fin[m]`, one buffer read in two layouts, and a transpose split and interchanged |
@@ -28,15 +28,15 @@ marked with `...` is an excerpt and the lines it keeps are checked verbatim.
 | `travel.py` | facts that travel between a program's calls: a requirement decided under the postcondition of the call before, one checked by the compiled program between the calls, and a flat access in bounds where it follows the scan |
 | `fusion.py` | the program of `composition.py` with its two loops fused into one, a fusion one step too early refused with its pair, the intermediate computed where it is read instead of stored, and kept in the three cells live at once, a window of two refused with the read that sees its slot overwritten |
 | `quadrature.py` | firedrake's P1 mass kernel cell by cell, its quadrature rule and basis held in constant tables, read-only arrays written into the compiled code, and its gathers through the cell map in bounds by type |
-| `layer_potential.py` | pytential's QBX on its own curve: the line-Taylor theorems of the single and the double layer, each proved by the proof in its body and tied by a row to the terms its kernel adds, the single and double layer over complex points as the math says them, sumpy's arithmetic as two math steps each a theorem, sumpy's CPU tile checked and the write sumpy silences a fact, each kernel's agreement with sumpy's own as an `upstream` row within `1e-12` of the largest value, and pytential's Green identity and the jump relations as tested rows |
+| `layer_potential.py` | pytential's QBX on its own curve: the line-Taylor claims of the single and the double layer, each proved by the proof in its body and tied by a row to the terms its kernel adds, the single and double layer over complex points as the math says them, sumpy's arithmetic as two math steps each a claim, sumpy's CPU tile checked and the write sumpy silences a fact, each kernel's agreement with sumpy's own as an `upstream` row within `1e-12` of the largest value, and pytential's Green identity and the jump relations as tested rows |
 | `sum_factorization.py` | grudge's two passes of a sum-factorized operator, fused on the element and the row and no deeper: the deeper fusion refused with its pair, the fusion of fewer loops it names, and what passes between them kept one row at a time |
 | `storage_layouts.py` | where cells are stored, as checked maps: sumpy's compressed-Taylor storage index in two pieces, one for one onto its buffer, and grudge's `dim_tags` `N3,N0,N1,N2` the same layout as modepy's reshape of the DOFArray, a wrong nesting refuted with a cell; two kernels read through them |
-| `assembly.py` | firedrake's PyOP2 assembly loop with FFC's P1 mass kernel called per cell and the cell's matrix added into the nodes, `y[cell[c, a]] += ...`: the rule's exactness, the element's mass and the scatter's total as theorems, the element's mass as `mass_ffc`'s postcondition, by `element_mass`, where FFC's tables are the rule's, a condition on the tables tested at their 15 digits, an update that owes the class of its sum and not distinct writes, PyOP2's GPU split refused with the node its two triangles share, and accepted once the updates are atomic |
+| `assembly.py` | firedrake's PyOP2 assembly loop with FFC's P1 mass kernel called per cell and the cell's matrix added into the nodes, `y[cell[c, a]] += ...`: the rule's exactness, the element's mass and the scatter's total as claims, the element's mass as `mass_ffc`'s postcondition, by `element_mass`, where FFC's tables are the rule's, a condition on the tables tested at their 15 digits, an update that owes the class of its sum and not distinct writes, PyOP2's GPU split refused with the node its two triangles share, and accepted once the updates are atomic |
 | `calls.py` | kernels calling kernels inside their loops: a rule with a loop of its own (`dot`, loopy #1044) in a matrix-vector and a sparse product, and firedrake's P1 quadrature rule applied per element through a rule that takes the integrand (#1043), each call inlined with binders of its own and owing the caller what the callee's contract checks |
-| `taylor_reconstruction.py` | sumpy's compressed Taylor reconstruction in one file, theorem, kernel and schedule: the theorem proved for every order, the kernel's postcondition decided from what it stores, the theorem applied to it, and the schedule's casts, in one ledger |
-| `l2p.py` | the demo's flagship, sumpy's L2P for the 2-D Laplace kernel (`E2PFromSingleBox`): the compressed Taylor theorem proved for every order and its form box by box, sumpy's storage index a checked layout, the kernel that reconstructs each box's triangle with the theorem applied to its postcondition, the interchange of the triangle's loops refused with its pair, the three calls fused box by box with each box's triangle and table in windows of its own, sumpy's own schedule for a GPU with each box a work group, and a row that compares the program with sumpy's own kernel, within `1e-14` of the largest value |
-| `hexahedra.py` | grudge #418's weak gradient and weak divergence on hexahedra, the kernels for every order: each operator as the math says it, a dense kernel, with its passes derived from it by the Kronecker theorem; the metric product, a pass per reference axis and the three directions summed, each a kernel and together a program, written by hand; the Kronecker theorem the passes rest on, for every `n`; the DOFArray's layout at every order, the same as #418's `dim_tags` `N3,N0,N1,N2` and as the kernels' row-major arrays; the passes fused as deep as each pair allows, one loop deeper refused with its pair, and what passes between them kept a row and a slab at a time; and the three launches a device runs, every node on a work item, which `benchmarks/hexahedra.py` times |
-| `advection.py` | grudge #418's weak advection right-hand side on hexahedra, from grudge's own geometry: the upwind flux at every face node, the neighbor's value gathered through the face maps and in bounds by type; the volume term and the lift derived from grudge's dense operator by the two theorems that push the inverse mass inward, under the condition on the tables that `M^-1 M` is the identity, tested at their digits, with `M^-1 S^T` and the lift's columns computed once; a third theorem that the lift onto the face nodes is the face gather's transpose; the kernels fused on the element and one loop deeper refused with its pair, the fluxes kept an element at a time; every split a device runs (libParanumal's volume and surface, the fluxes first, three launches, one, one from the metric terms) checked before it runs; and libParanumal's lift onto the face nodes, refused without its barriers with the edge node two faces update, and accepted atomic. `benchmarks/advection.py` times them |
+| `taylor_reconstruction.py` | sumpy's compressed Taylor reconstruction in one file, claim, kernel and schedule: the claim proved for every order, the kernel's postcondition decided from what it stores, the claim applied to it, and the schedule's casts, in one ledger |
+| `l2p.py` | the demo's flagship, sumpy's L2P for the 2-D Laplace kernel (`E2PFromSingleBox`): the compressed Taylor claim proved for every order and its form box by box, sumpy's storage index a checked layout, the kernel that reconstructs each box's triangle with the claim applied to its postcondition, the interchange of the triangle's loops refused with its pair, the three calls fused box by box with each box's triangle and table in windows of its own, sumpy's own schedule for a GPU with each box a work group, and a row that compares the program with sumpy's own kernel, within `1e-14` of the largest value |
+| `hexahedra.py` | grudge #418's weak gradient and weak divergence on hexahedra, the kernels for every order: each operator as the math says it, a dense kernel, with its passes derived from it by the Kronecker claim; the metric product, a pass per reference axis and the three directions summed, each a kernel and together a program, written by hand; the Kronecker claim the passes rest on, for every `n`; the DOFArray's layout at every order, the same as #418's `dim_tags` `N3,N0,N1,N2` and as the kernels' row-major arrays; the passes fused as deep as each pair allows, one loop deeper refused with its pair, and what passes between them kept a row and a slab at a time; and the three launches a device runs, every node on a work item, which `benchmarks/hexahedra.py` times |
+| `advection.py` | grudge #418's weak advection right-hand side on hexahedra, from grudge's own geometry: the upwind flux at every face node, the neighbor's value gathered through the face maps and in bounds by type; the volume term and the lift derived from grudge's dense operator by the two claims that push the inverse mass inward, under the condition on the tables that `M^-1 M` is the identity, tested at their digits, with `M^-1 S^T` and the lift's columns computed once; a third claim that the lift onto the face nodes is the face gather's transpose; the kernels fused on the element and one loop deeper refused with its pair, the fluxes kept an element at a time; every split a device runs (libParanumal's volume and surface, the fluxes first, three launches, one, one from the metric terms) checked before it runs; and libParanumal's lift onto the face nodes, refused without its barriers with the edge node two faces update, and accepted atomic. `benchmarks/advection.py` times them |
 
 Run them with `uv run` from the repository root:
 
@@ -130,9 +130,9 @@ also held after every native
 run of `scan`, on this file's example inputs and on drawn ones, which its
 provenance keeps. The restatement of it in `solve` is `decided` by the call,
 resting on it. The casts of the file's schedule, `rows_split`, are rows of the
-ledger too, under the kernel they schedule. The theorem beside it is `tested`
+ledger too, under the kernel they schedule. The claim beside it is `tested`
 here, and `proved` on a machine with the Lean extra installed, and the row
-under it is lanky's check of its reading: the theorem's annotations, run again
+under it is lanky's check of its reading: the claim's annotations, run again
 as plain Python at drawn values, compute what its term does, so the term the
 oracles are handed is the claim written. The last row of each kernel, `tested`
 by `interpreter`, is the one fact about the trace itself: the traced term, run
@@ -749,7 +749,7 @@ of what a run has borne out: the postconditions here are decided from what
 their kernels store and tested against their native runs too, and the
 kernels' terms are tested against their bodies. A requirement decided under a postcondition its kernel's runs refute,
 under one of a kernel whose term does not compute what its body does, or
-under an axiom, stays `decided` in the ledger, worth what it rests on, and is
+under a cited claim, stays `decided` in the ledger, worth what it rests on, and is
 checked when the program runs all the same.
 
 ### python examples/travel.py
@@ -1195,37 +1195,55 @@ with `alpha = c - y` and `beta = z - c`, and its terms are
 log|alpha| + Re( a(1) + ... + a(5) ),   a(k) = -(-beta / alpha)**k / k
 ```
 
-- `line_taylor` is the theorem behind these terms, for every order: lanky's
+- `line_taylor` is the claim behind these terms, for every order: lanky's
   `examples/line_taylor.py`, here in the same file. A table `a` that
   satisfies what `(alpha + tau * beta) f'(tau) == beta` says about its
   coefficients is `a(k)`; that the Taylor coefficients of `log(alpha + tau *
   beta)` satisfy that equation is cited, not proved, since lanky has no power
-  series (lanky#174). With Mathlib, Lean
-  proves it; without, it is `assumed`, since the property tester draws no
-  table over `Nat`. Its body is its proof, as a reader says it: the claim at
-  `n` is `first_term` where `n` is 1, and otherwise the recurrence `a[n] ==
-  (n - 1) / n * ratio * a[n - 1]`, by the ODE, with the claim at `n - 1`.
-  The kernels say the math as written: they add
-  `coefficient(-beta / alpha, k)`, the same function the theorem's
-  conclusion is written with, so `single_layer` cites the theorem directly:
-  its row `single_layer adds line_taylor's a(n) for n in 1..5, for every a
-  with nonzero, first_term and ode, read over the complex numbers` ties the
-  theorem to the terms the kernel evaluates, `decided` by `theorem` and,
-  with Mathlib, proved by Lean, the theorem applied a term at a time. It is
-  about the term read over the complex numbers, not about the floats the
-  kernel produces.
-- `reciprocal_taylor` is the same for the double layer (#281). `D`'s kernel
-  is the single layer's differentiated along the normal at the source, and
-  its series is that of `alpha / (alpha + tau * beta)`, whose coefficients are
-  the powers of the ratio: a table `b` with `b[0] == 1` and `alpha * b[n +
-  1] + beta * b[n] == 0` is `b(n) == (-beta / alpha)**n`. Its body is its
-  proof, the same induction: "Let ratio be -beta / alpha. The claim at n: if
-  n is 0, it is the first term. Otherwise, the recurrence: b[n] equals ratio
-  times b[n - 1], by the ODE. By the recurrence and the claim at n - 1."
+  series (lanky#174). It assumes one thing of `alpha` and `beta`, the
+  condition the file names `away_from_zero`: `alpha`, the center less the
+  source, is not zero. The condition is stated once, with `@condition`, and
+  `line_taylor` and `reciprocal_taylor` are written in a block `with
+  away_from_zero as (alpha, beta, nonzero):`, so each holds under it, and
+  its row says so: `under away_from_zero (nonzero): a : Fn[Nat, Complex] |
+  ...`. The condition's own row says that it can hold. With Mathlib, Lean
+  proves `line_taylor`; without, it is `assumed`, and a line under the table
+  says that its proof was run at drawn tables instead and every step held.
+  Its body is its proof, as a reader says it: "for each n, in order: at n =
+  1, by the first term; otherwise the ODE at n - 1 gives a[n] from a[n -
+  1], and it holds by line_taylor at n - 1":
+
+  ```python
+  for n in line_taylor.conclusion.domain:
+      if n == 1:
+          yield by(first_term)
+      else:
+          assert a[n] == (n - 1) / n * (-beta / alpha) * a[n - 1], by(ode[n - 1])
+          yield by(line_taylor.conclusion[n - 1])
+  ```
+
+  `line_taylor.conclusion[n - 1]` is the conclusion at the point before,
+  which the loop has filled in: the induction. The kernels say the math as
+  written: they add `coefficient(-beta / alpha, k)`, the same function the
+  claim's conclusion is written with, so `single_layer` cites the claim
+  directly: its row `single_layer adds line_taylor's a(n) for n in 1..5,
+  under away_from_zero, for every a with first_term and ode, read over the
+  complex numbers` ties the claim to the terms the kernel evaluates,
+  `decided` by `claim` and, with Mathlib, proved by Lean, the claim applied
+  a term at a time. It is about the term read over the complex numbers, not
+  about the floats the kernel produces.
+- `reciprocal_taylor` is the same for the double layer (#281), in the same
+  block. `D`'s kernel is the single layer's differentiated along the normal
+  at the source, and its series is that of `alpha / (alpha + tau * beta)`,
+  whose coefficients are the powers of the ratio: a table `b` with `b[0] ==
+  1` and `alpha * b[n + 1] + beta * b[n] == 0` is `b(n) == (-beta /
+  alpha)**n`. Its body is its proof, the same induction: "for each n, in
+  order: at n = 0, by the first term; otherwise b[n] is the ratio times b[n
+  - 1], by the ODE at n - 1, and it holds by reciprocal_taylor at n - 1."
   `double_layer` adds `(-beta / alpha) ** k` for `k` from 0 to 5 and cites
   it, `@kernel(uses=[reciprocal_taylor])`, so its row is `double_layer adds
-  reciprocal_taylor's b(n) for n in 0..5, for every b with nonzero,
-  first_term and ode, read over the complex numbers`.
+  reciprocal_taylor's b(n) for n in 0..5, under away_from_zero, for every b
+  with first_term and ode, read over the complex numbers`.
 - `single_layer` and `double_layer` are pytential's `S` and `D` on the
   five-armed starfish, over complex points, lanky's `Complex`.
   `as_sumpy_computes` is the single layer in sumpy's arithmetic, two math
@@ -1421,21 +1439,21 @@ NOT CHECKED log_of_the_modulus at layer_potential.py:240: without Lean, each ste
 
 With Lean, the facts isl decided read `proved` by `lean`, the write fact
 sumpy silences and the tile's casts among them; the rows about complex
-numbers wait for Mathlib. With Mathlib too (`60 facts: 4 decided, 40 proved,
-16 tested`), `line_taylor` and `log_of_the_modulus` read `proved` by `lean`,
-each with a line that says its own proof checked too, `by its proof,
-layer_potential.py:210-214: 2 steps, using log_of_a_power and
-modulus_squared from lanky.known`, and each is worth `tested`: what a theorem
-rests on includes the reading of its annotations, which lanky checks by
-running them (the second row of each). `conjugate_form` reads `proved`, by
+numbers wait for Mathlib. With Mathlib too, `line_taylor`,
+`reciprocal_taylor` and `log_of_the_modulus` read `proved` by `lean`, each
+with a line that says its own proof checked too, such as `by its proof,
+layer_potential.py:243-244: ..., using log_of_a_power and modulus_squared
+from lanky.known`, and each is worth `tested`: what a claim rests on
+includes the reading of its annotations, which lanky checks by running them
+(the second row of each). `conjugate_form` reads `proved`, by
 lanky alone, and so do the row that ties `line_taylor` to `single_layer` and
-the rows of the two math steps, each of which restates its theorem from the
-text the theorem's own command proved. The two facts `log_of_the_modulus`
+the rows of the two math steps, each of which restates its claim from the
+text the claim's own command proved. The two facts `log_of_the_modulus`
 cites are rows of this ledger, from `lanky.known`, proved by the library's
 own Lean proofs. `lanky check --steps log_of_the_modulus` prints its proof's
-outline, a row per link of the chain at its line, with the point at which
-each fact applies: `log_of_a_power` at `(abs(alpha), 2)`, `modulus_squared`
-at `alpha`.
+outline, a row per step at its line, with the point at which each fact
+applies: `log_of_a_power` at `(abs(alpha), 2)`, `modulus_squared` at
+`alpha`.
 
 ### loopty run examples/layer_potential.py
 
@@ -1661,14 +1679,14 @@ mass `M` on the others, then the three directions summed: the kernels
 is `u[e, k, j, i]`: grudge's DOFArray is row-major with modepy's reshape of
 each element in F order, which is #418's `dim_tags` `N3,N0,N1,N2`, and both
 are the kernels' row-major arrays, three layouts that are one, each a fact.
-The theorem `sum_factorization` is the reason the passes compute the dense
+The claim `sum_factorization` is the reason the passes compute the dense
 operator: `Ft (x) Fs (x) Fr` at a node is three sums of `n` terms, proved for
 every `n` by Lean with Mathlib, and tested without it. The programs say so:
 `passes` claims that `grad` is the dense operator of each direction
 applied to `u` times the direction's metric term, the three directions
 summed, and `div_passes` the same of the flux. isl does not decide such a
 claim, so Lean is asked: with Mathlib it proves each from what the four
-calls store, a `single-assignment` row each, and the theorem, taken at each
+calls store, a `single-assignment` row each, and the claim, taken at each
 direction's sections (`Fr (3 * x + 0)` for its `Fr`, `w (3 * x + 0) e` for
 its `u`), and both rows read `proved lean`. Without Mathlib the claims are
 `tested` on the programs' runs, compared at the class of `grad` and `div`,
@@ -2226,7 +2244,7 @@ neighbor's value through the face maps, `u[nbr[e, f], outside[f, a, b, 0],
 Python writes it, `vn * (inside if vn > 0 else outside)`: one statement,
 whose value the condition chooses, `?:` in C. The inverse mass is pushed inward, as grudge PR #362 rewrites it:
 the volume term is one pass of `D = M^-1 S^T` along each axis and a face's
-term the column `M^-1 e` of its end, and the two theorems
+term the column `M^-1 e` of its end, and the two claims
 `inverse_mass_inward` and `lift_inward` state that rearrangement for every
 order, under the hypothesis `inverse`, that `M^-1` is the mass's inverse:
 `M^-1 M` is one on its diagonal and zero off it. A third,
@@ -2251,7 +2269,7 @@ Schedule(weak_rhs).rewrite(weak_rhs.rhs, by=(inverse_mass_inward,
 lift_inward), keep=("D", "L"))` reads "weak_rhs, with rhs rewritten by the
 inverse mass pushed inward and the lift pushed inward, keeping D and L",
 and compiles to what `volume` and `lift` compute. Its rows are each
-theorem's step, over the reals wherever `M^-1 M` is the identity; that
+claim's step, over the reals wherever `M^-1 M` is the identity; that
 condition on the tables, tested at their digits on the example inputs
 (`np.linalg.inv`'s inverse is one to the last digits, not exactly); `D`
 and `L`, the sums of tables the right sides read, computed once before the
@@ -2964,7 +2982,7 @@ firedrake's PyOP2 test of the P1 mass kernel, `mass_ffc`, and the assembly
 loop around it: per cell, the kernel called on the cell's corners, the rows of
 `coords` the cell map picks, and the cell's matrix applied to `u` and added
 into the nodes, `y[cell[c, a]] += ...`. The kernel is a kernel of its own,
-inlined where it is called. The file's theorems are the mathematics the loop
+inlined where it is called. The file's claims are the mathematics the loop
 rests on: the 3-point rule integrates every quadratic exactly, a cell's mass
 matrix is `|J| (1 + delta_jk) / 24`, and the scatter keeps the total on every
 mesh. With Mathlib the first and the last are proved; the element's mass,
@@ -2975,17 +2993,17 @@ quadratics, `decided (heuristic)` by `cas`, and the other two read `tested`.
 
 `mass_ffc` promises the element's mass in closed form, `|J| (1 + delta_jk) /
 24`, by `element_mass`, which it cites (`@kernel(uses=[element_mass])`). The
-theorem is about tables that are the rule, the P1 basis at its points and its
+claim is about tables that are the rule, the P1 basis at its points and its
 weights in exact rationals (`tabulated`); FFC's tables round them to 15
 digits, so at the kernel the hypothesis is a condition on the tables, a row of
 its own tested at their digits: `0.666666666666667` is `2/3` to the last
 digit. The postcondition reads `..., by element_mass`: `tested` on its runs,
 at the approx tolerance, `|a - b| <= 1e-6 (|b| + 1)`, as its compiled run is
 compared with its native one, and, with Mathlib, `proved` by Lean over the
-reals from what the kernel stores, with its tables as the theorem takes them,
+reals from what the kernel stores, with its tables as the claim takes them,
 resting on the condition's row, on `no cell of A is stored twice, or read
 before its store` and on the kernel's trace. After each call it is restated
-of the cell's `Ae[c]`. It does not cite `element_mass`: the theorem is about
+of the cell's `Ae[c]`. It does not cite `element_mass`: the claim is about
 the rule, and FFC's tables round it. Citing it would take the tables'
 values as a condition, `FE0` the P1 basis at the rule's points and `W3` its
 weights to their digits, which `python` checks and no row states yet (#342).
@@ -3226,7 +3244,7 @@ WITHOUT LEAN: 4 rows are not proved. To have Lean prove what it can: pip install
 
 The demo's flagship: sumpy's L2P for the 2-D Laplace kernel, the evaluation of
 each leaf box's local expansion at the targets the box owns, in one file and
-one ledger, from the theorem about the expansion to the kernels that compute
+one ledger, from the claim about the expansion to the kernels that compute
 it to the schedule that runs them. The file is read top to bottom, and its
 docstring has the long form and the permalinks into sumpy at the commit it
 mirrors.
@@ -3238,19 +3256,39 @@ mirrors.
   `on_every_triangle` is its form box by box on the triangle `a + b <= p`,
   which a kernel of order `p` cites. Lean proves both for every order, with
   Mathlib; without it, the rows are `assumed`. `compressed_taylor`'s body is
-  its proof, as a textbook writes it: the claim at `(a, b)` is what is
-  stored where `a < 2`, and otherwise a chain, `R[a, b]` equals `-R[a - 2, b
-  + 2]` by the recurrence, `-D[a - 2, b + 2]` by the claim at `(a - 2, b +
-  2)`, and `D[a, b]` by the PDE, a link to a line.
+  its proof, as a textbook writes it, a loop over the points of its
+  conclusion, in order:
+
+  ```python
+  for a, b in compressed_taylor.conclusion.domain:
+      if a < 2:
+          yield by(stored)
+      else:
+          assert R[a, b] == -R[a - 2, b + 2] == -D[a - 2, b + 2] == D[a, b], by(
+              recurrence[a - 2, b],
+              compressed_taylor.conclusion[a - 2, b + 2],
+              pde[a - 2, b],
+          )
+          yield by()
+  ```
+
+  Where `a < 2` the point is what is stored; otherwise a calculation, one
+  `assert` with a reason for each link: `R[a, b]` equals `-R[a - 2, b + 2]`
+  by the recurrence, `-D[a - 2, b + 2]` by the conclusion at `(a - 2, b +
+  2)`, and `D[a, b]` by the PDE. `(a - 2, b + 2)` is earlier in the loop
+  than `(a, b)`, because `a`, the outer variable, is smaller: citing the
+  conclusion there is the induction, and lanky checks that it is earlier.
+  The proof reads like `reconstruct`'s body below, `for box, a, b in
+  R.dom:`, which fills the same table in the same order.
 - `storage_index` is sumpy's `get_storage_index`, a layout of two pieces whose
   three facts say it stores the `2p + 1` derivatives one for one onto their
   addresses. `unpack` reads each box's coefficients through it into the
-  table the theorem's `stored` is about, and its postcondition, decided from
+  table the claim's `stored` is about, and its postcondition, decided from
   what it stores, is sumpy's storage order: `C[i, a, b] == coeffs[i, 2*(a +
   b) - 1 + a]` after the value at the centre.
 - `reconstruct` fills each box's triangle. Its postcondition, the copies and
   the recurrence, is decided by isl from what its statements store, and it
-  is the theorem's hypotheses about the kernel, so the theorem applies: the
+  is the claim's hypotheses about the kernel, so the claim applies: the
   row `by on_every_triangle, for every D with pde and stored` says the
   triangle is the table of derivatives of any harmonic `D` whose entries
   the stored table holds. `evaluate` sums the Taylor polynomial at each
@@ -3315,11 +3353,11 @@ on a GPU, each box a work group, as sumpy's: Schedule(l2p, target='opencl').fuse
 
 ### lanky check examples/l2p.py
 
-Without Lean, the two theorems are `assumed` and the application is
-`decided` by `theorem`, worth what the theorem is. With Lean and Mathlib
+Without Lean, the two claims are `assumed` and the application is
+`decided` by `claim`, worth what the claim is. With Lean and Mathlib
 (`LANKY_LEAN_MATHLIB`, and lanky's `cas` extra, whose sympy finds the
 induction's steps), every row isl decided is `proved` by Lean, and so are
-both theorems and the application: `56 facts: 3 decided, 46 proved, 7
+both claims and the application: `56 facts: 3 decided, 46 proved, 7
 tested`, the three left decided being the class of the Taylor sum, by type,
 and the two postconditions restated after their calls, by the call. That
 takes Lean about two minutes from an empty proof cache. `lanky check
@@ -3327,12 +3365,13 @@ examples/l2p.py --show-lean compressed_taylor` prints the induction Lean
 checked: on `a`, two at a time, each step a `linear_combination` of the
 recurrence, the PDE and the hypothesis at `(a, b + 2)`, whose multipliers
 Python found. lanky's search proves `compressed_taylor` alone, and its
-body is checked as well: its row says `by its proof, l2p.py:151-161:
-induction on a, 2 cases, 4 steps`, and `lanky check examples/l2p.py --steps
-compressed_taylor` prints its outline, each link of the chain at its line
-with the point lanky matched its fact at, `by recurrence, at (a - 2, b)`.
-Without Lean the proof is not checked, and a `NOT CHECKED` line says why.
-Each statement is printed whole, the theorems a part to a line, with each
+body is checked as well: its row has a line, `by its proof, l2p.py:151-160:
+induction on a, ...`, and `lanky check examples/l2p.py --steps
+compressed_taylor` prints its outline, each step at its line with the point
+of each fact it cites. Without Lean the proof is not checked by Lean, and a
+`NOT CHECKED` line says so: lanky ran it at drawn tables instead, and every
+step held.
+Each statement is printed whole, the claims a part to a line, with each
 hypothesis under its name. Under the table, the `WITHOUT` lines say what
 this machine lacks for Lean to prove the rows it did not, and the command
 that installs it.
@@ -3498,7 +3537,7 @@ WITHOUT LEAN: 8 rows are not proved. To have Lean prove what it can: pip install
 
 The seed of the demo's flagship, `l2p.py`: sumpy's compressed Taylor
 reconstruction for the 2-D Laplace kernel, on one triangle, in one file and
-one ledger, from the theorem about the
+one ledger, from the claim about the
 expansion to the kernel that computes it to the schedule that runs it.
 
 - `on_the_triangle` is a lanky theorem: a table `R` that copies the table `c`
@@ -3511,13 +3550,13 @@ expansion to the kernel that computes it to the schedule that runs it.
   recurrence, is what its statements store, so it is decided by `isl` from
   the term, each equation of reals an atom, resting on the fact that no cell
   of `R` is stored twice or read before its store.
-- `@kernel(uses=[on_the_triangle])` applies the theorem to the postcondition:
-  the copies and the recurrence are two of the theorem's hypotheses, so its
+- `@kernel(uses=[on_the_triangle])` applies the claim to the postcondition:
+  the copies and the recurrence are two of the claim's hypotheses, so its
   conclusion, `R[a, b] == D(a)(b)` on the triangle, holds of the kernel's
   `R` for every `D` the other two hold of. The row reads `by
   on_the_triangle, for every D with pde and stored: ...`, rests on the
-  theorem's proof and on the postcondition, and with Lean, Lean applies the
-  theorem as it was proved and checks that it gives the claim. A kernel
+  claim's proof and on the postcondition, and with Lean, Lean applies the
+  claim as it was proved and checks that it gives the row. A kernel
   that computed something else, a recurrence off by one, would get no such
   row: every hypothesis about what the kernel writes has to be a conjunct
   of its postcondition.
@@ -3543,9 +3582,9 @@ interchange(b, a) -> IllegalCast: interchange(reconstruct.b, reconstruct.a) ille
 
 ### lanky check examples/taylor_reconstruction.py
 
-Without Lean, the theorem is `assumed` (lanky's tester cannot draw a table
+Without Lean, the claim is `assumed` (lanky's tester cannot draw a table
 over all of `Nat`), the kernel's facts `decided` by `isl`, and the
-application `decided` by `theorem`, worth what the theorem is. With Lean and
+application `decided` by `claim`, worth what the claim is. With Lean and
 Mathlib (`LANKY_LEAN_MATHLIB`), every row but the readings and the trace's is
 `proved`: `16 facts: 14 proved, 2 tested`. That takes Lean about a minute and
 a half the first time. Checked again with nothing changed, every answer is

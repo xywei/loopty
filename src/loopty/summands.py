@@ -521,14 +521,19 @@ def _premises(series: Series) -> list[str]:
 
 def series_statement(owner: str, term: Term, series: Series) -> str:
     """The ledger's words for a row: the kernel, the theorem's terms, for what."""
-    theorem = getattr(series.theorem, "__name__", "theorem")
+    from loopty.hypotheses import held_under
+
+    theorem = getattr(series.theorem, "__name__", "claim")
     bound = {name for name, _ in series.bindings}
     free = [name for name, _ in series.theorem.variables if name not in bound]
-    hypotheses = _premises(series)
+    under, given = held_under(series.theorem)
+    hypotheses = [name for name in _premises(series) if name not in given]
     words = (
         f"{owner} adds {theorem}'s {series.family}({series.binder}) for "
         f"{series.binder} in {_orders_text(series.orders)}"
     )
+    if under:
+        words += f", {under}"
     if free:
         words += f", for every {_listed(free)}"
         if hypotheses:
@@ -584,7 +589,7 @@ class SeriesTerms:
         theorem = series.theorem
         theorem_term = getattr(theorem, "term", None)
         if theorem_term is None:
-            return _declined("the theorem has no statement to apply")
+            return _declined("the claim has no statement to apply")
         sorts: dict[str, Any] = {}
         for name, typ in self.term.params:
             sort = _number_sort(typ)
@@ -634,7 +639,7 @@ class SeriesTerms:
                     for term, values in rewritten
                 )
             except ValueError:
-                return _declined("a theorem is no hypothesis of its own part")
+                return _declined("a claim is no hypothesis of its own part")
             hints = lanky.Hints(
                 applications=(lanky.Application(index, tuple(mapping.items())),),
                 rewrites=rewrites,
@@ -698,7 +703,7 @@ def series_facts(
                     getattr(identity, "__name__", "an identity")
                     for identity in identities
                 ]
-            ) + " rewrites the theorem's term into the kernel's"
+            ) + " rewrites the claim's term into the kernel's"
         detail = f"{identifier}:{series.stmt.id}"
         count = seen.get(detail, 0)
         seen[detail] = count + 1
@@ -712,7 +717,7 @@ def series_facts(
                 statement=series_statement(owner, term, series),
                 term=SeriesTerms(term, series, owner),
                 status=Status.DECIDED,
-                decided_by="theorem",
+                decided_by="claim",
                 provenance={
                     "theorem": identifier,
                     "identities": [

@@ -195,9 +195,9 @@ def identity_of(theorem: Any, text: str) -> Identity:
     variables = getattr(theorem, "variables", None)
     if name is None or variables is None or goal is None:
         raise IllegalRewrite(
-            f"{text}: by= takes theorems, each stated as 'what the kernel says == "
+            f"{text}: by= takes claims, each stated as 'what the kernel says == "
             f"what it should compute', and {theorem!r} is not one; decorate it "
-            "with @theorem"
+            "with @claim"
         )
     if not (isinstance(goal, prim.Comparison) and goal.operator == "=="):
         raise IllegalRewrite(
@@ -213,7 +213,7 @@ def identity_of(theorem: Any, text: str) -> Identity:
     if isinstance(left, prim.Variable) and left.name in functions | scalars:
         raise IllegalRewrite(
             f"{text}: the left side of {name} is the variable {left.name}, which "
-            "matches every term; state the theorem so that its left side says "
+            "matches every term; state the claim so that its left side says "
             "what the kernel computes"
         )
     unbound = _names(right) & (functions | scalars) - _names(left)
@@ -699,7 +699,7 @@ def _as_kernel(expr: Any, stmt: Stmt, within: tuple, exactness: str, term: Term)
             if node.guard is not None:
                 raise IllegalRewrite(
                     "the right side sums under a condition, which a kernel's sum "
-                    "states over its domain; state the theorem's sums over Fin[n]"
+                    "states over its domain; state the claim's sums over Fin[n]"
                 )
             inner = (*enclosing, *binders)
             body = visit(node.body, inner)
@@ -1291,7 +1291,7 @@ class MathRewrite(RewriteTerm):
             try:
                 position = guards.index(render(theorem_term))
             except ValueError:
-                return _declined("the theorem is no hypothesis of its own part")
+                return _declined("the claim is no hypothesis of its own part")
             parts.append(
                 lanky.Part(
                     f"rewrite_{stmt_id}",
@@ -1509,7 +1509,7 @@ def _drawn_terms(
         if outside:
             return None, (
                 f"no drawn input was compared: {outside} broke a condition the "
-                f"theorems need, {_listed([c.shown for c in conditions])}"
+                f"claims need, {_listed([c.shown for c in conditions])}"
             )
         return None, "no drawn input was compared"
     return True, f"{compared} drawn inputs agree at {exactness}"
@@ -1611,7 +1611,7 @@ def _equality_words(rewritten: Rewritten, step: Step) -> str:
     stores is unchanged wherever c[t] - y[s] != 0: -(z[t] - c[t]) / (c[t] -
     y[s]) becomes its conjugate form, in 5 places``.
     """
-    from loopty.hypotheses import structural_key
+    from loopty.hypotheses import held_under, structural_key
 
     identity = step.identity
     first = step.matches[0]
@@ -1646,8 +1646,12 @@ def _equality_words(rewritten: Rewritten, step: Step) -> str:
         )
         said = _listed(olds[:2] + ([f"{len(olds) - 2} more"] if len(olds) > 2 else []))
     wherever = f" wherever {' and '.join(conditions)}" if conditions else ""
+    cited = f"rewrite({rewritten.array}, by={identity.name})"
+    under, _given = held_under(identity.theorem)
+    if under:
+        cited += f", {under}"
     return (
-        f"rewrite({rewritten.array}, by={identity.name}): over "
+        f"{cited}: over "
         f"{_over_words(step.before, identity)}, what {rewritten.array} stores is "
         f"unchanged{wherever}: {said} {becomes}, {places}"
     )

@@ -801,7 +801,7 @@ def unfolded(
     )
     cited = sorted(
         {
-            getattr(theorem, "__name__", "a theorem")
+            getattr(theorem, "__name__", "a claim")
             for found in plans
             for theorem in found.theorems
         }

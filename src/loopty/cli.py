@@ -840,7 +840,7 @@ def build_parser() -> argparse.ArgumentParser:
         const="",
         default=None,
         metavar="TEXT",
-        help="print the proof lanky found of each proved theorem, in Python "
+        help="print the proof lanky found of each proved claim, in Python "
         "(as lanky check does)",
     )
     check_parser.add_argument(

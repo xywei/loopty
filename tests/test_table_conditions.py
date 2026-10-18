@@ -15,7 +15,7 @@ from fractions import Fraction
 
 import numpy as np
 import pytest
-from lanky import theorem
+from lanky import claim
 from lanky.prelude import Fn, Nat, Real
 
 from loopty import Arr, Fin, Schedule, kernel, reduce_sum, table
@@ -23,7 +23,7 @@ from loopty import Arr, Fin, Schedule, kernel, reduce_sum, table
 pytest.importorskip("loopy")
 
 
-@theorem
+@claim
 def inverse_mass_inward(
     n: Nat,
     Mi: Fn[Fin[n], Fin[n], Real],  # noqa: F821
@@ -182,7 +182,7 @@ W3 = table([0.166666666666667, 0.166666666666667, 0.166666666666667])
 W4 = table([0.1667, 0.1667, 0.1667])
 
 
-@theorem
+@claim
 def weighted(
     n: Nat,
     W: Fn[Fin[n], Real],  # noqa: F821
@@ -419,7 +419,7 @@ def test_a_sum_reading_one_index_on_axes_of_two_extents_is_not_a_table() -> None
 
 # not collected as a property test by lanky's pytest plugin (a leading
 # underscore): what these tests ask is what the kernel citing it owes
-@theorem
+@claim
 def _sixth_of_the_sum(
     W: Fn[Fin[3], Real],  # noqa: F821
     f: Fn[Fin[3], Real],  # noqa: F821

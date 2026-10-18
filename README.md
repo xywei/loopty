@@ -1,12 +1,12 @@
 # loopty
 
-loopy, with types: the algorithm's theorem, the kernel and its transforms in
+loopy, with types: the algorithm's claim, the kernel and its transforms in
 one Python file, and one ledger that says how each of their claims is known.
 
 If you write loopy kernels, this is what changes. A kernel is a typed Python
 function, which runs on numpy as it stands. A schedule is a chain of the
 transforms you already use, `split`, `tag`, `prioritize`, `fuse`, with
-`contract` to keep what passes between fused loops in a window. The theorem the algorithm
+`contract` to keep what passes between fused loops in a window. The claim the algorithm
 rests on is a [lanky](https://github.com/xywei/lanky) claim in the same file,
 written as a Python annotation. Then one command prints every claim the file
 makes and what settled it:
@@ -17,7 +17,7 @@ makes and what settled it:
 - **Lean checks**: each fact isl decided is stated again as a Lean theorem,
   from loopty's own description of the kernel and not from what isl
   computed, and proved there, with isl's hints checked rather than trusted;
-  with Mathlib, Lean also proves the algorithm's theorems, and checks each
+  with Mathlib, Lean also proves the algorithm's claims, and checks each
   where a kernel cites it, against what the kernel stores;
 - **the runs are compared**: the compiled run with the native one, and the
   native one with the upstream code the kernel was written after.
@@ -29,12 +29,12 @@ read them.
 ## One file: sumpy's L2P
 
 `examples/l2p.py` is sumpy's L2P for the 2-D Laplace kernel
-(`E2PFromSingleBox`), abridged here to its three layers: the theorem sumpy's
+(`E2PFromSingleBox`), abridged here to its three layers: the claim sumpy's
 compressed Taylor expansion rests on (lanky#86), the kernel that rebuilds
 each box's triangle of derivatives and cites it, and the schedules.
 
 ```python
-@theorem
+@claim
 def compressed_taylor(
     D: Fn[Nat, Nat, Real],
     R: Fn[Nat, Nat, Real],
@@ -43,25 +43,23 @@ def compressed_taylor(
     recurrence: all(R[a + 2, b] == -R[a, b + 2] for a in Nat for b in Nat),
 ) -> all(R[a, b] == D[a, b] for a in Nat for b in Nat):
     """What sumpy stores of a harmonic table, reconstructed, is the table."""
-
-    def claim(a, b):
+    for a, b in compressed_taylor.conclusion.domain:
         if a < 2:
-            return stored
-        return (
-            R[a, b]
-            .equals(-R[a - 2, b + 2], by=recurrence)
-            .equals(-D[a - 2, b + 2], by=claim(a - 2, b + 2))
-            .equals(D[a, b], by=pde)
-        )
-
-    return claim
+            yield by(stored)
+        else:
+            assert R[a, b] == -R[a - 2, b + 2] == -D[a - 2, b + 2] == D[a, b], by(
+                recurrence[a - 2, b],
+                compressed_taylor.conclusion[a - 2, b + 2],
+                pde[a - 2, b],
+            )
+            yield by()
 
 
 @kernel(uses=[on_every_triangle])  # compressed_taylor, box by box on a + b <= P
 def reconstruct(
     C: Arr[Where[box: Fin[nb], a: Fin[2], b: Fin[Q], a + b <= P], Real],
     R: Arr[Where[box: Fin[nb], a: Fin[Q], b: Fin[Q], a + b <= P], Real],
-) -> ...:  # the copies and the recurrence: two of the theorem's hypotheses
+) -> ...:  # the copies and the recurrence: two of the claim's conditions
     for box, a, b in R.dom:
         if a < 2:
             R[box, a, b] = C[box, a, b]
@@ -136,10 +134,10 @@ LEAN proved all 44 facts isl decided. Lean's statements are loopty's, from its o
 ```
 
 `STATUS` is how a claim was settled, and `EFFECTIVE` what it is worth given
-what it rests on. The theorem is proved for every order, by an induction
+what it rests on. The claim is proved for every order, by an induction
 whose steps sympy found and Lean checked, and is worth `tested` because
 lanky reads its annotations by running them. The application rests on the
-theorem and on `reconstruct`'s postcondition, which isl decided from what
+claim and on `reconstruct`'s postcondition, which isl decided from what
 the kernel stores and Lean proved again. The window's fact and the GPU
 schedule's cast rest on nothing weaker, and are worth `proved`. The last row
 is the agreement with sumpy's own kernel. The three rows left `decided` are
@@ -147,7 +145,7 @@ the class of the Taylor sum, by type, and two postconditions restated after
 their calls, by the call.
 
 Without Lean the same file reads `decided isl` where this reads `proved
-lean`, and the theorems read `assumed`, with a line under the table for
+lean`, and the claims read `assumed`, with a line under the table for
 each piece that is missing and the command that installs it. That ledger,
 which CI checks, is in
 [examples/README.md](https://github.com/xywei/loopty/blob/main/examples/README.md#l2ppy).
@@ -193,7 +191,7 @@ command for each piece. The other demos run the same three ways, and
 has what each prints. Its commands start with `uv run`, which is for a
 checkout with lanky cloned beside it ([Install](#install)); in this clone,
 run them without it. Lean comes from [elan](https://github.com/leanprover/elan#installation),
-at the version the Lean REPL supports, and Mathlib, for the theorems about
+at the version the Lean REPL supports, and Mathlib, for the claims about
 real numbers, is one command that fetches its compiled files:
 
 ```sh
@@ -218,10 +216,10 @@ no Lean, also for a question the first check ran out of time on.
   the code loopy and the compiler generate, which the comparison of the
   compiled run with the native one covers by sampling
   ([docs/lean-checks.md](https://github.com/xywei/loopty/blob/main/docs/lean-checks.md#what-stays-trusted)).
-  lanky checks its reading of a theorem's annotations by running them at
-  drawn points, so a proved theorem is worth `tested` in the `EFFECTIVE`
+  lanky checks its reading of a claim's annotations by running them at
+  drawn points, so a proved claim is worth `tested` in the `EFFECTIVE`
   column.
-- **A proof about reals is about the reals.** A theorem, or a postcondition
+- **A proof about reals is about the reals.** A claim, or a postcondition
   Lean proves with Mathlib, is about the kernel's term read over the real or
   complex numbers, not about the floats it computes, and the row says so
   ([#282](https://github.com/xywei/loopty/issues/282)). Without Mathlib,
@@ -530,7 +528,7 @@ table of row starts. Both compiled runs agree with the native one.
   is passed.
 - **It plugs into a proof host.** loopty registers a theory, an isl oracle, an
   executor and a `run` verb with [lanky](https://github.com/xywei/lanky), so a
-  residual obligation an oracle cannot decide is an ordinary theorem a person can
+  residual obligation an oracle cannot decide is an ordinary claim a person can
   prove, in the same ledger.
 
 ## Status
@@ -538,8 +536,8 @@ table of row starts. Both compiled runs agree with the native one.
 This is 0.5.0. The core works: kernels and programs run natively, trace, state
 their facts, lower and run compiled on the C target, and every schedule step
 is checked; the edges are sharp. New in 0.5.0, a schedule step can rewrite
-what a kernel computes by a theorem, `Schedule(k).rewrite(k.out,
-by=theorem)`, checked like every other step, and the demos write their
+what a kernel computes by a claim, `Schedule(k).rewrite(k.out,
+by=some_claim)`, checked like every other step, and the demos write their
 proofs in Python (lanky 0.5.0) and prove facts they used to assume. 0.4.0
 named what a schedule moves by where the file defines it, `l2p.unpack.box`,
 and let a kernel body branch with Python's own `if` and `else`; the
@@ -599,7 +597,7 @@ interface can change in a minor release; the CHANGELOG says when one does.
   call: the earlier callees' postconditions that nothing has written over
   since, the zeros an `Arr.zeros_like` starts an array with, the types the
   program's contract checks of what nothing has written yet, and the
-  theorems the program cites (`@program(uses=[scan_monotone])`),
+  claims the program cites (`@program(uses=[scan_monotone])`),
   instantiated at the cells the requirement reads. The fact rests on the
   facts it used, so `gather`'s requirement after `number` reads
   `decided` and is worth `tested`, as `number`'s postcondition is. Where the
@@ -841,13 +839,13 @@ interface can change in a minor release; the CHANGELOG says when one does.
   `R[a + 2, b] == -R[a, b + 2]` is what the recurrence stores at `(a + 2,
   b)`; Lean states it with Mathlib's reals and proves it by `linarith`. The
   native runs still test it, and a run that refutes it refutes it.
-- A kernel cites theorems, `@kernel(uses=[on_the_triangle])`. A theorem
+- A kernel cites claims, `@kernel(uses=[on_the_triangle])`. A claim
   whose hypotheses are conjuncts of the postcondition, up to the names of
   their binders (a family `R(a)(b)` stands for the array `R[a, b]`), gives
   its conclusion at the kernel's arrays, a `by-theorem` fact resting on the
-  theorem and the postcondition: what is left unbound stays universal, and
+  claim and the postcondition: what is left unbound stays universal, and
   the hypotheses the postcondition does not give are its hypotheses. Lean
-  checks the application, the theorem as it was proved applied with the
+  checks the application, the claim as it was proved applied with the
   arrays loopty matched: `examples/taylor_reconstruction.py`,
 
   ```python
@@ -865,31 +863,33 @@ interface can change in a minor release; the CHANGELOG says when one does.
 
   reads `by on_the_triangle, for every D with pde and stored: ... R[a, b] ==
   D(a)(b)`: whatever table `D` satisfies the PDE (`pde`) and has its stored
-  entries in `c` (`stored`), `R` is `D` on the triangle. A theorem whose
+  entries in `c` (`stored`), `R` is `D` on the triangle. A claim whose
   conclusion is a conjunct of the postcondition decides that conjunct
-  instead, as a program's cited theorem decides a requirement. The
+  instead, as a program's cited claim decides a requirement. The
   application says something of what the kernel computes, or it is not
   made: every hypothesis about an array the kernel writes has to be a
   conjunct of the postcondition, so a kernel whose recurrence is off by one
-  gets nothing from the theorem; and a conjunct about reals is a
+  gets nothing from the claim; and a conjunct about reals is a
   hypothesis only where nothing in it rounds (copies and sign changes),
-  since the theorem is about the reals, and `s[i] == a[i] + b[i]` holds of
-  the floats and not of them read as reals. The theorem is taken at the
+  since the claim is about the reals, and `s[i] == a[i] + b[i]` holds of
+  the floats and not of them read as reals. The claim is taken at the
   kernel's sizes in every sort as well: a table `D: Fn[Fin[n], Real]` that
   nothing binds, with `n` matched to the kernel's `p`, ranges over `Fin[p]`.
-- A cited theorem about a series, applied to the terms a kernel adds
-  (`loopty.summands`). A theorem that concludes `all(c(n) == E for n in
+- A cited claim about a series, applied to the terms a kernel adds
+  (`loopty.summands`). A claim that concludes `all(c(n) == E for n in
   Nat if ...)` is about the `n`-th term of a series; where the kernel's term
-  adds `E` at whole numbers `n`, with the theorem's variables bound to the
-  kernel's expressions, a `by-theorem` row says so, resting on the theorem.
-  An identity the kernel cites, a theorem that concludes `L == R`, rewrites
+  adds `E` at whole numbers `n`, with the claim's variables bound to the
+  kernel's expressions, a `by-theorem` row says so, resting on the claim.
+  An identity the kernel cites, a claim that concludes `L == R`, rewrites
   `R` in `E` into `L` first, the kernel's way of computing it.
   `examples/layer_potential.py`'s `single_layer` says the math as written,
   `coefficient(-beta / alpha, k)`, cites `line_taylor`, and reads
-  `single_layer adds line_taylor's a(n) for n in 1..5, for every a with
-  nonzero, first_term and ode, read over the complex numbers`: about the term it
-  evaluates, read over the complex numbers, and not about the floats it
-  produces. With Mathlib, Lean checks it a term at a time, the theorem
+  `single_layer adds line_taylor's a(n) for n in 1..5, under away_from_zero,
+  for every a with first_term and ode, read over the complex numbers`: about
+  the term it evaluates, read over the complex numbers, and not about the
+  floats it produces. `under away_from_zero` is the condition `line_taylor`
+  holds under, `alpha != 0`, which the file states once, as a `@condition`,
+  and writes both line-Taylor claims in a `with` block of. With Mathlib, Lean checks it a term at a time, the claim
   applied, restated from the text its own command proved. `double_layer`
   adds `(-beta / alpha) ** k` from `k = 0` and cites `reciprocal_taylor`,
   whose row reads `double_layer adds reciprocal_taylor's b(n) for n in 0..5`.
@@ -906,7 +906,7 @@ interface can change in a minor release; the CHANGELOG says when one does.
   on the kernel's `trace-faithful` fact. `examples/assembly.py`'s `mass_ffc`
   promises the element's mass, `|J| (1 + delta_jk) / 24`, from FFC's
   15-digit tables, by `element_mass` (`@kernel(uses=[element_mass])`): the
-  theorem is about tables that are the rule, and that FFC's are is a
+  claim is about tables that are the rule, and that FFC's are is a
   condition on the tables, a row tested at their digits.
 - `lanky check` lists a file's schedules (#191). The casts of every schedule
   a file holds at module level are rows of the ledger beside the facts of
@@ -917,17 +917,17 @@ interface can change in a minor release; the CHANGELOG says when one does.
 - `Schedule.assume(k.n % 4 == 0)`, loopy's `assume`, checked: loopy is told,
   every later cast is decided and stated where the condition holds and rests
   on an `assumption` fact, and a call whose sizes break it is refused.
-- Math steps: `Schedule(k).rewrite(k.out, by=theorem)` computes what `out`
-  stores by an identity, the theorem's left side as its right side, before
+- Math steps: `Schedule(k).rewrite(k.out, by=some_claim)` computes what `out`
+  stores by an identity, the claim's left side as its right side, before
   any loop is moved. The kernel's body stays the math as written and the
   reference; the schedule compiles the rewritten term. Each step is a row,
-  exact over the reals or the complex numbers where the theorem's
+  exact over the reals or the complex numbers where the claim's
   conditions hold (proved by Lean with Mathlib, tested on drawn inputs
   without it); each condition is a row, decided by isl on indices and
   tested on the example inputs for data; and the compiled run is compared
   with the native one, with a note where inputs of extreme magnitude leave
   the float range the rewrite keeps. `keep=("r_pass", "s_pass")` stores the
-  sums a theorem's right side nests in arrays of their own, one nest each,
+  sums a claim's right side nests in arrays of their own, one nest each,
   whose handles are the schedule's (`factored.r_pass.c`), proved to leave
   the kernel's statement as a program's postcondition is; `into=passes`
   compiles a program the file has instead. A condition on tables, `M^-1 M`
@@ -1210,11 +1210,11 @@ interface can change in a minor release; the CHANGELOG says when one does.
   in an `UNRESOLVED` line; the id is the one that ledger holds, since every
   fact of a kernel is keyed by the kernel's definition (`lanky.ledger.fact_id`
   over the module the file's path gives it), and a kernel of the program's
-  own file with the callee's name has an id of its own. A theorem the program
+  own file with the callee's name has an id of its own. A claim the program
   cites (`@program(uses=[scan_monotone])`) is used at the arrays its
   hypotheses match, and only where each array's cells are points of the
   family's sort when the call is made: `scan_monotone` is about offsets of
-  `Nat`, and nothing says the cells a scan wrote are, so it takes a theorem
+  `Nat`, and nothing says the cells a scan wrote are, so it takes a claim
   over `Int` to say the offsets a scan computed are monotone. Only affine
   facts reach isl; a hypothesis isl cannot state is dropped, which assumes
   less, never more.
@@ -1223,7 +1223,7 @@ interface can change in a minor release; the CHANGELOG says when one does.
   an equation of an output compared at that output's class (`approx` for
   reals), and `decided` by isl from what each call stores where that decides
   it; otherwise Lean is asked to prove it from the same equations and the
-  theorems the program cites, unfolding a call at a time (`loopty.unfolding`).
+  claims the program cites, unfolding a call at a time (`loopty.unfolding`).
   `examples/hexahedra.py`'s `passes` and `div_passes` claim the dense
   Kronecker operators grudge's escape hatch applies, and Lean proves them
   with Mathlib from what the four calls store and `sum_factorization`.
@@ -1369,7 +1369,7 @@ interface can change in a minor release; the CHANGELOG says when one does.
   whole array and a part of it are refused, and so is an argument that
   reads an array the callee writes, since natively it is read once, when
   the call is made, a value a function given captured included. A rule's claim about its value (`-> Real & (...)`)
-  is refused: state it as a theorem about the rule (#206). A call made
+  is refused: state it as a claim about the rule (#206). A call made
   inside a sum over `Fin[...]` of a size, rather than over an array's `.dom`,
   has points the trace does not see, and its facts are `assumed` (#207). A rule that
   takes a function is compiled where it is called, not on its own. A real
@@ -1632,10 +1632,10 @@ on the inputs it runs.
   in OpenCL C, which has no `-fwrapv`, so a signed integer sum that
   overflows, which numpy wraps round, can come out otherwise there: run such
   a kernel on the C target.
-- **A theorem's or a postcondition's statement is lanky's reading of it.**
+- **A claim's or a postcondition's statement is lanky's reading of it.**
   loopty traces a kernel's body itself and checks that trace, the
-  `trace-faithful` fact. A theorem, and the claim after a kernel's `->`, are
-  annotations lanky reads. lanky 0.2.0 checks a theorem's reading at drawn
+  `trace-faithful` fact. A claim, and the postcondition after a kernel's
+  `->`, are annotations lanky reads. lanky 0.2.0 checks a claim's reading at drawn
   values, the row `the term computes what the annotations compute` under it,
   and its [Known limits](https://github.com/xywei/lanky#known-limits) say what
   that check can miss. A postcondition has no such row: read its `STATEMENT`
@@ -1684,10 +1684,10 @@ pip install "loopty[opencl]"
 
 lanky's Lean oracle is an extra of *lanky*, so a ledger that says `proved lean`
 needs `pip install "lanky[lean]"` and a Lean toolchain in the same environment,
-and a theorem about real numbers needs Mathlib too (lanky's README has the
-details). The induction steps of a theorem for every order are found by
+and a claim about real numbers needs Mathlib too (lanky's README has the
+details). The induction steps of a claim for every order are found by
 sympy, lanky's `cas` extra. Without them a fact isl decided reads `decided
-isl`, a theorem `tested` or `assumed`, and a `WITHOUT LEAN`, `WITHOUT
+isl`, a claim `tested` or `assumed`, and a `WITHOUT LEAN`, `WITHOUT
 MATHLIB` or `WITHOUT SYMPY` line under the table names the rows each piece
 would prove and the command that installs it.
 
@@ -1756,7 +1756,7 @@ turns a kernel into facts), an *oracle* (`IslOracle`, trust class
 *verb* (`run`), through the `lanky.theories`, `lanky.oracles`, `lanky.executors`
 and `lanky.verbs` entry-point groups. lanky never imports loopty; it finds these
 and asks each what it can do. Obligations loopty cannot decide stay `ASSUMED` in
-the ledger, or become theorems a person proves.
+the ledger, or become claims a person proves.
 
 ## Name
 
