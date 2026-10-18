@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "loopty"
-version = "0.4.0"
+version = "0.5.0"
 description = "loopy, with types. A typed polyhedral layer over loopy."
 readme = "README.md"
 license = "MIT"

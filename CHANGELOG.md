@@ -6,6 +6,29 @@ All notable changes to loopty are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-18
+
+The math and the computation live in one file, and the file proves both.
+A schedule step can rewrite what a kernel computes by a theorem,
+`Schedule(k).rewrite(k.out, by=theorem, keep=(...))`, and the passes it
+derives are checked like every other step; the demos write their proofs in
+Python with lanky 0.5.0 and prove facts they used to assume. Code written
+for 0.4 runs unchanged; a run's line words its measured difference anew.
+
+- **Math steps** (#348): `rewrite(..., by=theorem)` rewrites a statement by a
+  cited identity, `keep=(...)` stores the sums of tables it reads, once, and an
+  array the step leaves unread is set aside; a step may rest on a condition
+  on tables (`Mi` is `M`'s inverse), tested at the tables' digits.
+- **The demos prove more of what they claim**: `compressed_taylor`,
+  `line_taylor` and others are proved by written proofs, `volume` and `lift`
+  are derived from grudge's matrices, and `mass_ffc` cites `element_mass`.
+- **Postconditions by a cited theorem** are credited only where both sides
+  match by algebra, and a cited theorem is restated from the text Lean
+  proved of it.
+- **A run leaves no `tmp_loopy*` directory behind** (#335, #336).
+
+Requires lanky 0.5.0.
+
 ### Added
 
 - **A math step under a condition on a table** (#342, #285). The inverse
