@@ -376,9 +376,9 @@ and test kernel to Lean, the casts each file's `rejected*` functions refuse
 included, from an empty proof cache. Its report, with Lean v4.29.1 (a
 file's time is Lean's on all its facts, a part's on one declaration):
 
-Of 1699 facts isl decides in 34 files (11 of them a claim a kernel cites, applied to what isl decided), Lean proved 1635; 26 stay decided; 37 refuted facts have their negation proved at isl's counterexample; 1 refuted facts are stated for isl only. 572 more facts are not isl's to decide (by type, tested, assumed).
+Of 1710 facts isl decides in 34 files (12 of them a claim a kernel cites, applied to what isl decided), Lean proved 1644; 28 stay decided; 37 refuted facts have their negation proved at isl's counterexample; 1 refuted facts are stated for isl only. 573 more facts are not isl's to decide (by type, tested, assumed).
 
-Not all of them are equally hard. The 205 `ordering` facts, that the source
+Not all of them are equally hard. The 206 `ordering` facts, that the source
 order runs every dependence forward, hold by the definition of a dependence
 (two instances that touch one cell, which the source runs in that order), and
 Lean's proof of them checks only that the printer states the source order the
@@ -387,64 +387,64 @@ time includes starting Lean.
 
 | file | isl facts | proved | decided, not proved | refuted, negation proved | Lean time |
 |---|---:|---:|---:|---:|---:|
-| `examples/advection.py` | 176 | 172 | 0 | 3 | 30.3 s |
-| `examples/assembly.py` | 38 | 38 | 0 | 0 | 4.0 s |
-| `examples/calls.py` | 44 | 44 | 0 | 0 | 2.2 s |
-| `examples/composition.py` | 10 | 10 | 0 | 0 | 0.6 s |
-| `examples/fusion.py` | 18 | 16 | 0 | 2 | 0.9 s |
-| `examples/hexahedra.py` | 123 | 121 | 0 | 2 | 42.8 s |
-| `examples/l2p.py` | 46 | 41 | 3 | 2 | 11.0 s |
-| `examples/layer_potential.py` | 33 | 31 | 2 | 0 | 4.5 s |
-| `examples/p2p.py` | 17 | 17 | 0 | 0 | 1.7 s |
+| `examples/advection.py` | 176 | 172 | 0 | 3 | 29.4 s |
+| `examples/assembly.py` | 38 | 38 | 0 | 0 | 3.7 s |
+| `examples/calls.py` | 44 | 44 | 0 | 0 | 1.9 s |
+| `examples/composition.py` | 10 | 10 | 0 | 0 | 0.4 s |
+| `examples/fusion.py` | 18 | 16 | 0 | 2 | 0.8 s |
+| `examples/hexahedra.py` | 123 | 121 | 0 | 2 | 30.4 s |
+| `examples/l2p.py` | 46 | 41 | 3 | 2 | 8.3 s |
+| `examples/layer_potential.py` | 33 | 31 | 2 | 0 | 3.3 s |
+| `examples/p2p.py` | 17 | 17 | 0 | 0 | 1.3 s |
 | `examples/pairs.py` | 14 | 14 | 0 | 0 | 1.0 s |
-| `examples/quadrature.py` | 12 | 12 | 0 | 0 | 1.3 s |
-| `examples/reshape_layouts.py` | 16 | 16 | 0 | 0 | 1.6 s |
-| `examples/spmv.py` | 18 | 18 | 0 | 0 | 1.1 s |
-| `examples/stencil_skew.py` | 10 | 9 | 0 | 1 | 2.6 s |
-| `examples/storage_layouts.py` | 18 | 18 | 0 | 0 | 3.1 s |
-| `examples/sum_factorization.py` | 16 | 15 | 0 | 1 | 2.1 s |
-| `examples/taylor_reconstruction.py` | 14 | 11 | 2 | 1 | 2.6 s |
-| `examples/travel.py` | 53 | 53 | 0 | 0 | 5.0 s |
-| `examples/wavefront_acoustic.py` | 24 | 21 | 0 | 3 | 11.5 s |
+| `examples/quadrature.py` | 12 | 12 | 0 | 0 | 1.5 s |
+| `examples/reshape_layouts.py` | 16 | 16 | 0 | 0 | 1.5 s |
+| `examples/spmv.py` | 18 | 18 | 0 | 0 | 0.9 s |
+| `examples/stencil_skew.py` | 10 | 9 | 0 | 1 | 2.0 s |
+| `examples/storage_layouts.py` | 18 | 18 | 0 | 0 | 2.7 s |
+| `examples/sum_factorization.py` | 16 | 15 | 0 | 1 | 1.7 s |
+| `examples/taylor_reconstruction.py` | 14 | 11 | 2 | 1 | 2.0 s |
+| `examples/travel.py` | 53 | 53 | 0 | 0 | 4.5 s |
+| `examples/wavefront_acoustic.py` | 24 | 21 | 0 | 3 | 8.2 s |
 | `tests/kernels/axpy.py` | 4 | 4 | 0 | 0 | 0.1 s |
-| `tests/kernels/calls.py` | 151 | 144 | 0 | 7 | 9.2 s |
-| `tests/kernels/dataflow.py` | 236 | 222 | 14 | 0 | 14.9 s |
-| `tests/kernels/domains.py` | 90 | 89 | 0 | 1 | 5.9 s |
+| `tests/kernels/calls.py` | 151 | 144 | 0 | 7 | 9.8 s |
+| `tests/kernels/dataflow.py` | 247 | 231 | 16 | 0 | 14.6 s |
+| `tests/kernels/domains.py` | 90 | 89 | 0 | 1 | 5.7 s |
 | `tests/kernels/out_of_bounds.py` | 4 | 3 | 0 | 1 | 0.2 s |
-| `tests/kernels/program_domains.py` | 15 | 15 | 0 | 0 | 1.1 s |
-| `tests/kernels/program_posts.py` | 41 | 40 | 1 | 0 | 2.4 s |
-| `tests/kernels/reals.py` | 26 | 25 | 1 | 0 | 0.7 s |
-| `tests/kernels/series.py` | 27 | 24 | 3 | 0 | 1.1 s |
+| `tests/kernels/program_domains.py` | 15 | 15 | 0 | 0 | 1.2 s |
+| `tests/kernels/program_posts.py` | 41 | 40 | 1 | 0 | 2.7 s |
+| `tests/kernels/reals.py` | 26 | 25 | 1 | 0 | 0.6 s |
+| `tests/kernels/series.py` | 27 | 24 | 3 | 0 | 0.8 s |
 | `tests/kernels/spmv_min.py` | 16 | 16 | 0 | 0 | 0.0 s |
 | `tests/kernels/stencil.py` | 5 | 5 | 0 | 0 | 0.0 s |
-| `tests/kernels/travel.py` | 70 | 69 | 0 | 1 | 3.0 s |
-| `tests/kernels/travel_wrong.py` | 194 | 187 | 0 | 7 | 32.9 s |
+| `tests/kernels/travel.py` | 70 | 69 | 0 | 1 | 2.9 s |
+| `tests/kernels/travel_wrong.py` | 194 | 187 | 0 | 7 | 21.0 s |
 | `tests/kernels/upstream.py` | 11 | 11 | 0 | 0 | 0.2 s |
-| `tests/kernels/windows.py` | 109 | 104 | 0 | 5 | 13.7 s |
+| `tests/kernels/windows.py` | 109 | 104 | 0 | 5 | 12.0 s |
 
 By kind:
 
 | kind | isl facts | proved | decided, not proved | refuted, negation proved | parts | median s per part | slowest part |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| argument | 2 | 1 | 0 | 1 | 1 | 0.058 | 0.06 s |
-| bijective | 53 | 53 | 0 | 0 | 240 | 0.120 | 0.70 s |
-| by-theorem | 11 | 1 | 10 | 0 | 1 | 0.174 | 0.17 s |
-| definedness | 94 | 94 | 0 | 0 | 171 | 0.096 | 0.51 s |
-| disjoint-writes | 262 | 260 | 0 | 1 | 260 | 0.016 | 0.16 s |
-| distinct-arguments | 2 | 1 | 0 | 1 | 1 | 0.083 | 0.08 s |
-| element-sort | 28 | 20 | 0 | 8 | 20 | 0.068 | 0.09 s |
-| in-bounds | 782 | 777 | 0 | 5 | 960 | 0.075 | 1.73 s |
-| layout | 6 | 6 | 0 | 0 | 12 | 0.148 | 20.41 s |
-| layout-in-bounds | 7 | 7 | 0 | 0 | 9 | 0.147 | 0.64 s |
-| layout-one-for-one | 7 | 7 | 0 | 0 | 11 | 0.153 | 7.44 s |
-| layout-onto | 7 | 7 | 0 | 0 | 7 | 0.291 | 3.41 s |
-| layout-same | 3 | 3 | 0 | 0 | 5 | 0.158 | 0.25 s |
-| monotone | 68 | 53 | 0 | 15 | 457 | 0.147 | 0.88 s |
-| no-clobber | 24 | 18 | 0 | 6 | 62 | 0.206 | 1.02 s |
-| ordering | 205 | 205 | 0 | 0 | 561 | 0.021 | 0.20 s |
-| postcondition | 47 | 31 | 16 | 0 | 49 | 0.120 | 0.25 s |
-| requirement | 16 | 16 | 0 | 0 | 16 | 0.148 | 0.38 s |
-| single-assignment | 75 | 75 | 0 | 0 | 186 | 0.036 | 0.15 s |
+| argument | 2 | 1 | 0 | 1 | 1 | 0.045 | 0.04 s |
+| bijective | 53 | 53 | 0 | 0 | 240 | 0.086 | 0.53 s |
+| by-theorem | 12 | 1 | 11 | 0 | 1 | 0.205 | 0.20 s |
+| definedness | 95 | 95 | 0 | 0 | 172 | 0.075 | 0.45 s |
+| disjoint-writes | 264 | 262 | 0 | 1 | 262 | 0.015 | 0.20 s |
+| distinct-arguments | 2 | 1 | 0 | 1 | 1 | 0.043 | 0.04 s |
+| element-sort | 28 | 20 | 0 | 8 | 20 | 0.054 | 0.10 s |
+| in-bounds | 786 | 781 | 0 | 5 | 964 | 0.067 | 1.14 s |
+| layout | 6 | 6 | 0 | 0 | 12 | 0.133 | 11.69 s |
+| layout-in-bounds | 7 | 7 | 0 | 0 | 9 | 0.141 | 0.51 s |
+| layout-one-for-one | 7 | 7 | 0 | 0 | 11 | 0.138 | 4.40 s |
+| layout-onto | 7 | 7 | 0 | 0 | 7 | 0.281 | 2.01 s |
+| layout-same | 3 | 3 | 0 | 0 | 5 | 0.133 | 0.17 s |
+| monotone | 68 | 53 | 0 | 15 | 457 | 0.101 | 0.60 s |
+| no-clobber | 24 | 18 | 0 | 6 | 62 | 0.153 | 0.62 s |
+| ordering | 206 | 206 | 0 | 0 | 569 | 0.018 | 0.17 s |
+| postcondition | 48 | 31 | 17 | 0 | 49 | 0.081 | 0.28 s |
+| requirement | 16 | 16 | 0 | 0 | 16 | 0.092 | 0.36 s |
+| single-assignment | 76 | 76 | 0 | 0 | 191 | 0.027 | 0.10 s |
 
 Every fact Lean did not prove, and why:
 
@@ -452,8 +452,8 @@ Every fact Lean did not prove, and why:
 - `examples/l2p.py`, unpack: (forall i in Fin(nb). C[i, 0, 0] == coeffs[i, 0]) and (forall i in Fin(nb), a in Nat, b in Nat where a < 2 and a + b >= 1 and a + b <= 10. C[i, a, b] == coeffs[i, 2*(a + b) - 1 + a]). the claim is about real numbers, which core Lean does not have; where Mathlib is (LANKY_LEAN_MATHLIB), Lean checks it
 - `examples/l2p.py`, reconstruct: (forall i in Fin(nb), a in Nat, b in Nat where a < 2 and a + b <= 10. R[i, a, b] == C[i, a, b]) and (forall i in Fin(nb), a in Nat, b in Nat where a + b + 2 <= 10. R[i, a + 2, b] == -R[i, a, b + 2]). the claim is about real numbers, which core Lean does not have; where Mathlib is (LANKY_LEAN_MATHLIB), Lean checks it
 - `examples/l2p.py`, reconstruct: by on_every_triangle, for every D with pde and stored: forall i in Fin(nb), a in Nat, b in Nat where a + b <= 10. R[i, a, b] == D[i, a, b]. the claim is about real numbers, which core Lean does not have; where Mathlib is (LANKY_LEAN_MATHLIB), Lean checks it
-- `examples/layer_potential.py`, single_layer: single_layer adds line_taylor's a(n) for n in 1..5, for every a with nonzero, first_term and ode, read over the complex numbers. the claim is about real numbers, which core Lean does not have; where Mathlib is (LANKY_LEAN_MATHLIB), Lean checks it
-- `examples/layer_potential.py`, double_layer: double_layer adds reciprocal_taylor's b(n) for n in 0..5, for every b with nonzero, first_term and ode, read over the complex numbers. the claim is about real numbers, which core Lean does not have; where Mathlib is (LANKY_LEAN_MATHLIB), Lean checks it
+- `examples/layer_potential.py`, single_layer: single_layer adds line_taylor's a(n) for n in 1..5, under away_from_zero, for every a with first_term and ode, read over the complex numbers. the claim is about real numbers, which core Lean does not have; where Mathlib is (LANKY_LEAN_MATHLIB), Lean checks it
+- `examples/layer_potential.py`, double_layer: double_layer adds reciprocal_taylor's b(n) for n in 0..5, under away_from_zero, for every b with first_term and ode, read over the complex numbers. the claim is about real numbers, which core Lean does not have; where Mathlib is (LANKY_LEAN_MATHLIB), Lean checks it
 - `examples/taylor_reconstruction.py`, reconstruct: (forall a in Fin(p + 1), b in Fin(p + 1) where a < 2 and a + b <= p. R[a, b] == c[a, b]) and (forall a in Fin(p + 1), b in Fin(p + 1) where a + b + 2 <= p. R[a + 2, b] == -R[a, b + 2]). the claim is about real numbers, which core Lean does not have; where Mathlib is (LANKY_LEAN_MATHLIB), Lean checks it
 - `examples/taylor_reconstruction.py`, reconstruct: by on_the_triangle, for every D with pde and stored: forall a in Fin(p + 1), b in Fin(p + 1) where a + b <= p. R[a, b] == D(a)(b). the claim is about real numbers, which core Lean does not have; where Mathlib is (LANKY_LEAN_MATHLIB), Lean checks it
 - `tests/kernels/dataflow.py`, triangle: (forall a in Fin(p + 1), b in Fin(p + 1) where a < 2 and a + b <= p. R[a, b] == c[a, b]) and (forall a in Fin(p + 1), b in Fin(p + 1) where a + b + 2 <= p. R[a + 2, b] == -R[a, b + 2]). the claim is about real numbers, which core Lean does not have; where Mathlib is (LANKY_LEAN_MATHLIB), Lean checks it
@@ -470,6 +470,8 @@ Every fact Lean did not prove, and why:
 - `tests/kernels/dataflow.py`, fill_real: by constant_table: forall i in Fin(n), j in Fin(n). R[i] == R[j]. the claim is about real numbers, which core Lean does not have; where Mathlib is (LANKY_LEAN_MATHLIB), Lean checks it
 - `tests/kernels/dataflow.py`, fill_agrees: (forall i in Fin(n). R[i] == s) and (forall i in Fin(n), j in Fin(n). R[i] == R[j]). the claim is about real numbers, which core Lean does not have; where Mathlib is (LANKY_LEAN_MATHLIB), Lean checks it
 - `tests/kernels/dataflow.py`, fill_shifted: forall i in Fin(n). R[i] == s + 0.1. the claim is about real numbers, which core Lean does not have; where Mathlib is (LANKY_LEAN_MATHLIB), Lean checks it
+- `tests/kernels/dataflow.py`, reconstruct_under: (forall a in Fin(p + 1), b in Fin(p + 1) where a < 2 and a + b <= p. R[a, b] == c[a, b]) and (forall a in Fin(p + 1), b in Fin(p + 1) where a + b + 2 <= p. R[a + 2, b] == -R[a, b + 2]). the claim is about real numbers, which core Lean does not have; where Mathlib is (LANKY_LEAN_MATHLIB), Lean checks it
+- `tests/kernels/dataflow.py`, reconstruct_under: by on_the_triangle_of_a_harmonic_table under harmonic, for every D with stored: forall a in Fin(p + 1), b in Fin(p + 1) where a + b <= p. R[a, b] == D(a)(b). the claim is about real numbers, which core Lean does not have; where Mathlib is (LANKY_LEAN_MATHLIB), Lean checks it
 - `tests/kernels/program_posts.py`, last_wins: forall i in Fin(n). c[i] == a[i] + b[i]. the claim is about real numbers, which core Lean does not have; where Mathlib is (LANKY_LEAN_MATHLIB), Lean checks it
 - `tests/kernels/reals.py`, copied: forall i in Fin(n). y[i] == -x[i]. the claim is about real numbers, which core Lean does not have; where Mathlib is (LANKY_LEAN_MATHLIB), Lean checks it
 - `tests/kernels/series.py`, power_sum: power_sum adds halves's c(n) for n in 0..3, for every c with first and step, read over the reals. the claim is about real numbers, which core Lean does not have; where Mathlib is (LANKY_LEAN_MATHLIB), Lean checks it
@@ -486,7 +488,7 @@ items, and what a kernel called inside another's loop owes there (its rows
 in bounds, its integral scalars in their sorts, two rows of one array
 apart), among them; a called kernel's statements are the caller's, so a
 window over them and the updates of a called kernel are stated as any
-statement's are (`tests/kernels/calls.py`). The 26 it did not are the claims
+statement's are (`tests/kernels/calls.py`). The 28 it did not are the claims
 about reals above, which core Lean has no words for. The 37 refuted facts
 are the casts and windows the files refuse on purpose (a window of two cells
 of the Burgers flux, inlined or not, one of three for a reader three cells
