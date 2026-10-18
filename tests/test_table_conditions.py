@@ -284,3 +284,74 @@ def test_a_kept_table_has_a_handle() -> None:
 
 
 # }}}
+
+
+# {{{ a postcondition by a cited theorem, under conditions on the tables
+
+
+# not collected as a property test by lanky's pytest plugin (a leading
+# underscore): what these tests ask is what the kernel citing it owes
+@theorem
+def _sixth_of_the_sum(
+    W: Fn[Fin[3], Real],  # noqa: F821
+    f: Fn[Fin[3], Real],  # noqa: F821
+    sixth: all(W[q] == Fraction(1, 6) for q in Fin[3]),  # noqa: F821
+) -> sum(W[q] * f[q] for q in Fin[3]) == (f[0] + f[1] + f[2]) / 6:  # noqa: F821
+    """Weights of a sixth make a sixth of the sum."""
+
+
+@kernel(uses=[_sixth_of_the_sum])
+def sixth(x: Arr[Fin[3], Real], y: Arr[Fin[1], Real]) -> (  # noqa: F821
+    y[0] == (x[0] + x[1] + x[2]) / 6  # noqa: F821
+):
+    """A sixth of the sum, from a table of weights written to 15 digits."""
+    y[0] = reduce_sum(W3[q] * x[q] for q in W3.dom)
+
+
+#: A sixth to 11 digits: within the approx tolerance, and not the 15 digits.
+W11 = table([0.16666666666, 0.16666666666, 0.16666666666])
+
+
+@kernel(uses=[_sixth_of_the_sum])
+def sixth_rounded(x: Arr[Fin[3], Real], y: Arr[Fin[1], Real]) -> (  # noqa: F821
+    y[0] == (x[0] + x[1] + x[2]) / 6  # noqa: F821
+):
+    """The same, from weights written to 11 digits."""
+    y[0] = reduce_sum(W11[q] * x[q] for q in W11.dom)
+
+
+def example_inputs() -> dict:
+    rng = np.random.default_rng(6)
+    x = Arr.from_numpy(rng.normal(size=3))
+    return {
+        "sixth": {"x": x, "y": Arr.zeros(1)},
+        "sixth_rounded": {"x": x, "y": Arr.zeros(1)},
+    }
+
+
+def test_a_postcondition_by_the_theorem_it_cites_under_the_tables_condition() -> None:
+    facts = {fact.kind: fact for fact in sixth.facts() if fact.kind != "in-bounds"}
+    post = facts["postcondition"]
+    assert post.statement.endswith(", by _sixth_of_the_sum")
+    condition = facts["rewrite-condition"]
+    assert condition.statement == (
+        "W3[0] == 1/6 and W3[1] == 1/6 and W3[2] == 1/6, which _sixth_of_the_sum "
+        "needs, at the table's digits"
+    )
+    assert condition.status.value == "tested", condition.provenance
+    assert condition.id in post.rests_on
+    assert _sixth_of_the_sum.fact_id in post.rests_on
+    obligation = post.term.lean_obligation()
+    assert not getattr(obligation, "declined", None), obligation
+
+
+def test_weights_off_beyond_their_digits_refute_the_condition() -> None:
+    """Close enough for the runs at approx, and not the rule to 15 digits."""
+    facts = {fact.kind: fact for fact in sixth_rounded.facts()}
+    assert facts["postcondition"].statement.endswith(", by _sixth_of_the_sum")
+    condition = facts["rewrite-condition"]
+    assert condition.status.value == "refuted"
+    assert "at the tables' 15 digits" in condition.provenance["reason"]
+
+
+# }}}
