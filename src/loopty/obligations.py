@@ -380,19 +380,21 @@ def cited(guards: Sequence[str], theorems: Sequence[Any]) -> dict[str, Any]:
     """The citations of a part that states ``theorems`` as hypotheses, as keywords.
 
     ``guards`` are the rendered conjuncts of the part's guard, and each
-    theorem's statement is the conjunct that renders as its term. lanky's
-    Lean oracle restates each from the text the theorem's own command proved
-    (``lanky.obligations.Citation``), so a printer that dropped a condition of
-    the theorem cannot hand the part a hypothesis that proves anything; a
-    part whose conjunct is not the theorem's statement is refused before
-    Lean is asked. A theorem with no fact id names nothing to restate from,
-    and a lanky without citations, 0.4.0 and before, gets no keyword: it
-    prints the statement as it always did.
+    theorem's statement is the conjunct that renders as its term. Each is
+    lanky's one citation, ``Citation(theorem, hypothesis=position)``
+    (``lanky.citations.Citation``), and lanky's Lean oracle restates it from
+    the text the theorem's own command proved, so a printer that dropped a
+    condition of the theorem cannot hand the part a hypothesis that proves
+    anything; a part whose conjunct is not the theorem's statement is
+    refused before Lean is asked. A theorem with no fact id names nothing to
+    restate from, and a lanky without citations, 0.4.0 and before, gets no
+    keyword: it prints the statement as it always did.
     """
     lanky = _lanky_obligations()
-    if not hasattr(lanky, "Citation") or "citations" not in getattr(
-        lanky.Part, "__dataclass_fields__", {}
-    ):
+    if "citations" not in getattr(lanky.Part, "__dataclass_fields__", {}):
+        return {}
+    make = _citation_maker(lanky)
+    if make is None:
         return {}
     citations = []
     seen: set[int] = set()
@@ -408,9 +410,32 @@ def cited(guards: Sequence[str], theorems: Sequence[Any]) -> dict[str, Any]:
         if position in seen:
             continue
         seen.add(position)
-        name = getattr(theorem, "__name__", "") or identifier
-        citations.append(lanky.Citation(position, identifier, name))
+        citations.append(make(theorem, position, identifier))
     return {"citations": tuple(citations)} if citations else {}
+
+
+def _citation_maker(lanky: Any) -> Any:
+    """How this lanky names a part's hypothesis that restates a theorem, or ``None``.
+
+    lanky's one citation, ``lanky.citations.Citation(theorem,
+    hypothesis=position)``; a lanky of before it, whose parts named theirs
+    with ``lanky.obligations.Citation(position, fact id, name)``, that one.
+    """
+    try:
+        from lanky.citations import Citation
+    except ImportError:
+        Citation = None  # noqa: N806 - the class, if this lanky has it
+    fields = getattr(Citation, "__dataclass_fields__", {})
+    if Citation is not None and "hypothesis" in fields:
+        return lambda theorem, position, identifier: Citation(
+            theorem, hypothesis=position
+        )
+    older = getattr(lanky, "Citation", None)
+    if older is None:
+        return None
+    return lambda theorem, position, identifier: older(
+        position, identifier, getattr(theorem, "__name__", "") or identifier
+    )
 
 
 #: Why a fact loopty states for isl only is not stated for Lean.

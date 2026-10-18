@@ -31,13 +31,15 @@ from loopty.dataflow import APPLIED
 from loopty.summands import KIND as SERIES
 
 pytest.importorskip("loopy")
-lanky_obligations = pytest.importorskip("lanky.obligations")
-if not hasattr(lanky_obligations, "Citation"):
+lanky_citations = pytest.importorskip("lanky.citations")
+if "hypothesis" not in getattr(lanky_citations.Citation, "__dataclass_fields__", {}):
     pytest.skip(
-        "this lanky restates no citation from proved text", allow_module_level=True
+        "this lanky has no one citation for a part's hypothesis",
+        allow_module_level=True,
     )
 
-from lanky.citations import Proved, ProvedTexts, restatements  # noqa: E402
+import lanky.obligations as lanky_obligations  # noqa: E402
+from lanky.citations import Citation, Proved, ProvedTexts, restatements  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 KERNELS = ROOT / "tests" / "kernels"
@@ -83,6 +85,9 @@ def _cited_terms(part: Any) -> dict[str, Any]:
 def test_an_application_cites_its_theorem() -> None:
     (part,) = _applied().term.lean_obligation().parts
     (citation,) = part.citations
+    # lanky's one citation: the theorem, at the hypothesis that restates it
+    assert isinstance(citation, Citation)
+    assert citation.source is dataflow.offsets_increase
     assert citation.fact == dataflow.offsets_increase.fact_id
     assert citation.name == "offsets_increase"
     cited = _cited_terms(part)["offsets_increase"]
