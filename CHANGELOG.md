@@ -235,14 +235,18 @@ All notable changes to loopty are recorded here. The format follows
 
 - A sum of tables that reads one index on axes of two extents, `A[i, q] *
   B[i, q]` with `A` of `n` rows and `B` of `k`, is not kept as a table: the
-  kept table ran over the first array's axis and read the other past its end
-  (Codex on #348).
+  kept table ran over the first array's axis and read the other past its end.
+  Nor is one with an index that mixes its binder with a loop around it,
+  `T[q + i]`, which left `i` free in the table (Codex on #348).
 
-- A kept sum of tables keeps the type its tables promote to: complex tables
-  under `real(...)` in a real output stay complex, and `float64` tables in a
-  `float32` output stay `float64`; it took the output's element type, and
-  lost the imaginary part or the digits before the arithmetic around it ran
-  (Codex on #348).
+- A kept sum of tables keeps the sum's own type, the one its tables promote
+  to: complex tables under `real(...)` in a real output stay complex,
+  `float64` tables in a `float32` output stay `float64`, and `float32`
+  tables in a `float64` output stay `float32`, as the sum accumulated before
+  it was kept; it took the output's element type, and lost the imaginary
+  part or changed the rounding before the arithmetic around it ran. A kept
+  sum with more indices than spare letters names its loops `p1`, `q1`, and
+  so on, where it raised `StopIteration` (Codex on #348).
 
 - The draws that compare a rewrite take a table kept as it is with the sizes
   its axes determine, `n` from a `Fin[n + 1]` axis of 6 cells as a call

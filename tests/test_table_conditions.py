@@ -333,6 +333,28 @@ def test_a_table_taken_as_it_is_fixes_the_size_its_axis_solves_for() -> None:
     assert arguments["x"].numpy().shape == (5,)
 
 
+@kernel
+def sliding(
+    T: Arr[Fin[n + m], Real],  # noqa: F821
+    W: Arr[Fin[k], Fin[m], Real],  # noqa: F821
+    out: Arr[Fin[n], Fin[k], Real],  # noqa: F821
+):
+    """Windows of ``T`` weighted by rows of ``W``: the binder and ``i`` in one index."""
+    for i, j in out.dom:
+        out[i, j] = reduce_sum(T[q + i] * W[j, q] for q in W.dom[j])
+
+
+def test_a_sum_mixing_its_binder_with_a_loop_in_one_index_is_not_a_table() -> None:
+    """``T[q + i]`` names ``i``, which no parameter of a kept table is (Codex, #348)."""
+    from loopty.rewriting import _templated
+    from loopty.trace import reductions_in
+
+    term = sliding.term
+    (stmt,) = term.stmts
+    (found,) = reductions_in(stmt.expr)
+    assert _templated(found, {"out"}, term.array_types) is None
+
+
 def test_a_kept_sum_of_complex_tables_is_complex_in_a_real_output() -> None:
     """Stored at the output's type, its imaginary part was gone before ``real`` read it.
 
@@ -365,7 +387,12 @@ def test_a_kept_sum_of_complex_tables_is_complex_in_a_real_output() -> None:
     both = Subscript(Var("Y"), Var("_b0")) * Subscript(Var("Z"), Var("_b0"))
     assert _kept_dtype(both, types, np.dtype(np.float32)) == np.complex128
     index = Subscript(Var("N"), Var("_b0")) * Subscript(Var("S"), Var("_b0"))
-    assert _kept_dtype(index, types, np.dtype(np.float32)) == np.float32
+    assert _kept_dtype(index, types, np.dtype(np.float64)) == np.float32
+    # the sum's own type, not widened to the output's (Codex, #348)
+    narrow = Subscript(Var("S"), Var("_b0")) * 2
+    assert _kept_dtype(narrow, types, Real) == np.float32
+    counts = Subscript(Var("N"), Var("_b0")) * 2
+    assert _kept_dtype(counts, types, Real) is Real
 
 
 def test_a_sum_reading_one_index_on_axes_of_two_extents_is_not_a_table() -> None:

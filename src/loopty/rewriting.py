@@ -76,6 +76,7 @@ rows say "over the reals" or "over the complex numbers".
 from __future__ import annotations
 
 import dataclasses
+import itertools
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -3113,7 +3114,9 @@ def _templated(
     an array some statement writes, a variable outside an index, or an
     array whose axes are not a box of extents, or reads one index on axes of
     two extents: a kept table would run over the first array's axis, and
-    read the other's past its end.
+    read the other's past its end. So is a sum with an index that mixes its
+    binder with a name of the loops around it, ``T[q + i]``, which would
+    leave ``i`` free in the table.
     """
     from loopty.hypotheses import structural_key, substitute
 
@@ -3137,6 +3140,11 @@ def _templated(
             out = []
             for position, item in enumerate(index):
                 if _names(item) & set(binders):
+                    if _names(item) - set(binders):
+                        # T[q + i]: a binder and a name of the loops around
+                        # it in one index, which no parameter stands for
+                        failed = True
+                        return node
                     out.append(substitute(item, binders))
                     continue
                 key = structural_key(item)
@@ -3212,7 +3220,14 @@ def _keep_sums(
             for item in first
         ]
         used = {*stems, *occurrence.inames}
-        spare = iter(letter for letter in "pqxyzuvw" if letter not in used)
+        spare = (
+            stem
+            for stem in itertools.chain(
+                "pqxyzuvw",
+                (f"{letter}{k}" for k in itertools.count(1) for letter in "pqxyzuvw"),
+            )
+            if stem not in used
+        )
         stems = [stem if stem is not None else next(spare) for stem in stems]
         loops = [_fresh_name(stem, taken) for stem in stems]
         sums_spelled = [*occurrence.inames]
@@ -3283,19 +3298,20 @@ def _keep_sums(
 
 
 def _kept_dtype(template: Any, types: Mapping[str, Any], element: Any) -> Any:
-    """A kept sum's element type: the output's, promoted by the tables it reads.
+    """A kept sum's element type: the one its tables promote to, else the output's.
 
     The sum is stored before the arithmetic around it runs, so it keeps the
-    type that arithmetic would have read it at: a complex sum of tables
-    under ``real(...)`` in a real output stays complex, and a sum of
-    ``float64`` tables in a ``float32`` output stays ``float64``. Only
-    real and complex types promote, as numpy promotes them; an integer
-    table, an index, widens nothing. The type is spelled as the kernel
-    spells it where one of its arrays has it (``Complex``), else numpy's.
+    type the sum itself has, which is its tables' (an accumulation in the
+    type of what it adds), not the output's: a complex sum of tables under
+    ``real(...)`` in a real output stays complex, ``float64`` tables in a
+    ``float32`` output stay ``float64``, and ``float32`` tables in a
+    ``float64`` output stay ``float32``. Only real and complex types promote,
+    as numpy promotes them; an integer table, an index, gives none, and a
+    sum with no real or complex table keeps the output's type. The type is
+    spelled as the kernel spells it where one of its arrays has it
+    (``Complex``), else numpy's.
     """
-    widest = _inexact(element)
-    if widest is None:
-        return element
+    widest = None
     chosen = element
     stack = [template]
     while stack:
@@ -3306,7 +3322,7 @@ def _kept_dtype(template: Any, types: Mapping[str, Any], element: Any) -> Any:
             typ = types.get(node.aggregate.name)
             own = _inexact(typ.dtype) if isinstance(typ, ArrType) else None
             if own is not None:
-                promoted = np.result_type(widest, own)
+                promoted = own if widest is None else np.result_type(widest, own)
                 if promoted != widest:
                     widest = promoted
                     chosen = typ.dtype if own == promoted else promoted
