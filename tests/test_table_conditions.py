@@ -477,30 +477,31 @@ def test_a_theorem_that_concludes_another_right_side_is_not_cited_for_it() -> No
     assert "rewrite-condition" not in facts
 
 
-def test_a_right_side_is_compared_at_draws_of_both_signs() -> None:
-    """``abs(x)`` is not ``x``, though they agree at every positive draw (Codex, #348).
+def test_a_right_side_is_compared_by_algebra_not_at_draws() -> None:
+    """Polynomials in the cells and in what is no polynomial, compared (Codex, #348).
 
-    Drawn only between a half and two, the comparison took a theorem
-    concluding ``abs(x)`` for a claim of ``x``.
+    Drawn values let through ``abs(x)`` for ``x`` (positive draws),
+    ``abs(z)**2`` for ``z*z`` (real draws), ``x * (1 + 1e-13)`` for ``x``
+    (a tolerance) and ``x / x`` for ``1`` (no draw at zero). Read as
+    polynomials whose indeterminates are the cells and the subterms that
+    are no polynomial, none of them is the other, while ``element_mass``'s
+    closed form is ``mass_ffc``'s, the inside of each ``abs`` read the same
+    way.
     """
     from lanky.terms import Abs, Subscript, Var
 
     from loopty.reals import _one_value
 
-    x = Subscript(Var("x"), 0)
+    x, y, z = Subscript(Var("x"), 0), Subscript(Var("x"), 1), Subscript(Var("z"), 0)
     J = Var("J")
-    assert not _one_value(Abs(x), x)
-    assert not _one_value(Abs(x - Subscript(Var("x"), 1)), x - Subscript(Var("x"), 1))
     assert _one_value(Abs(J) * 2 / 24, Abs(J) / 12)
-    assert _one_value(Abs(-x), Abs(x))
-    # a complex cell is drawn off the real axis (Codex, #348)
-    z = Subscript(Var("z"), 0)
-    assert _one_value(Abs(z) ** 2, z * z)  # equal at every real draw
-    assert not _one_value(Abs(z) ** 2, z * z, frozenset({"z"}))
-    assert _one_value(Abs(z) * 2 / 24, Abs(z) / 12, frozenset({"z"}))
-    # exactly, not to a tolerance (Codex, #348)
-    assert not _one_value(x, x * (1 + 1e-13))
+    assert _one_value(Abs((x - y) * (x + y)) / 12, Abs(x * x - y * y) * 2 / 24)
     assert _one_value(x * 0.5, x / 2)
+    assert not _one_value(Abs(x), x)
+    assert not _one_value(Abs(x - y), x - y)
+    assert not _one_value(Abs(z) ** 2, z * z)
+    assert not _one_value(x / x, 1)
+    assert not _one_value(x, x * (1 + 1e-13))
 
 
 def test_weights_off_beyond_their_digits_refute_the_condition() -> None:

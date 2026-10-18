@@ -713,7 +713,7 @@ def _concluded(
             if not matcher.match(_flat(equation.left), value, trial, {}):
                 continue
             concluded = _concluded_side(equation.right, trial, variables, functions)
-            if _one_value(concluded, conjunct.right, _complex_names(term)):
+            if _one_value(concluded, conjunct.right):
                 sigma = trial
                 break
         else:
@@ -738,133 +738,118 @@ def _concluded_side(
     return _instantiate(side, bound, functions)
 
 
-#: How many draws tell two values of the inputs apart.
-_DRAWS = 8
+def _one_value(concluded: Any, claimed: Any) -> bool:
+    """Whether a theorem's right side at its binding is the claim's, by algebra.
 
-
-def _complex_names(term: Term) -> frozenset[str]:
-    """The kernel's arrays and scalars of complex numbers, by name."""
-    from loopty.rewriting import _inexact
-
-    out = set()
-    for name, typ in (*term.params, *term.temporaries, *term.tables):
-        dtype = _inexact(getattr(typ, "dtype", typ))
-        if dtype is not None and dtype.kind == "c":
-            out.add(name)
-    return frozenset(out)
-
-
-def _one_value(
-    concluded: Any, claimed: Any, complex_names: frozenset[str] = frozenset()
-) -> bool:
-    """Whether a theorem's right side at its binding is the claim's: terms, or draws.
-
-    Each cell at a point with a value, ``x[2, 1]``, and each free name is
-    drawn at random, a rational number, the same in both, and both sides are
-    evaluated in lanky's exact reading (:func:`lanky.terms.exact_reading`),
-    where a float literal is the rational it holds; they have to be the same
-    number at every draw, exactly, so ``x * (1 + 1e-13)`` is not taken for
-    ``x``. The draws take both signs, all negative once, all positive once
-    and mixed after, so ``abs(x)`` is not taken for ``x``; a cell of an array
-    named in ``complex_names``, or a scalar so named, is drawn with an
-    imaginary part as well, its parts a scaled Pythagorean pair so that its
-    modulus is rational too, so ``abs(z)**2`` is not taken for ``z*z``. A
-    side with a cell at a point with no value, one that cannot be evaluated
-    at a draw, or one whose value there is no exact number (a square root
-    that is not rational), is not shown to be the other, and ``False`` is
-    returned.
+    Both sides are read as polynomials with rational coefficients
+    (:func:`_polynomial`), whose indeterminates are the cells, the names and
+    every subterm that is no sum, product, power or quotient by a number:
+    ``abs(...)``, a quotient by a variable, a function applied. Two sides are
+    one value where their polynomials are one, which holds wherever the
+    indeterminates are given values, at zero and over the complex numbers
+    too, with nothing measured: ``element_mass``'s ``abs(J) * 2 / 24`` is
+    ``abs(jacobian(x)) / 12``, the inside of each ``abs`` read the same way,
+    while ``abs(x)`` is not ``x``, ``x / x`` is not ``1`` (it is ``0`` at
+    ``0``, as Lean has it), and ``x * (1 + 1e-13)`` is not ``x``, a float
+    literal being the rational it holds. A side this cannot read is not
+    shown to be the other.
     """
-    from fractions import Fraction
-
-    from lanky.intervals import ComplexValue
-    from lanky.terms import evaluate, exact_reading, free_variables
-
-    from loopty.hypotheses import _same
-
     if concluded is None:
         return False
-    concluded, claimed = _flat(concluded), _flat(claimed)
-    if _same(concluded, claimed):
-        return True
-    names: dict[str, Var] = {}
-    complex_atoms = set(complex_names)
-
-    def atoms(node: Any) -> Any:
-        if isinstance(node, prim.Subscript) and isinstance(
-            node.aggregate, prim.Variable
-        ):
-            index = node.index if isinstance(node.index, tuple) else (node.index,)
-            if any(_concrete(item) is None for item in index):
-                raise _Unstated(f"{render(node)} is no cell at a point with a value")
-            atom = names.setdefault(render(node), Var(f"_cell_{len(names)}"))
-            if node.aggregate.name in complex_names:
-                complex_atoms.add(atom.name)
-            return atom
-        if isinstance(node, prim.ExpressionNode):
-            return type(node)(*(atoms(arg) for arg in init_args(node)))
-        if isinstance(node, tuple):
-            return tuple(atoms(item) for item in node)
-        return node
-
-    rng = np.random.default_rng(20261018)
-
-    def drawn(sign: int) -> Fraction:
-        return Fraction(sign * int(rng.integers(1, 64)), int(rng.integers(1, 64)))
-
     try:
-        left, right = atoms(concluded), atoms(claimed)
-        free = sorted(set(free_variables(left)) | set(free_variables(right)))
-        for draw in range(_DRAWS):
-            signs = (
-                [-1] * len(free)
-                if draw == 0
-                else [1] * len(free)
-                if draw == 1
-                else [int(sign) for sign in rng.choice([-1, 1], size=len(free))]
-            )
-            context: dict[str, Any] = {}
-            for name, sign in zip(free, signs, strict=True):
-                context[name] = drawn(sign)
-                if name in complex_atoms:
-                    # parts of a Pythagorean triple, scaled: off the real
-                    # axis, with a modulus that is rational, so abs is exact
-                    m = int(rng.integers(2, 9))
-                    n = int(rng.integers(1, m))
-                    scale = context[name]
-                    one, other = scale * (m * m - n * n), scale * 2 * m * n
-                    if int(rng.integers(2)):
-                        one, other = other, one
-                    context[name] = ComplexValue(one, int(rng.choice([-1, 1])) * other)
-            with exact_reading():
-                a, b = evaluate(left, context), evaluate(right, context)
-            if not _exactly_equal(a, b):
-                return False
-    except Exception:  # noqa: BLE001 - what cannot be evaluated is not shown equal
+        return _polynomial(concluded) == _polynomial(claimed)
+    except _Unstated:
         return False
-    return True
 
 
-def _exactly_equal(a: Any, b: Any) -> bool:
-    """Whether two values of the exact reading are one number, both exact."""
+def _polynomial(expr: Any) -> dict[tuple, Any]:
+    """``expr`` as a polynomial: each monomial and its coefficient (:func:`_one_value`).
+
+    A monomial is the sorted pairs of its indeterminates' keys and powers;
+    the one with none, ``()``, holds the constant.
+
+    Raises:
+        _Unstated: For a truth value or a number that is not finite.
+    """
+    import math
     import numbers
     from fractions import Fraction
 
-    from lanky.intervals import ComplexValue
+    if isinstance(expr, bool | np.bool_):
+        raise _Unstated("a truth value is no number")
+    if isinstance(expr, numbers.Rational):
+        return {(): Fraction(expr)} if expr else {}
+    if isinstance(expr, float | np.floating):
+        if not math.isfinite(float(expr)):
+            raise _Unstated(f"{expr} is not finite")
+        return {(): Fraction(float(expr))} if expr else {}
+    if isinstance(expr, prim.Sum):
+        out: dict[tuple, Any] = {}
+        for child in expr.children:
+            out = _added(out, _polynomial(child))
+        return out
+    if isinstance(expr, prim.Product):
+        out = {(): Fraction(1)}
+        for child in expr.children:
+            out = _multiplied(out, _polynomial(child))
+        return out
+    if isinstance(expr, prim.Quotient):
+        denominator = _polynomial(expr.denominator)
+        if set(denominator) == {()}:
+            inverse = {(): 1 / denominator[()]}
+            return _multiplied(_polynomial(expr.numerator), inverse)
+    if (
+        isinstance(expr, prim.Power)
+        and isinstance(expr.exponent, int | np.integer)
+        and not isinstance(expr.exponent, bool | np.bool_)
+        and 0 <= int(expr.exponent) <= 16
+    ):
+        base = _polynomial(expr.base)
+        out = {(): Fraction(1)}
+        for _ in range(int(expr.exponent)):
+            out = _multiplied(out, base)
+        return out
+    return {((_indeterminate(expr), 1),): Fraction(1)}
 
-    def parts(value: Any) -> tuple[Fraction, Fraction] | None:
-        if isinstance(value, bool | np.bool_):
-            return None
-        if isinstance(value, numbers.Rational):
-            return Fraction(value), Fraction(0)
-        if isinstance(value, ComplexValue) and all(
-            isinstance(part, numbers.Rational) and not isinstance(part, bool)
-            for part in (value.real, value.imag)
-        ):
-            return Fraction(value.real), Fraction(value.imag)
-        return None
 
-    first, second = parts(a), parts(b)
-    return first is not None and first == second
+def _indeterminate(expr: Any) -> str:
+    """The key of a subterm read as an indeterminate: its kind, its parts read so."""
+    if isinstance(expr, prim.Variable):
+        return f"var {expr.name}"
+    if not isinstance(expr, prim.ExpressionNode):
+        return repr(expr)
+    kind = getattr(expr, "mapper_method", None) or type(expr).__name__
+
+    def part(item: Any) -> str:
+        if isinstance(item, prim.ExpressionNode | int | float | np.number):
+            return repr(sorted(_polynomial(item).items()))
+        if isinstance(item, tuple):
+            return "(" + ", ".join(part(inner) for inner in item) + ")"
+        return repr(item)
+
+    return f"{kind}({'; '.join(part(arg) for arg in init_args(expr))})"
+
+
+def _added(first: dict[tuple, Any], second: dict[tuple, Any]) -> dict[tuple, Any]:
+    out = dict(first)
+    for monomial, value in second.items():
+        total = out.get(monomial, 0) + value
+        if total:
+            out[monomial] = total
+        else:
+            out.pop(monomial, None)
+    return out
+
+
+def _multiplied(first: dict[tuple, Any], second: dict[tuple, Any]) -> dict[tuple, Any]:
+    out: dict[tuple, Any] = {}
+    for one, a in first.items():
+        for other, b in second.items():
+            powers = dict(one)
+            for key, power in other:
+                powers[key] = powers.get(key, 0) + power
+            out = _added(out, {tuple(sorted(powers.items())): a * b})
+    return out
 
 
 def cited_over_the_reals(
