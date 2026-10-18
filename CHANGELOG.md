@@ -216,6 +216,14 @@ All notable changes to loopty are recorded here. The format follows
   1e-8`, true only to the approx tolerance, is the kernel's own claim,
   tested on the runs.
 
+- **With Mathlib, Lean proves `mass_ffc`'s postcondition by `element_mass`
+  again**, as it proved the closed form before the theorem was cited. Each
+  part was given to `linarith` alone, which reads a table's value times an
+  input as an atom, and found no proof, so the row read `tested` and
+  `tests/test_lean_checks.py` failed on `assembly.py` with Mathlib. The
+  part's equations, what the kernel stores and the theorem's conditions at
+  its tables, are now rewritten with in turn, and `ring` closes it.
+
 - An array a rewrite set aside, as `M` once the inverse mass cancels it,
   stays aside through a later rewrite of the same schedule, which reads it
   no more; the later step worked the arrays out again from the term before

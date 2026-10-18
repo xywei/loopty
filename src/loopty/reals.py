@@ -619,7 +619,7 @@ class ByTheorem(AfterCall):
                         f"conjunct_{k}",
                         render(conjunct),
                         closed,
-                        lanky.Hints(),
+                        _unfolding(lanky, closed, render(statement)),
                         mathlib=True,
                         **cited(guards, (self.theorem,)),
                     )
@@ -630,6 +630,32 @@ class ByTheorem(AfterCall):
         if "stated_by" in getattr(lanky.Obligation, "__dataclass_fields__", {}):
             extra["stated_by"] = "loopty"
         return lanky.Obligation(parts=tuple(parts), **extra)
+
+
+def _unfolding(lanky: Any, closed: Any, statement: str) -> Any:
+    """A :class:`ByTheorem` part's script: its equations rewritten with, then ``ring``.
+
+    What the kernel stores in each cell the conjunct reads, and the
+    theorem's conditions at the kernel's tables, ``FE0[0, 0] == 2/3``, are
+    equations among the part's hypotheses; rewritten with in turn, they
+    leave arithmetic of the tables' values and the kernel's inputs, which
+    ``ring`` compares with the claim (``mass_ffc``'s ``A[0, 0]`` is
+    ``|J| / 12``). ``linarith`` alone, which reads a product of a table and
+    an input as an atom of its own, did not. The theorem's statement is
+    left as it is. A lanky without rewrite steps gets no hints.
+    """
+    rewrite = getattr(lanky, "Rewrite", None)
+    fields = getattr(lanky.Hints, "__dataclass_fields__", {})
+    if rewrite is None or "rewrites" not in fields:
+        return lanky.Hints()
+    steps = tuple(
+        rewrite(position)
+        for position, part in enumerate(conjuncts(closed.guard))
+        if isinstance(part, prim.Comparison)
+        and part.operator == "=="
+        and render(part) != statement
+    )
+    return lanky.Hints(rewrites=steps) if steps else lanky.Hints()
 
 
 def _concluded(
