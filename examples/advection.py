@@ -28,12 +28,17 @@ The inverse mass is pushed inward, as grudge PR #362 rewrites it: on every
 axis but one it meets a mass and cancels, so the volume term is one pass of
 ``D = M^-1 S^T`` along each axis, and a face's term is the column ``L =
 M^-1 e`` of the face's end along its normal, times the face's flux. The two
-theorems are that rearrangement, for every order; that ``M^-1`` is the
-mass's inverse is a property of the tables, which ``main`` checks. The same
-kernels take the tables of the GLL quadrature's mass, which Alvey-Blanco's
-matched right-hand side and libParanumal use: there ``L`` is a face node's
-own weight and nothing else, and the lift adds each face node's flux into
-the node it sits on. A third theorem says that lift is the transpose of the
+theorems are that rearrangement, for every order, under the hypothesis that
+``M^-1`` is the mass's inverse: ``M^-1 M`` is one on its diagonal and zero
+off it. That is a property of the tables a run is given, so where a kernel
+cites the theorems it is a condition on the tables, tested at their digits.
+``weak_rhs`` is grudge's operator as the math says it, dense, and
+``derived`` rewrites it by the two theorems into what ``volume`` and
+``lift`` compute, with ``D`` and ``L`` computed once. The same kernels take
+the tables of the GLL quadrature's mass, which Alvey-Blanco's matched
+right-hand side and libParanumal use: there ``L`` is a face node's own
+weight and nothing else, and the lift adds each face node's flux into the
+node it sits on. A third theorem says that lift is the transpose of the
 face gather the flux reads through, and so keeps the total.
 
 What the right-hand side reads, per element ``e`` of a periodic mesh:
@@ -59,20 +64,39 @@ Run this file three ways.
 
 ``python examples/advection.py``
     Computes the right-hand side natively and compares it with grudge's
-    operators applied as dense matrices, before the rearrangement. Then fuses
-    the kernels on the element, refuses one loop deeper with its pair, keeps
-    the fluxes one element at a time, and compares the compiled run with the
-    native one; and lists the facts of every split's launches on a device,
-    and the race libParanumal's surface kernel avoids with its barriers.
+    operators applied as dense matrices, before the rearrangement. Then runs
+    ``derived`` compiled, against ``volume`` and ``lift``; fuses the kernels
+    on the element, refuses one loop deeper with its pair, keeps the fluxes
+    one element at a time, and compares the compiled run with the native
+    one; and lists the facts of every split's launches on a device, and the
+    race libParanumal's surface kernel avoids with its barriers.
 
 ``lanky check examples/advection.py``
-    The theorems, every kernel's facts, the programs', the schedules'.
+    The theorems, every kernel's facts, the programs', the schedules': for
+    ``derived``, each theorem's step, the condition on the tables, ``D`` and
+    ``L`` computed once, and the compiled run against the dense kernel.
 
 ``loopty run examples/advection.py``
     Each kernel, the programs and the fused schedule, compiled and compared.
 
 What is worth reading here
 --------------------------
+
+*The math, and what is derived from it.* ``weak_rhs`` says grudge's
+operator as the math does: the inverse mass on every axis of the weak
+divergence less the face mass. It stores the field times the velocity along
+each axis with that axis last, so that each direction's term is the same
+Kronecker product, ``M (x) M (x) S^T``, and one theorem matches all three;
+the six faces need no such care, since each face's flux is already over the
+face's own two axes. ``derived`` reads "weak_rhs, with rhs rewritten by the
+inverse mass pushed inward and the lift pushed inward, keeping ``D`` and
+``L``". Its rows: each theorem's step, over the reals wherever ``M^-1 M`` is
+the identity; that condition, tested at the tables' digits on the example
+inputs, ``np.linalg.inv``'s inverse being one to the last digits and not
+exactly; ``D`` and ``L``, sums of tables, computed once before the elements
+and read where the sums were; and the compiled run against the native dense
+kernel. The mass, cancelled, is read nowhere: the schedule takes it, and
+the compiled code does not.
 
 *The face gather.* ``u[nbr[e, f], outside[f, a, b, 0], ...]`` reads the
 neighbor's node through the face maps, and every subscript is in bounds by
@@ -100,19 +124,6 @@ fluxes first, three launches, one, and one from the metric.
 onto the face nodes alone, with a barrier between pairs of faces; without
 the barriers, ``lift_on_faces`` on a device is refused with the edge node
 two faces write from two work items.
-
-*What no kernel cites yet.* The three theorems are proved for every order,
-and no kernel or program cites them (#285). The kernels take ``D = M^-1
-S^T`` and the lift's columns ``L = M^-1 e`` as tables, where the theorems
-are about grudge's operator before the rearrangement, the inverse mass after
-the weak derivative and the face mass. The math-first form would be a kernel
-that says grudge's operator, with ``volume`` and ``lift`` derived from it by
-``rewrite(rhs, by=(inverse_mass_inward, lift_inward))``, as
-``examples/hexahedra.py`` derives its passes. That needs two things loopty
-does not have yet (#342): ``M^-1 M`` is the identity only for the tables a
-run is given, a condition on a table that a row would test at its digits;
-and ``D`` is a product of tables, which the derived passes would have to
-compute once and not per element.
 """
 
 from __future__ import annotations
@@ -149,6 +160,13 @@ def inverse_mass_inward(
     k: Fin[n],
     j: Fin[n],
     i: Fin[n],
+    inverse: all(sum(Mi[p, c] * M[c, p] for c in Fin[n]) == 1 for p in Fin[n])
+    & all(
+        sum(Mi[p, c] * M[c, q] for c in Fin[n]) == 0
+        for p in Fin[n]
+        for q in Fin[n]
+        if p != q
+    ),
 ) -> sum(
     Mi[k, c]
     * Mi[j, b]
@@ -163,21 +181,16 @@ def inverse_mass_inward(
     for b in Fin[n]
     for a in Fin[n]
 ) == sum(
-    sum(Mi[k, c] * M[c, t] for c in Fin[n])
-    * sum(Mi[j, b] * M[b, s] for b in Fin[n])
-    * sum(Mi[i, a] * S[a, r] for a in Fin[n])
-    * w[t, s, r]
-    for t in Fin[n]
-    for s in Fin[n]
-    for r in Fin[n]
+    sum(Mi[i, a] * S[a, r] for a in Fin[n]) * w[k, j, r] for r in Fin[n]
 ):
-    """The inverse mass after the weak derivative along ``r`` is one pass per axis.
+    """The inverse mass after the weak derivative along ``r``: one pass of ``M^-1 S^T``.
 
     The left side is grudge's: ``S^T`` on ``r`` and the mass on ``s`` and
-    ``t`` (``M (x) M (x) S``), then the inverse mass on every axis. The
-    right side applies ``M^-1 M`` along ``t`` and ``s`` and ``M^-1 S`` along
-    ``r``; where ``M^-1`` is the mass's inverse the first two are the
-    identity, and what is left is ``volume``'s pass along ``r``.
+    ``t`` (``M (x) M (x) S``), then the inverse mass on every axis.
+    ``inverse`` says that ``Mi`` is the mass's inverse: ``M^-1 M`` is one on
+    its diagonal and zero off it. There the mass cancels on ``s`` and
+    ``t``, and what is left is ``volume``'s pass of ``D = M^-1 S^T`` along
+    ``r``. The other two axes are the same with the axes renamed.
     """
 
 
@@ -191,6 +204,13 @@ def lift_inward(
     k: Fin[n],
     j: Fin[n],
     i: Fin[n],
+    inverse: all(sum(Mi[p, c] * M[c, p] for c in Fin[n]) == 1 for p in Fin[n])
+    & all(
+        sum(Mi[p, c] * M[c, q] for c in Fin[n]) == 0
+        for p in Fin[n]
+        for q in Fin[n]
+        if p != q
+    ),
 ) -> sum(
     Mi[k, c]
     * Mi[j, b]
@@ -199,20 +219,15 @@ def lift_inward(
     for c in Fin[n]
     for b in Fin[n]
     for a in Fin[n]
-) == sum(Mi[i, a] * end[a] for a in Fin[n]) * sum(
-    sum(Mi[k, c] * M[c, t] for c in Fin[n])
-    * sum(Mi[j, b] * M[b, s] for b in Fin[n])
-    * g[t, s]
-    for t in Fin[n]
-    for s in Fin[n]
-):
+) == sum(Mi[i, a] * end[a] for a in Fin[n]) * g[k, j]:
     """The inverse mass after a face's mass is the face's column, times its flux.
 
     The left side is grudge's face mass of the face ``r = -1`` (``end`` is
     the basis at ``r = -1``, the face's own mass on ``s`` and ``t``), then
-    the inverse mass; the right side is the column ``M^-1 end`` along ``r``
-    times ``M^-1 M`` on the face's two axes, which is ``lift``'s term for
-    that face where ``M^-1`` is the mass's inverse.
+    the inverse mass. Where ``Mi`` is the mass's inverse (``inverse``) the
+    mass cancels on the face's two axes, and what is left is ``lift``'s term
+    for that face: the column ``L = M^-1 end`` along ``r``, times the face's
+    flux. The other five faces are the same with the axes renamed.
     """
 
 
@@ -402,6 +417,188 @@ def lift_on_faces(
             rhs[e, a, last, b] -= invJ[e, a, last, b] * ends[1] * flux[e, 5, a, b]
 
 
+@kernel
+def weak_rhs(
+    Mi: Arr[Fin[n], Fin[n], Real],
+    M: Arr[Fin[n], Fin[n], Real],
+    S: Arr[Fin[n], Fin[n], Real],
+    ends: Arr[Fin[2], Fin[n], Real],
+    V: Arr[Fin[3], Fin[ne], Fin[n], Fin[n], Fin[n], Real],
+    invJ: Arr[Fin[ne], Fin[n], Fin[n], Fin[n], Real],
+    u: Arr[Fin[ne], Fin[n], Fin[n], Fin[n], Real],
+    flux: Arr[Fin[ne], Fin[6], Fin[n], Fin[n], Real],
+    w: Arr[Fin[3], Fin[ne], Fin[n], Fin[n], Fin[n], Real],
+    rhs: Arr[Fin[ne], Fin[n], Fin[n], Fin[n], Real],
+):
+    """grudge's ``WeakAdvectionOperator.operator``, as the math says it.
+
+    ``inverse_mass(v . weak_local_grad(u) - face_mass(flux))``. ``w[d]`` is
+    the field times the velocity along ``d``, ``V[d] u``, stored with the
+    axis of ``d`` last. The weak divergence applies ``M (x) M (x) S^T`` to
+    each, ``S^T`` along its last axis; the face mass puts each face's flux
+    on the face's own two axes, ``flux[e, f]``'s, and the basis at its end,
+    ``ends``, on the third; then the inverse mass ``Mi`` on every axis, the
+    axes of each term in its own order, and ``1 / J``. ``volume`` and
+    ``lift`` are derived from it (``derived``).
+    """
+    for e, k, j, i in u.dom:
+        w[0, e, k, j, i] = V[0, e, k, j, i] * u[e, k, j, i]
+        w[1, e, k, i, j] = V[1, e, k, j, i] * u[e, k, j, i]
+        w[2, e, j, i, k] = V[2, e, k, j, i] * u[e, k, j, i]
+    for e, k, j, i in rhs.dom:
+        rhs[e, k, j, i] = invJ[e, k, j, i] * (
+            # the weak derivative along r
+            reduce_sum(
+                Mi[k, c]
+                * Mi[j, b]
+                * Mi[i, a]
+                * reduce_sum(
+                    M[c, t] * M[b, s] * S[a, r] * w[0, e, t, s, r]
+                    for t in M.dom[c]
+                    for s in M.dom[b]
+                    for r in S.dom[a]
+                )
+                for c in Mi.dom[k]
+                for b in Mi.dom[j]
+                for a in Mi.dom[i]
+            )
+            # the weak derivative along s, which w[1] holds last
+            + reduce_sum(
+                Mi[k, c]
+                * Mi[i, b]
+                * Mi[j, a]
+                * reduce_sum(
+                    M[c, t] * M[b, s] * S[a, r] * w[1, e, t, s, r]
+                    for t in M.dom[c]
+                    for s in M.dom[b]
+                    for r in S.dom[a]
+                )
+                for c in Mi.dom[k]
+                for b in Mi.dom[i]
+                for a in Mi.dom[j]
+            )
+            # the weak derivative along t, which w[2] holds last
+            + reduce_sum(
+                Mi[j, c]
+                * Mi[i, b]
+                * Mi[k, a]
+                * reduce_sum(
+                    M[c, t] * M[b, s] * S[a, r] * w[2, e, t, s, r]
+                    for t in M.dom[c]
+                    for s in M.dom[b]
+                    for r in S.dom[a]
+                )
+                for c in Mi.dom[j]
+                for b in Mi.dom[i]
+                for a in Mi.dom[k]
+            )
+            - (
+                # the face t = -1
+                reduce_sum(
+                    Mi[j, c]
+                    * Mi[i, b]
+                    * Mi[k, a]
+                    * (
+                        ends[0, a]
+                        * reduce_sum(
+                            M[c, t] * M[b, s] * flux[e, 0, t, s]
+                            for t in M.dom[c]
+                            for s in M.dom[b]
+                        )
+                    )
+                    for c in Mi.dom[j]
+                    for b in Mi.dom[i]
+                    for a in Mi.dom[k]
+                )
+                # the face t = +1
+                + reduce_sum(
+                    Mi[j, c]
+                    * Mi[i, b]
+                    * Mi[k, a]
+                    * (
+                        ends[1, a]
+                        * reduce_sum(
+                            M[c, t] * M[b, s] * flux[e, 1, t, s]
+                            for t in M.dom[c]
+                            for s in M.dom[b]
+                        )
+                    )
+                    for c in Mi.dom[j]
+                    for b in Mi.dom[i]
+                    for a in Mi.dom[k]
+                )
+                # the face r = -1
+                + reduce_sum(
+                    Mi[k, c]
+                    * Mi[j, b]
+                    * Mi[i, a]
+                    * (
+                        ends[0, a]
+                        * reduce_sum(
+                            M[c, t] * M[b, s] * flux[e, 2, t, s]
+                            for t in M.dom[c]
+                            for s in M.dom[b]
+                        )
+                    )
+                    for c in Mi.dom[k]
+                    for b in Mi.dom[j]
+                    for a in Mi.dom[i]
+                )
+                # the face r = +1
+                + reduce_sum(
+                    Mi[k, c]
+                    * Mi[j, b]
+                    * Mi[i, a]
+                    * (
+                        ends[1, a]
+                        * reduce_sum(
+                            M[c, t] * M[b, s] * flux[e, 3, t, s]
+                            for t in M.dom[c]
+                            for s in M.dom[b]
+                        )
+                    )
+                    for c in Mi.dom[k]
+                    for b in Mi.dom[j]
+                    for a in Mi.dom[i]
+                )
+                # the face s = -1
+                + reduce_sum(
+                    Mi[k, c]
+                    * Mi[i, b]
+                    * Mi[j, a]
+                    * (
+                        ends[0, a]
+                        * reduce_sum(
+                            M[c, t] * M[b, s] * flux[e, 4, t, s]
+                            for t in M.dom[c]
+                            for s in M.dom[b]
+                        )
+                    )
+                    for c in Mi.dom[k]
+                    for b in Mi.dom[i]
+                    for a in Mi.dom[j]
+                )
+                # the face s = +1
+                + reduce_sum(
+                    Mi[k, c]
+                    * Mi[i, b]
+                    * Mi[j, a]
+                    * (
+                        ends[1, a]
+                        * reduce_sum(
+                            M[c, t] * M[b, s] * flux[e, 5, t, s]
+                            for t in M.dom[c]
+                            for s in M.dom[b]
+                        )
+                    )
+                    for c in Mi.dom[k]
+                    for b in Mi.dom[i]
+                    for a in Mi.dom[j]
+                )
+            )
+        )
+
+
 @program
 def advection_rhs(u, G, v, normal, sJ, invJ, nbr, inside, outside, D, L, rhs):
     """grudge's ``WeakAdvectionOperator.operator``, from grudge's own geometry."""
@@ -442,6 +639,13 @@ fused = (
 
 #: The same, with the fluxes kept one element at a time.
 contracted = fused.contract(advection_rhs.flux)
+
+#: grudge PR #362's rearrangement, derived from grudge's operator: the inverse
+#: mass pushed inward, which ``volume`` and ``lift`` compute, with ``D = M^-1
+#: S^T`` and the lift's columns ``L = M^-1 e`` each computed once.
+derived = Schedule(weak_rhs).rewrite(
+    weak_rhs.rhs, by=(inverse_mass_inward, lift_inward), keep=("D", "L")
+)
 
 
 @program
@@ -711,6 +915,42 @@ def folded(data: dict) -> dict:
     }
 
 
+def operator_inputs(
+    elements: int = ELEMENTS, order: int = ORDER, seed: int | None = None
+) -> dict:
+    """``weak_rhs``'s arguments: grudge's tables, the folded geometry and the fluxes.
+
+    ``Mi`` is the inverse of the exact mass, as numpy computes it, so ``M^-1
+    M`` is the identity to the tables' digits and not exactly; ``ends`` is
+    the basis at ``-1`` and at ``+1``, which is one at the first and the last
+    node. The field is :func:`inputs`' and the fluxes are ``upwind``'s; with
+    a ``seed``, both are drawn at random instead, which on one periodic
+    element leaves a right-hand side that is not zero.
+    """
+    stiffness_t, mass = factors(order)
+    once = folded(inputs(elements, order))
+    flux = Arr.zeros(once["vn"].numpy().shape)
+    upwind(once["u"], once["nbr"], once["inside"], once["outside"], once["vn"], flux)
+    u = once["u"]
+    shape = u.numpy().shape
+    if seed is not None:
+        rng = np.random.default_rng(seed)
+        u = Arr.from_numpy(rng.normal(size=shape))
+        flux = Arr.from_numpy(rng.normal(size=flux.numpy().shape))
+    return {
+        "Mi": Arr.from_numpy(np.linalg.inv(mass)),
+        "M": Arr.from_numpy(mass),
+        "S": Arr.from_numpy(stiffness_t),
+        "ends": Arr.from_numpy(np.eye(order + 1)[[0, -1]]),
+        "V": once["V"],
+        "invJ": once["invJ"],
+        "u": u,
+        "flux": flux,
+        "w": Arr.zeros((3, *shape)),
+        "rhs": Arr.zeros(shape),
+    }
+
+
 def dense(data: dict, order: int = ORDER) -> np.ndarray:
     """grudge's right-hand side with its dense operators, before the rearrangement.
 
@@ -796,6 +1036,9 @@ def example_inputs() -> dict:
             "flux": flux,
             "rhs": Arr.from_numpy(volume_term),
         },
+        # one element of order 2: the native weak_rhs adds every term of the
+        # dense operators
+        "weak_rhs": operator_inputs(elements=1, order=2, seed=2),
         "advection_rhs": data,
         "folded_rhs": once,
         "surface": {**faces, "L": L, "invJ": invJ, "rhs": Arr.from_numpy(volume_term)},
@@ -871,6 +1114,26 @@ def main() -> int:
     )
     print()
 
+    # volume and lift derived from grudge's operator by the two theorems, the
+    # tables M^-1 S^T and M^-1 e computed once: compiled, against the kernels
+    print(f"derived: {derived!r}")
+    for name in ("D", "L"):
+        print(f"  {name} computed once, before rhs")
+    operator = operator_inputs()
+    D, L = tables()
+    by_kernels = Arr.zeros(operator["rhs"].numpy().shape)
+    V, invJ, u = (operator[name] for name in ("V", "invJ", "u"))
+    volume(Arr.from_numpy(D), V, invJ, u, by_kernels)
+    lift(Arr.from_numpy(L), operator["invJ"], operator["flux"], by_kernels)
+    want = by_kernels.numpy()
+    got = LoopyExecutor().run(derived, **operator)["rhs"]
+    agrees = bool(np.abs(got - want).max() <= 1e-13 * np.abs(want).max())
+    print(
+        "  the compiled derived rhs is volume and lift's, from the same fluxes, to "
+        f"1e-13 of the largest value: {agrees}"
+    )
+    print()
+
     # one loop deeper than fused: the fluxes on the loops of the nodes
     sizes = {"n": N, "ne": ELEMENTS**3}
     nodes_fused = (
@@ -928,7 +1191,7 @@ def main() -> int:
                 f"{steps} step{'s' if steps != 1 else ''}: "
                 f"{len(cast)} facts, {_settled(cast)}"
             )
-    good = native and inverse and transposed and legal
+    good = native and inverse and transposed and agrees and legal
     return 0 if good and kept.status.value == "tested" else 1
 
 

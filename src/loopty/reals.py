@@ -43,14 +43,24 @@ import islpy as isl
 import numpy as np
 import pymbolic.primitives as prim
 from lanky.ledger import Fact, Status
-from lanky.terms import Abs, Comparison, Subscript, conjuncts, init_args, render
+from lanky.terms import (
+    Abs,
+    Comparison,
+    Subscript,
+    Var,
+    conjuncts,
+    init_args,
+    render,
+)
 
 from loopty.term import ArrType, Reduction, Term
 from loopty.typing import AfterCall
 
 __all__ = [
     "AtTheClass",
+    "ByTheorem",
     "at_the_class",
+    "cited_over_the_reals",
     "comparison_class",
     "proved_over_the_reals",
     "statement",
@@ -221,11 +231,17 @@ def _points(
     return points
 
 
-def _expanded(expr: Any, values: dict[str, int], term: Term) -> Any:
-    """``expr`` at ``values``: each sum written out and each table read at its point."""
+def _expanded(
+    expr: Any, values: dict[str, int], term: Term, read_tables: bool = True
+) -> Any:
+    """``expr`` at ``values``: each sum written out and each table read at its point.
+
+    With ``read_tables`` false a table's cell stays a cell, ``FE0[0, 1]``,
+    which a claim about any tables of the kernel's shape reads.
+    """
     from loopty.hypotheses import substitute
 
-    tables = dict(term.tables)
+    tables = dict(term.tables) if read_tables else {}
 
     def walk(node: Any) -> Any:
         if isinstance(node, Reduction):
@@ -269,7 +285,9 @@ def _expanded(expr: Any, values: dict[str, int], term: Term) -> Any:
     return walk(substitute(expr, dict(values)))
 
 
-def _cell_value(term: Term, cell: Any, written: set[str]) -> tuple[str, Any]:
+def _cell_value(
+    term: Term, cell: Any, written: set[str], read_tables: bool = True
+) -> tuple[str, Any]:
     """The array of ``cell`` and what its statement leaves there, over the inputs.
 
     Raises:
@@ -328,7 +346,7 @@ def _cell_value(term: Term, cell: Any, written: set[str]) -> tuple[str, Any]:
 
         if _names(stmt.expr) & written:
             raise _Unstated(f"{named(stmt.id)} reads what {term.name} writes")
-        found.append(_expanded(stmt.expr, values, term))
+        found.append(_expanded(stmt.expr, values, term, read_tables))
     if len(found) != 1:
         raise _Unstated(f"no one statement of {term.name} stores {render(cell)}")
     return array, found[0]
@@ -459,6 +477,349 @@ def proved_over_the_reals(
         rests_on=(*post.rests_on, *(fact.id for fact in needed), faithful),
     )
     return fact, needed
+
+
+# }}}
+
+
+# {{{ by a cited theorem, under conditions on the kernel's tables
+
+
+def _written_out(expr: Any) -> Any:
+    """``expr`` with each sum over a literal range written out, term by term."""
+    from lanky.terms import Sum as LankySum
+
+    from loopty.hypotheses import substitute
+
+    if isinstance(expr, LankySum):
+        bounds = []
+        for _var, sort in expr.binders:
+            bound = getattr(sort, "bound", None)
+            if expr.guard is not None or _concrete(bound) is None:
+                body = _written_out(expr.body)
+                return LankySum(expr.binders, body, expr.guard)
+            bounds.append(_concrete(bound))
+        pieces: list[Any] = []
+
+        def walk(k: int, env: dict[str, int]) -> None:
+            if k == len(bounds):
+                pieces.append(_written_out(substitute(expr.body, dict(env))))
+                return
+            for value in range(bounds[k]):
+                walk(k + 1, {**env, expr.binders[k][0].name: value})
+
+        walk(0, {})
+        if not pieces:
+            return 0
+        total = pieces[0]
+        for piece in pieces[1:]:
+            total = total + piece
+        return total
+    if isinstance(expr, prim.ExpressionNode):
+        args = init_args(expr)
+        mapped = tuple(_written_out(arg) for arg in args)
+        if all(a is b for a, b in zip(mapped, args, strict=True)):
+            return expr
+        return type(expr)(*mapped)
+    if isinstance(expr, tuple):
+        return tuple(_written_out(item) for item in expr)
+    return expr
+
+
+def _flat(expr: Any) -> Any:
+    """``expr`` with nested sums and products flat, and a sum's zero terms left out.
+
+    lanky's ``sum`` of a literal range reads ``0 + a + b + c``, and what a
+    kernel stores reads ``a + b + c``; flat, both are the sum of ``a``,
+    ``b`` and ``c``, which match term by term.
+    """
+    if isinstance(expr, prim.Sum | prim.Product):
+        kind = prim.Sum if isinstance(expr, prim.Sum) else prim.Product
+        children: list[Any] = []
+        for child in expr.children:
+            child = _flat(child)
+            if isinstance(child, kind):
+                children.extend(child.children)
+            else:
+                children.append(child)
+        if kind is prim.Sum:
+            children = [
+                child
+                for child in children
+                if not (isinstance(child, int | float) and child == 0)
+            ]
+        if not children:
+            return 0 if kind is prim.Sum else 1
+        if len(children) == 1:
+            return children[0]
+        return type(expr)(tuple(children))
+    if isinstance(expr, prim.ExpressionNode):
+        args = init_args(expr)
+        mapped = tuple(_flat(arg) for arg in args)
+        if all(a is b for a, b in zip(mapped, args, strict=True)):
+            return expr
+        return type(expr)(*mapped)
+    if isinstance(expr, tuple):
+        return tuple(_flat(item) for item in expr)
+    return expr
+
+
+@dataclass(frozen=True)
+class ByTheorem(AfterCall):
+    """A postcondition of reals that a cited theorem concludes, as its fact's term.
+
+    One part per conjunct, about reals: the cells it reads are what the
+    kernel stores there, its tables left as cells; the theorem is restated
+    as it was proved; and its conditions at the kernel's tables are
+    hypotheses, which rows of their own test at the tables' digits
+    (:func:`cited_over_the_reals`). The claim is exact: the tables are what
+    the theorem takes them to be, and the floats the kernel produces are
+    what the native runs test, at the class.
+    """
+
+    term: Term | None = None
+    theorem: Any = None
+    conditions: tuple[Any, ...] = ()
+
+    def lean_obligation(self) -> Any:
+        from lanky.prelude import Real
+
+        from loopty.obligations import Claim, _declined, _lanky_obligations, cited
+        from loopty.rewriting import cited as statement_of
+
+        lanky = _lanky_obligations()
+        if "mathlib" not in getattr(lanky.Part, "__dataclass_fields__", {}):
+            return _declined(
+                "the claim is about real numbers, and this lanky states no part of "
+                "Mathlib's"
+            )
+        term = self.term
+        assert term is not None
+        written = {stmt.assignee.array for stmt in term.stmts}
+        sorts = _sorts(term)
+        sorts.update({name: Real for name, _ in term.tables})
+        statement = statement_of(self.theorem)
+        if statement is None:
+            return _declined(f"{self.theorem!r} has no statement to restate")
+        parts = []
+        try:
+            for k, conjunct in enumerate(conjuncts(self.claim)):
+                if not isinstance(conjunct, prim.Comparison):
+                    raise _Unstated(f"{render(conjunct)} is not a comparison")
+                claim = Claim(term, sorts=sorts)
+                for cell in _cells(conjunct, written):
+                    _array, value = _cell_value(term, cell, written, read_tables=False)
+                    claim.hypotheses.append(Comparison(cell, "==", value))
+                claim.hypotheses.append(statement)
+                claim.hypotheses.extend(self.conditions)
+                closed = claim.close(conjunct)
+                guards = [render(part) for part in conjuncts(closed.guard)]
+                parts.append(
+                    lanky.Part(
+                        f"conjunct_{k}",
+                        render(conjunct),
+                        closed,
+                        lanky.Hints(),
+                        mathlib=True,
+                        **cited(guards, (self.theorem,)),
+                    )
+                )
+        except _Unstated as exc:
+            return _declined(f"the claim is not stated for Lean: {exc}")
+        extra = {}
+        if "stated_by" in getattr(lanky.Obligation, "__dataclass_fields__", {}):
+            extra["stated_by"] = "loopty"
+        return lanky.Obligation(parts=tuple(parts), **extra)
+
+
+def _concluded(
+    theorem: Any, term: Term, claim: Any, written: set[str]
+) -> dict[str, Any] | None:
+    """Where ``theorem`` concludes ``claim`` of what ``term`` stores: its bindings.
+
+    Each conjunct of the claim, its cells read as what the kernel stores there
+    with its tables left as cells, has to have the left side of an equation
+    the theorem concludes, written out, with one binding of the theorem's
+    variables for all of them: ``element_mass``'s ``FE`` is ``FE0``, its
+    ``W`` is ``W3`` and its ``J`` the cell's Jacobian. ``None`` where it
+    does not.
+    """
+    from lanky.prelude import FnType
+
+    from loopty.hypotheses import _Matcher
+    from loopty.rewriting import _base
+
+    goal = getattr(theorem, "goal", None)
+    variables = dict(getattr(theorem, "variables", ()) or ())
+    if goal is None or not variables:
+        return None
+    functions = {
+        name for name, sort in variables.items() if isinstance(_base(sort), FnType)
+    }
+    scalars = set(variables) - functions
+    equations = [
+        part
+        for part in conjuncts(_written_out(goal))
+        if isinstance(part, prim.Comparison) and part.operator == "=="
+    ]
+    sigma: dict[str, Any] = {}
+    for conjunct in conjuncts(claim):
+        if not (isinstance(conjunct, prim.Comparison) and conjunct.operator == "=="):
+            return None
+        cells = _cells(conjunct.left, written)
+        if len(cells) != 1 or cells[0] is not conjunct.left:
+            return None
+        try:
+            _array, value = _cell_value(term, cells[0], written, read_tables=False)
+        except _Unstated:
+            return None
+        value = _flat(value)
+        for equation in equations:
+            trial = dict(sigma)
+            matcher = _Matcher(functions, scalars)
+            if matcher.match(_flat(equation.left), value, trial, {}):
+                sigma = trial
+                break
+        else:
+            return None
+    return sigma
+
+
+def cited_over_the_reals(
+    term: Term,
+    post: Fact,
+    stored: Any,
+    faithful: str,
+    theorems: Sequence[Any],
+    owner: str,
+    identifier: Any,
+) -> tuple[Fact, list[Fact], list[Fact]] | None:
+    """``post`` concluded by a theorem the kernel cites, and the rows it rests on.
+
+    ``@kernel(uses=[element_mass])`` on ``mass_ffc``: the theorem concludes
+    the element's mass in closed form of any tables that are the P1 basis at
+    the rule's points and its weights. Where its conclusion has the left side
+    of each conjunct of the postcondition, the cells read as what the kernel
+    stores (:func:`_concluded`), its hypotheses at those bindings are
+    conditions on the kernel's tables, each a row tested at the tables'
+    digits (:func:`loopty.rewriting.condition_fact`), and Lean proves the
+    claim over the reals from them, the theorem and what the kernel stores
+    (:class:`ByTheorem`). Returns the fact, the ``single-assignment`` facts
+    it rests on, and the condition rows; ``None`` where no cited theorem
+    concludes it.
+    """
+    from loopty.rewriting import (
+        Condition,
+        _condition_kind,
+        condition_fact,
+    )
+    from loopty.unfolding import _instantiate
+
+    claim = term.post
+    if claim is None or post.status is Status.REFUTED or not _classes(term, claim):
+        return None
+    written = {stmt.assignee.array for stmt in term.stmts}
+    arrays = list(
+        dict.fromkeys(cell.aggregate.name for cell in _cells(claim, written))
+    )
+    if not arrays or not all(array in stored.facts for array in arrays):
+        return None
+    for theorem in theorems:
+        try:
+            sigma = _concluded(theorem, term, claim, written)
+        except Exception:  # noqa: BLE001 - a theorem that does not conclude it
+            sigma = None
+        if sigma is None:
+            continue
+        from lanky.prelude import FnType
+
+        from loopty.rewriting import _base
+
+        variables = dict(theorem.variables)
+        functions = {
+            name for name, sort in variables.items() if isinstance(_base(sort), FnType)
+        }
+        bound = {
+            name: (Var(value) if isinstance(value, str) else value)
+            for name, value in sigma.items()
+        }
+        cell = _cells(claim, written)[0]
+        stmt = next(
+            other for other in term.stmts if other.assignee.array == cell.aggregate.name
+        )
+        conditions = []
+        for name, prop in getattr(theorem, "hypotheses", ()):
+            instance = _instantiate(prop, dict(bound), functions)
+            conditions.append(
+                Condition(
+                    theorem=theorem.__name__,
+                    hypothesis=name,
+                    claim=instance,
+                    kind=_condition_kind(instance, term, ()),
+                    over=(),
+                    stmt=stmt.id,
+                    spelled=tuple(
+                        zip(stmt.inames, stmt.spelled or stmt.inames, strict=False)
+                    ),
+                )
+            )
+        rows = [
+            condition_fact(
+                condition,
+                term,
+                None,
+                identifier(f"cited-condition:{position}"),
+                owner,
+                post.where,
+                theorem.__name__,
+            )
+            for position, condition in enumerate(conditions)
+        ]
+        needed = [stored.facts[array] for array in arrays]
+        tables = _listed([name for name, _ in term.tables])
+        fact = Fact(
+            id=post.id,
+            kind=post.kind,
+            statement=f"{render(claim)}, by {theorem.__name__}",
+            term=ByTheorem(
+                term.name,
+                claim,
+                term,
+                theorem,
+                tuple(condition.claim for condition in conditions),
+            ),
+            status=post.status,
+            decided_by=post.decided_by,
+            provenance={
+                **post.provenance,
+                "rule": (
+                    f"{theorem.__name__} concludes it of what the kernel stores, "
+                    f"where its tables {tables} are as {theorem.__name__} takes "
+                    "them, which a row tests at the tables' digits; Lean proves it "
+                    "over the reals from them, no cell of "
+                    + ", ".join(arrays)
+                    + " stored twice or read before its store; the floats the "
+                    "kernel produces are what the native runs test, at the class"
+                ),
+            },
+            where=post.where,
+            owner=post.owner,
+            rests_on=(
+                *post.rests_on,
+                *(fact.id for fact in needed),
+                faithful,
+                getattr(theorem, "fact_id", theorem.__name__),
+                *(row.id for row in rows),
+            ),
+        )
+        return fact, needed, rows
+    return None
+
+
+def _listed(names: Sequence[str]) -> str:
+    if len(names) <= 1:
+        return "".join(names)
+    return f"{', '.join(names[:-1])} and {names[-1]}"
 
 
 # }}}

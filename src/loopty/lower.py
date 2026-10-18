@@ -4344,10 +4344,13 @@ def _arguments(
     # parameter shifts every later argument into the wrong register (observed
     # as zeros and a corrupted heap). Refuse the term instead; see
     # docs/loopy-notes.md, note 1.
+    # An array a math step left unread is set aside: the schedule takes it, as
+    # the kernel does, and the compiled run neither declares nor passes it.
+    aside = set(term.set_aside)
     untouched = [
         name
         for name, typ in term.params
-        if isinstance(typ, ArrType) and name not in used
+        if isinstance(typ, ArrType) and name not in used and name not in aside
     ]
     if untouched:
         plural = "s" if len(untouched) > 1 else ""
@@ -4446,6 +4449,8 @@ def _arguments(
     for name, typ in term.params:
         if not isinstance(typ, ArrType):
             declare_value(name, numpy_dtype(typ))
+            continue
+        if name in aside and name not in used:
             continue
         is_output = name in builder.written
         ragged = builder.ragged_axis(name) is not None

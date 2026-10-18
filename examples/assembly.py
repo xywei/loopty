@@ -25,16 +25,17 @@ Run this file three ways.
 
 ``lanky check examples/assembly.py``
     The ledger, three layers in one table. The mathematics: the rule
-    integrates every quadratic exactly, the element's mass in closed form,
-    and the scatter keeps the total on every mesh; proved by Lean where
-    Mathlib is installed, tested where it is not. The kernels:
-    ``mass_ffc``'s postcondition, the element's mass in closed form to the
-    approx tolerance, tested on its runs and, with Mathlib, proved by Lean
-    from what it stores; the call's rows and gathers in bounds, that
-    postcondition restated of every cell after its call, and the
-    accumulation into ``y`` approx, which is what an update owes in place
-    of distinct writes. Then Sun et al.'s casts, under the assumption their
-    schedule makes.
+    integrates every quadratic exactly, the element's mass in closed form
+    from the rule's tables, and the scatter keeps the total on every mesh;
+    proved by Lean where Mathlib is installed, tested where it is not. The
+    kernels: ``mass_ffc``'s postcondition, the element's mass in closed
+    form, by ``element_mass``, under the condition that FFC's tables are
+    the rule's, tested at their 15 digits; tested on its runs at the approx
+    tolerance and, with Mathlib, proved by Lean from what it stores; the
+    call's rows and gathers in bounds, that postcondition restated of every
+    cell after its call, and the accumulation into ``y`` approx, which is
+    what an update owes in place of distinct writes. Then Sun et al.'s
+    casts, under the assumption their schedule makes.
 
 ``loopty run examples/assembly.py``
     Both kernels and Sun et al.'s schedule compiled and compared with the
@@ -110,19 +111,17 @@ Sun et al.'s assumption is checked at the call the same way: their schedule
 run on PyOP2's two triangles is refused, ``nc = 2``.
 
 *The tables are the rule, to their 15 digits.* ``FE0`` and ``W3`` are
-``mass_ffc``'s tables as the test writes them. The theorems are about the
-rule they round, in exact rationals, and ``python`` checks that the tables
-are that rule to within ``1e-15``. So ``mass_ffc``'s matrix is the closed
-form to the last digits only, and its postcondition is read as its compiled
-run is compared with its native one, at the approx tolerance, ``|a - b| <=
-1e-6 (|b| + 1)``: tested on its runs, and proved by Lean with Mathlib, from
-what the kernel stores, with each table at the value it holds. That proof
-is of the kernel's term read over the reals; the floats it computes are
-what the runs test. So ``mass_ffc`` does not cite ``element_mass``: the
-theorem is about the rule, and the kernel's tables round it. Citing it would
-take the tables' values as a condition, ``FE0`` the P1 basis at the rule's
-points and ``W3`` its weights, to their digits, which ``python`` checks and
-no row states yet (#342).
+``mass_ffc``'s tables as the test writes them. ``element_mass`` is about
+tables that are the rule, the P1 basis at its points and its weights in
+exact rationals (``tabulated``), and ``mass_ffc`` cites it,
+``@kernel(uses=[element_mass])``. Its tables round the rule, so at the
+kernel that hypothesis is a condition on the tables, a row of its own
+tested at their 15 digits: ``0.666666666666667`` is ``2/3`` to the last
+digit. The postcondition is then ``element_mass``'s conclusion: proved by
+Lean with Mathlib over the reals, from what the kernel stores, with its
+tables as the theorem takes them; tested on the runs at the approx
+tolerance, ``|a - b| <= 1e-6 (|b| + 1)``, as its compiled run is compared
+with its native one, since the floats it computes round.
 """
 
 from __future__ import annotations
@@ -175,16 +174,25 @@ def exact_to_degree_two(
 
 
 @theorem
-def element_mass(J: Real, u: Fn[Fin[3], Real]) -> all(
-    abs(J) * rule(lambda x, y: P1[j](x, y) * field_at(u, x, y))
-    == abs(J) * (u[j] + u[0] + u[1] + u[2]) / 24
+def element_mass(
+    J: Real,
+    FE: Fn[Fin[3], Fin[3], Real],
+    W: Fn[Fin[3], Real],
+    tabulated: all(FE[q, m] == P1[m](*POINTS[q]) for q in Fin[3] for m in Fin[3])
+    & all(W[q] == Fraction(1, 6) for q in Fin[3]),
+) -> all(
+    sum(FE[q, j] * FE[q, k] * W[q] * abs(J) for q in Fin[3])
+    == abs(J) * (2 if j == k else 1) / 24
     for j in Fin[3]
+    for k in Fin[3]
 ):
-    """A cell's mass matrix is ``|J| (1 + delta_jk) / 24``: here applied to ``u``.
+    """A cell's mass matrix is ``|J| (1 + delta_jk) / 24``, from the rule's tables.
 
-    ``J`` is the Jacobian's determinant, twice the cell's area, and the left
-    side is what ``mass_ffc`` computes, row ``j`` of its matrix times ``u``,
-    in exact arithmetic.
+    ``J`` is the Jacobian's determinant, twice the cell's area. ``FE[q, m]``
+    is the P1 basis function ``m`` at the rule's point ``q``, and ``W`` the
+    rule's weights, as FFC tabulates them (``tabulated``); the left side is
+    what ``mass_ffc`` computes from such tables, the rule applied to the
+    product of two basis functions, in exact arithmetic.
     """
 
 
@@ -238,7 +246,7 @@ def jacobian(x):
     return J_00 * J_11 - J_01 * J_10
 
 
-@kernel
+@kernel(uses=[element_mass])
 def mass_ffc(x: Arr[Fin[3], Fin[2], Real], A: Arr[Fin[3], Fin[3], Real]) -> all(
     A[j, j] == abs(jacobian(x)) / 12 for j in Fin[3]
 ) & all(
@@ -246,10 +254,11 @@ def mass_ffc(x: Arr[Fin[3], Fin[2], Real], A: Arr[Fin[3], Fin[3], Real]) -> all(
 ):
     """FFC's P1 mass kernel: the mass matrix of the triangle with corners ``x``.
 
-    It promises the element's mass in closed form, :func:`element_mass`'s
-    ``|J| (1 + delta_jk) / 24``, which it computes from FFC's tables: to
-    their 15 digits, so to the approx tolerance, as its compiled run is
-    compared with its native one.
+    It promises the element's mass in closed form, ``|J| (1 + delta_jk) /
+    24``, by :func:`element_mass`, which it computes from FFC's tables:
+    they are the rule's, a condition on the tables tested at their 15
+    digits, so its floats are the closed form to the approx tolerance, as
+    its compiled run is compared with its native one.
     """
     det = abs(jacobian(x))
     for j, k in A.dom:

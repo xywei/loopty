@@ -806,6 +806,36 @@ class Kernel(_Decorated):
             found = None
             if stored is not None:
                 faithful = fact_id(FAITHFUL, self.qualname, **key)
+                # concluded by a theorem the kernel cites, under conditions on
+                # its tables (loopty.reals.cited_over_the_reals)
+                cited = None
+                if self.uses:
+                    from loopty.reals import cited_over_the_reals
+
+                    def identifier(detail: str) -> str:
+                        return fact_id(detail, self.qualname, **key)
+
+                    try:
+                        cited = cited_over_the_reals(
+                            term,
+                            facts[at],
+                            stored,
+                            faithful,
+                            self.uses,
+                            self.qualname,
+                            identifier,
+                        )
+                    except Exception:  # noqa: BLE001 - the runs' verdict stands
+                        cited = None
+                if cited is not None:
+                    over, needed, conditions = cited
+                    return [
+                        *facts[:at],
+                        *needed,
+                        *conditions,
+                        over,
+                        *facts[at + 1 :],
+                    ]
                 try:
                     found = proved_over_the_reals(term, facts[at], stored, faithful)
                 except Exception:  # noqa: BLE001 - the runs' verdict stands
