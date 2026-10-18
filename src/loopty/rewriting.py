@@ -1467,7 +1467,7 @@ def _drawn_terms(
     for draw in range(3):
         try:
             arguments, _sizes = sample_arguments(
-                before, seed=seed + draw, fixed=tables
+                before, seed=seed + draw, given=tables
             )
         except _NoSample as exc:
             return None, f"no input could be drawn: {exc}"
@@ -2295,7 +2295,7 @@ def compared_fact(
             from loopty.faithful import _NoSample, sample_arguments
 
             arguments_d, _sizes = sample_arguments(
-                rows.rewritten.before, seed=seed, fixed=tables
+                rows.rewritten.before, seed=seed, given=tables
             )
         except _NoSample:
             break

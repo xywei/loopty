@@ -28,12 +28,17 @@ The inverse mass is pushed inward, as grudge PR #362 rewrites it: on every
 axis but one it meets a mass and cancels, so the volume term is one pass of
 ``D = M^-1 S^T`` along each axis, and a face's term is the column ``L =
 M^-1 e`` of the face's end along its normal, times the face's flux. The two
-theorems are that rearrangement, for every order; that ``M^-1`` is the
-mass's inverse is a property of the tables, which ``main`` checks. The same
-kernels take the tables of the GLL quadrature's mass, which Alvey-Blanco's
-matched right-hand side and libParanumal use: there ``L`` is a face node's
-own weight and nothing else, and the lift adds each face node's flux into
-the node it sits on. A third theorem says that lift is the transpose of the
+theorems are that rearrangement, for every order, under the hypothesis that
+``M^-1`` is the mass's inverse: ``M^-1 M`` is one on its diagonal and zero
+off it. That is a property of the tables a run is given, so where a kernel
+cites the theorems it is a condition on the tables, tested at their digits.
+``weak_rhs`` is grudge's operator as the math says it, dense, and
+``derived`` rewrites it by the two theorems into what ``volume`` and
+``lift`` compute, with ``D`` and ``L`` computed once. The same kernels take
+the tables of the GLL quadrature's mass, which Alvey-Blanco's matched
+right-hand side and libParanumal use: there ``L`` is a face node's own
+weight and nothing else, and the lift adds each face node's flux into the
+node it sits on. A third theorem says that lift is the transpose of the
 face gather the flux reads through, and so keeps the total.
 
 What the right-hand side reads, per element ``e`` of a periodic mesh:
@@ -59,20 +64,39 @@ Run this file three ways.
 
 ``python examples/advection.py``
     Computes the right-hand side natively and compares it with grudge's
-    operators applied as dense matrices, before the rearrangement. Then fuses
-    the kernels on the element, refuses one loop deeper with its pair, keeps
-    the fluxes one element at a time, and compares the compiled run with the
-    native one; and lists the facts of every split's launches on a device,
-    and the race libParanumal's surface kernel avoids with its barriers.
+    operators applied as dense matrices, before the rearrangement. Then runs
+    ``derived`` compiled, against ``volume`` and ``lift``; fuses the kernels
+    on the element, refuses one loop deeper with its pair, keeps the fluxes
+    one element at a time, and compares the compiled run with the native
+    one; and lists the facts of every split's launches on a device, and the
+    race libParanumal's surface kernel avoids with its barriers.
 
 ``lanky check examples/advection.py``
-    The theorems, every kernel's facts, the programs', the schedules'.
+    The theorems, every kernel's facts, the programs', the schedules': for
+    ``derived``, each theorem's step, the condition on the tables, ``D`` and
+    ``L`` computed once, and the compiled run against the dense kernel.
 
 ``loopty run examples/advection.py``
     Each kernel, the programs and the fused schedule, compiled and compared.
 
 What is worth reading here
 --------------------------
+
+*The math, and what is derived from it.* ``weak_rhs`` says grudge's
+operator as the math does: the inverse mass on every axis of the weak
+divergence less the face mass. It stores the field times the velocity along
+each axis with that axis last, so that each direction's term is the same
+Kronecker product, ``M (x) M (x) S^T``, and one theorem matches all three;
+the six faces need no such care, since each face's flux is already over the
+face's own two axes. ``derived`` reads "weak_rhs, with rhs rewritten by the
+inverse mass pushed inward and the lift pushed inward, keeping ``D`` and
+``L``". Its rows: each theorem's step, over the reals wherever ``M^-1 M`` is
+the identity; that condition, tested at the tables' digits on the example
+inputs, ``np.linalg.inv``'s inverse being one to the last digits and not
+exactly; ``D`` and ``L``, sums of tables, computed once before the elements
+and read where the sums were; and the compiled run against the native dense
+kernel. The mass, cancelled, is read nowhere: the schedule takes it, and
+the compiled code does not.
 
 *The face gather.* ``u[nbr[e, f], outside[f, a, b, 0], ...]`` reads the
 neighbor's node through the face maps, and every subscript is in bounds by

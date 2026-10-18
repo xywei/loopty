@@ -8,6 +8,57 @@ All notable changes to loopty are recorded here. The format follows
 
 ### Added
 
+- **A math step under a condition on a table** (#342, #285). The inverse
+  mass cancels the mass only where the two tables are each other's
+  inverse, a property of the tables a run is given. A theorem says so with
+  a hypothesis about table cells, `inverse: all(sum(Mi[p, c] * M[c, p] for c
+  in Fin[n]) == 1 for p in Fin[n]) & all(... == 0 ... if p != q)`; at the
+  kernel it is a condition on tables, a row tested at the tables' digits
+  and a hypothesis of the Lean part. A condition is on tables where it
+  reads only constant tables, or reads arrays at no loop of the statement
+  and no sum around the match. Its equations are read at the tables'
+  digits: each value is the exact one to 15 digits (6 for `float32`), so a
+  sum of products of `k` of them is within `k` units of its 15th digit,
+  relative to the sum of their sizes; `np.linalg.inv`'s inverse passes, and
+  a table off by `1e-9` is refuted, naming the equation and the allowance.
+  The draws that compare a rewrite keep the example's tables and draw the
+  rest (`sample_arguments(..., fixed=...)`).
+- **Sums of tables, computed once.** Where the theorems' right sides are no
+  one nest of passes, or the theorems need conditions on data or tables,
+  `keep=("D", "L")` stores the sums of tables the rewritten statement reads,
+  in the order it reads them, each over the indices it reads, in a statement
+  of its own before the rewritten one and outside every loop of it; the
+  statement reads `D[i, r]` where the sum was. Each theorem's step stays a
+  row, and reading the kept tables is one more, proved by unfolding them;
+  the kept tables have handles, `derived.D`.
+- **An array a math step leaves unread is set aside**
+  (`Term.set_aside`): once the inverse mass cancels the mass, `M` is read
+  nowhere, and the schedule still takes it, as the kernel does, while the
+  compiled code neither declares nor passes it. The C target refused such a
+  kernel before (`docs/loopy-notes.md`, note 1).
+- **A postcondition by a cited theorem, under conditions on the kernel's
+  tables.** `@kernel(uses=[element_mass])`: where the theorem concludes, of
+  what the kernel stores with its tables left as cells, the left side of
+  each conjunct of the postcondition, its hypotheses at those tables are
+  rows tested at the tables' digits, and the postcondition reads `..., by
+  element_mass`, proved by Lean over the reals from them, the theorem and
+  what the kernel stores (`loopty.reals.ByTheorem`).
+- **`examples/advection.py` derives `volume` and `lift` from grudge's
+  operator.** `weak_rhs` is `inverse_mass(v . weak_local_grad(u) -
+  face_mass(flux))` as the math says it, dense, and `derived =
+  Schedule(weak_rhs).rewrite(weak_rhs.rhs, by=(inverse_mass_inward,
+  lift_inward), keep=("D", "L"))` reads "weak_rhs, with rhs rewritten by the
+  inverse mass pushed inward and the lift pushed inward, keeping D and L".
+  The two theorems take `M^-1 M` the identity as their hypothesis `inverse`
+  and conclude what `volume` and `lift` compute; `weak_rhs` stores each
+  direction's field with its axis last, so one theorem matches all three
+  directions and one all six faces. `python` runs `derived` compiled against
+  `volume` and `lift` at order 3.
+- **`examples/assembly.py`'s `mass_ffc` cites `element_mass`**, now stated
+  of tables that are the rule (`tabulated`): FFC's 15-digit tables are a
+  condition on the tables, tested at their digits, and the postcondition is
+  the theorem's conclusion.
+
 - **The demos write their proofs.** `examples/l2p.py`'s `compressed_taylor`
   proves itself as a textbook does: the claim at `(a, b)` is what is stored
   where `a < 2`, and otherwise a chain, `R[a, b]` equals `-R[a - 2, b + 2]`

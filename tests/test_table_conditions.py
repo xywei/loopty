@@ -167,11 +167,11 @@ def test_draws_keep_the_tables_at_hand() -> None:
 def test_sample_arguments_takes_fixed_arrays_and_their_sizes() -> None:
     from loopty.faithful import sample_arguments
 
-    fixed = {name: weak_inputs()[name] for name in ("Mi", "M")}
-    drawn, sizes = sample_arguments(weak.term, seed=0, fixed=fixed)
+    given = {name: weak_inputs()[name] for name in ("Mi", "M")}
+    drawn, sizes = sample_arguments(weak.term, seed=0, given=given)
     assert sizes["n"] == 4
-    assert np.array_equal(drawn["Mi"].numpy(), fixed["Mi"].numpy())
-    assert drawn["Mi"] is not fixed["Mi"]
+    assert np.array_equal(drawn["Mi"].numpy(), given["Mi"].numpy())
+    assert drawn["Mi"] is not given["Mi"]
     assert drawn["S"].numpy().shape == (4, 4)
 
 

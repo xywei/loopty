@@ -1089,7 +1089,7 @@ def _record(arguments: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def sample_arguments(
-    term: Term, seed: Any = SEED, fixed: Mapping[str, Any] | None = None
+    term: Term, seed: Any = SEED, given: Mapping[str, Any] | None = None
 ) -> tuple[dict[str, Any], dict[str, int]]:
     """Arguments for ``term`` drawn from its declared types, with their sizes.
 
@@ -1107,7 +1107,7 @@ def sample_arguments(
     (:func:`loopty.term.declared_layout`) are that array's offsets rather than
     a draw, since a call has to pass them so (:mod:`loopty.contract`).
 
-    ``fixed`` gives arrays to take as they are rather than draw, the tables a
+    ``given`` holds arrays to take as they are rather than draw, the tables a
     math step's conditions are about (:mod:`loopty.rewriting`): each size an
     axis of one names is the extent it has, and the rest are drawn.
     """
@@ -1115,7 +1115,7 @@ def sample_arguments(
     types = dict(term.params)
     names = sorted((_size_names(term) - set(types)) | _integral_scalars(term))
     held: dict[str, int] = {}
-    for name, value in (fixed or {}).items():
+    for name, value in (given or {}).items():
         typ = types.get(name)
         if not isinstance(typ, ArrType) or typ.domain is not None or any(typ.ragged):
             continue
@@ -1130,8 +1130,8 @@ def sample_arguments(
     arguments: dict[str, Any] = {}
     ragged: list[tuple[str, ArrType]] = []
     for name, typ in term.params:
-        if fixed is not None and name in fixed and isinstance(typ, ArrType):
-            arguments[name] = _copy(fixed[name])
+        if given is not None and name in given and isinstance(typ, ArrType):
+            arguments[name] = _copy(given[name])
             continue
         if isinstance(typ, ArrType):
             if typ.domain is not None:

@@ -31,12 +31,12 @@ marked with `...` is an excerpt and the lines it keeps are checked verbatim.
 | `layer_potential.py` | pytential's QBX on its own curve: the line-Taylor theorem tied by a row to the terms the single layer adds, through the identity that its ratio by the conjugate is `-beta / alpha`, the single and double layer over complex points, sumpy's CPU tile checked and the write sumpy silences a fact, each kernel's agreement with sumpy's own as an `upstream` row within `1e-12` of the largest value, and pytential's Green identity and the jump relations as tested rows |
 | `sum_factorization.py` | grudge's two passes of a sum-factorized operator, fused on the element and the row and no deeper: the deeper fusion refused with its pair, the fusion of fewer loops it names, and what passes between them kept one row at a time |
 | `storage_layouts.py` | where cells are stored, as checked maps: sumpy's compressed-Taylor storage index in two pieces, one for one onto its buffer, and grudge's `dim_tags` `N3,N0,N1,N2` the same layout as modepy's reshape of the DOFArray, a wrong nesting refuted with a cell; two kernels read through them |
-| `assembly.py` | firedrake's PyOP2 assembly loop with FFC's P1 mass kernel called per cell and the cell's matrix added into the nodes, `y[cell[c, a]] += ...`: the rule's exactness, the element's mass and the scatter's total as theorems, the element's mass as `mass_ffc`'s postcondition to the approx tolerance, an update that owes the class of its sum and not distinct writes, PyOP2's GPU split refused with the node its two triangles share, and accepted once the updates are atomic |
+| `assembly.py` | firedrake's PyOP2 assembly loop with FFC's P1 mass kernel called per cell and the cell's matrix added into the nodes, `y[cell[c, a]] += ...`: the rule's exactness, the element's mass and the scatter's total as theorems, the element's mass as `mass_ffc`'s postcondition, by `element_mass`, where FFC's tables are the rule's, a condition on the tables tested at their 15 digits, an update that owes the class of its sum and not distinct writes, PyOP2's GPU split refused with the node its two triangles share, and accepted once the updates are atomic |
 | `calls.py` | kernels calling kernels inside their loops: a rule with a loop of its own (`dot`, loopy #1044) in a matrix-vector and a sparse product, and firedrake's P1 quadrature rule applied per element through a rule that takes the integrand (#1043), each call inlined with binders of its own and owing the caller what the callee's contract checks |
 | `taylor_reconstruction.py` | sumpy's compressed Taylor reconstruction in one file, theorem, kernel and schedule: the theorem proved for every order, the kernel's postcondition decided from what it stores, the theorem applied to it, and the schedule's casts, in one ledger |
 | `l2p.py` | the demo's flagship, sumpy's L2P for the 2-D Laplace kernel (`E2PFromSingleBox`): the compressed Taylor theorem proved for every order and its form box by box, sumpy's storage index a checked layout, the kernel that reconstructs each box's triangle with the theorem applied to its postcondition, the interchange of the triangle's loops refused with its pair, the three calls fused box by box with each box's triangle and table in windows of its own, sumpy's own schedule for a GPU with each box a work group, and a row that compares the program with sumpy's own kernel, within `1e-14` of the largest value |
 | `hexahedra.py` | grudge #418's weak gradient and weak divergence on hexahedra, the kernels for every order: the metric product, a pass per reference axis and the three directions summed, each a kernel and together a program; the Kronecker theorem the passes rest on, for every `n`; the DOFArray's layout at every order, the same as #418's `dim_tags` `N3,N0,N1,N2` and as the kernels' row-major arrays; the passes fused as deep as each pair allows, one loop deeper refused with its pair, and what passes between them kept a row and a slab at a time; and the three launches a device runs, every node on a work item, which `benchmarks/hexahedra.py` times |
-| `advection.py` | grudge #418's weak advection right-hand side on hexahedra, from grudge's own geometry: the upwind flux at every face node, the neighbor's value gathered through the face maps and in bounds by type; the volume term and the lift with the inverse mass pushed inward, the rearrangement two theorems state for every order, and a third that the lift onto the face nodes is the face gather's transpose; the kernels fused on the element and one loop deeper refused with its pair, the fluxes kept an element at a time; every split a device runs (libParanumal's volume and surface, the fluxes first, three launches, one, one from the metric terms) checked before it runs; and libParanumal's lift onto the face nodes, refused without its barriers with the edge node two faces update, and accepted atomic. `benchmarks/advection.py` times them |
+| `advection.py` | grudge #418's weak advection right-hand side on hexahedra, from grudge's own geometry: the upwind flux at every face node, the neighbor's value gathered through the face maps and in bounds by type; the volume term and the lift derived from grudge's dense operator by the two theorems that push the inverse mass inward, under the condition on the tables that `M^-1 M` is the identity, tested at their digits, with `M^-1 S^T` and the lift's columns computed once; a third theorem that the lift onto the face nodes is the face gather's transpose; the kernels fused on the element and one loop deeper refused with its pair, the fluxes kept an element at a time; every split a device runs (libParanumal's volume and surface, the fluxes first, three launches, one, one from the metric terms) checked before it runs; and libParanumal's lift onto the face nodes, refused without its barriers with the edge node two faces update, and accepted atomic. `benchmarks/advection.py` times them |
 
 Run them with `uv run` from the repository root:
 
@@ -2087,14 +2087,34 @@ whose value the condition chooses, `?:` in C. The inverse mass is pushed inward,
 the volume term is one pass of `D = M^-1 S^T` along each axis and a face's
 term the column `M^-1 e` of its end, and the two theorems
 `inverse_mass_inward` and `lift_inward` state that rearrangement for every
-order. A third, `lift_is_the_gather_transposed`, says that adding each face
+order, under the hypothesis `inverse`, that `M^-1` is the mass's inverse:
+`M^-1 M` is one on its diagonal and zero off it. A third,
+`lift_is_the_gather_transposed`, says that adding each face
 node's value into the node it sits on, as `lift_on_faces` lifts with the
 GLL quadrature's mass, is the transpose of the face gather the flux reads
 through, for any face map and every order; with the field `1`, the lift
-keeps the element's total. With Mathlib all three read `proved`.
+keeps the element's total; `main` checks it on the face maps.
 `benchmarks/advection.py` compares the right-hand side with grudge's
 own on a warped periodic mesh, where it agrees to a few units in the 15th
 digit.
+
+`weak_rhs` is grudge's operator as the math says it, dense: the inverse
+mass on every axis of the weak divergence, less the face mass. It stores
+the field times the velocity along each axis with that axis last, so each
+direction's term is one Kronecker product, `M (x) M (x) S^T`, which
+`inverse_mass_inward` matches in all three, and `lift_inward` matches all
+six faces, each over its own two axes. `derived =
+Schedule(weak_rhs).rewrite(weak_rhs.rhs, by=(inverse_mass_inward,
+lift_inward), keep=("D", "L"))` reads "weak_rhs, with rhs rewritten by the
+inverse mass pushed inward and the lift pushed inward, keeping D and L",
+and compiles to what `volume` and `lift` compute. Its rows are each
+theorem's step, over the reals wherever `M^-1 M` is the identity; that
+condition on the tables, tested at their digits on the example inputs
+(`np.linalg.inv`'s inverse is one to the last digits, not exactly); `D`
+and `L`, the sums of tables the right sides read, computed once before the
+elements and read where the sums were; and the compiled run against the
+native dense kernel. The mass, cancelled, is read nowhere: the schedule
+takes it, and the compiled code does not.
 
 The lift at a node reads the fluxes of the six faces through it, so the flux
 kernel fuses with the volume term and the lift on the element and no
@@ -2116,14 +2136,19 @@ $ uv run python examples/advection.py
 order 3, 2**3 periodic hexahedra: the right-hand side is grudge's, inverse mass and all, to 1e-13 of the largest value: True (M^-1 M is the identity: True)
 the lift onto the face nodes is the transpose of the face gather on these maps: True
 
-refused: fuse(advection_rhs.upwind.b, advection_rhs.volume.i) illegal: flux[e, f, a, b] = upwind_flux(...) (advection.py:303) at e=0, f=1, a=0, b=0 writes flux[0, 1, 0, 0], read by rhs[e, k, j, i] = ... (advection.py:355) at e=0, k=0, j=0, i=0, scheduled earlier (at n=4, ne=8, as hinted); fuse(advection_rhs.upwind.f, advection_rhs.volume.k, shift=(0, 5)) runs every dependence between them forward
+derived: Schedule(weak_rhs, target='c').rewrite(weak_rhs.rhs, by=(inverse_mass_inward, lift_inward), keep=('D', 'L'))
+  D computed once, before rhs
+  L computed once, before rhs
+  the compiled derived rhs is volume and lift's, from the same fluxes, to 1e-13 of the largest value: True
+
+refused: fuse(advection_rhs.upwind.b, advection_rhs.volume.i) illegal: flux[e, f, a, b] = upwind_flux(...) (advection.py:331) at e=0, f=1, a=0, b=0 writes flux[0, 1, 0, 0], read by rhs[e, k, j, i] = ... (advection.py:383) at e=0, k=0, j=0, i=0, scheduled earlier (at n=4, ne=8, as hinted); fuse(advection_rhs.upwind.f, advection_rhs.volume.k, shift=(0, 5)) runs every dependence between them forward
 
 accepted: Schedule(advection_rhs, target='c').substitute(advection_rhs.V).substitute(advection_rhs.vn).fuse(advection_rhs.volume.i, advection_rhs.lift.i).fuse(advection_rhs.upwind.e, advection_rhs.volume.e).contract(advection_rhs.flux, lambda e, f, a, b: (f, a, b))
   flux kept in lambda e, f, a, b: (f, a, b)
   rhs: difference 0 within 1.01e-06 (approx) -> tested
 
 libParanumal's lift onto the face nodes, a face's nodes on the work items:
-  refused: tag({lift_on_faces.e: 'g.0', lift_on_faces.a: 'l.1', lift_on_faces.b: 'l.0'}) illegal: rhs[e, last, a, b] -= ... (advection.py:383) at e=0, a=1, b=0 and rhs[e, a, b, 0] -= ... (advection.py:385) at e=0, a=3, b=1 both update rhs[0, 3, 1, 0] (at n=4, ne=8, as hinted), and the loop lift_on_faces.b on l.0 runs them on two work items, so one can overwrite what the other added; make the updates atomic, with atomic(lift_on_faces.rhs) before this step
+  refused: tag({lift_on_faces.e: 'g.0', lift_on_faces.a: 'l.1', lift_on_faces.b: 'l.0'}) illegal: rhs[e, last, a, b] -= ... (advection.py:411) at e=0, a=1, b=0 and rhs[e, a, b, 0] -= ... (advection.py:413) at e=0, a=3, b=1 both update rhs[0, 3, 1, 0] (at n=4, ne=8, as hinted), and the loop lift_on_faces.b on l.0 runs them on two work items, so one can overwrite what the other added; make the updates atomic, with atomic(lift_on_faces.rhs) before this step
   accepted: atomic(lift_on_faces.rhs).tag({lift_on_faces.e: 'g.0', lift_on_faces.a: 'l.1', lift_on_faces.b: 'l.0'}): 3 facts, all decided
 
 on a device, each split's launches, every node on a work item:
@@ -2144,189 +2169,314 @@ on a device, each split's launches, every node on a work item:
 $ uv run lanky check examples/advection.py
 STATUS   BY             WHERE             OWNER                          STATEMENT
 -------  -------------  ----------------  -----------------------------  ----------------------------------------------------------------------------------------------------
-tested   property-test  advection.py:129  inverse_mass_inward            n : Nat, Mi : Fn[Fin(n), Fin(n), Real], S : Fn[Fin(n), Fin(n), Real], M : Fn[Fin(n), Fin(n), Real],
+tested   property-test  advection.py:153  inverse_mass_inward            n : Nat, Mi : Fn[Fin(n), Fin(n), Real], S : Fn[Fin(n), Fin(n), Real], M : Fn[Fin(n), Fin(n), Real],
                                                                            w : Fn[Fin(n), Fin(n), Fin(n), Real], k : Fin(n), j : Fin(n), i : Fin(n)
+                                                                         | inverse: (forall p in Fin(n). sum(Mi[p, c]*M[c, p] for c in Fin(n)) == 1)
+                                                                             and (forall p in Fin(n), q in Fin(n) where p != q. sum(Mi[p, c]*M[c, q] for c in Fin(n)) == 0)
                                                                          |- sum(Mi[k, c]*Mi[j, b]*Mi[i, a]*sum(M[c, t]*M[b, s]*S[a, r]*w[t, s, r] for t in Fin(n),
                                                                                  s in Fin(n), r in Fin(n)) for c in Fin(n), b in Fin(n), a in Fin(n))
-                                                                             == sum(sum(Mi[k, c]*M[c, t] for c in Fin(n))*sum(Mi[j, b]*M[b, s]
-                                                                                 for b in Fin(n))*sum(Mi[i, a]*S[a, r] for a in Fin(n))*w[t, s, r] for t in Fin(n),
-                                                                               s in Fin(n), r in Fin(n))
-tested   python         advection.py:129  inverse_mass_inward            the term computes what the annotations compute
-tested   property-test  advection.py:171  lift_inward                    n : Nat, Mi : Fn[Fin(n), Fin(n), Real], M : Fn[Fin(n), Fin(n), Real], end : Fn[Fin(n), Real],
+                                                                             == sum(sum(Mi[i, a]*S[a, r] for a in Fin(n))*w[k, j, r] for r in Fin(n))
+tested   python         advection.py:153  inverse_mass_inward            the term computes what the annotations compute
+tested   property-test  advection.py:197  lift_inward                    n : Nat, Mi : Fn[Fin(n), Fin(n), Real], M : Fn[Fin(n), Fin(n), Real], end : Fn[Fin(n), Real],
                                                                            g : Fn[Fin(n), Fin(n), Real], k : Fin(n), j : Fin(n), i : Fin(n)
+                                                                         | inverse: (forall p in Fin(n). sum(Mi[p, c]*M[c, p] for c in Fin(n)) == 1)
+                                                                             and (forall p in Fin(n), q in Fin(n) where p != q. sum(Mi[p, c]*M[c, q] for c in Fin(n)) == 0)
                                                                          |- sum(Mi[k, c]*Mi[j, b]*Mi[i, a]*(end[a]*sum(M[c, t]*M[b, s]*g[t, s] for t in Fin(n), s in Fin(n)))
-                                                                               for c in Fin(n), b in Fin(n), a in Fin(n))
-                                                                             == sum(Mi[i, a]*end[a]
-                                                                               for a in Fin(n))*sum(sum(Mi[k, c]*M[c, t] for c in Fin(n))*sum(Mi[j, b]*M[b, s]
-                                                                                 for b in Fin(n))*g[t, s] for t in Fin(n), s in Fin(n))
-tested   python         advection.py:171  lift_inward                    the term computes what the annotations compute
-tested   property-test  advection.py:206  lift_is_the_gather_transposed  faces : Nat, n : Nat, nodes : Nat, node : Fn[Fin(faces), Fin(n), Fin(n), Fin(nodes)],
+                                                                               for c in Fin(n), b in Fin(n), a in Fin(n)) == sum(Mi[i, a]*end[a] for a in Fin(n))*g[k, j]
+tested   python         advection.py:197  lift_inward                    the term computes what the annotations compute
+tested   property-test  advection.py:234  lift_is_the_gather_transposed  faces : Nat, n : Nat, nodes : Nat, node : Fn[Fin(faces), Fin(n), Fin(n), Fin(nodes)],
                                                                            g : Fn[Fin(faces), Fin(n), Fin(n), Real], u : Fn[Fin(nodes), Real]
                                                                          |- sum(sum(g[f, a, b] for f in Fin(faces), a in Fin(n), b in Fin(n) if node[f, a, b] == x)*u[x]
                                                                                for x in Fin(nodes))
                                                                              == sum(g[f, a, b]*u[node[f, a, b]] for f in Fin(faces), a in Fin(n), b in Fin(n))
-tested   python         advection.py:206  lift_is_the_gather_transposed  the term computes what the annotations compute
-decided  isl            advection.py:260  reference_velocity             V[d, e, k, j, i] is in bounds for every instance of V[d, e, k, j, i] = ... (advection.py:260)
-decided  isl            advection.py:260  reference_velocity             G[d, e, k, j, i] is in bounds for every instance of V[d, e, k, j, i] = ... (advection.py:260)
-decided  isl            advection.py:260  reference_velocity             v[0] is in bounds for every instance of V[d, e, k, j, i] = ... (advection.py:260)
-decided  isl            advection.py:260  reference_velocity             G[3 + d, e, k, j, i] is in bounds for every instance of V[d, e, k, j, i] = ... (advection.py:260)
-decided  isl            advection.py:260  reference_velocity             v[1] is in bounds for every instance of V[d, e, k, j, i] = ... (advection.py:260)
-decided  isl            advection.py:260  reference_velocity             G[6 + d, e, k, j, i] is in bounds for every instance of V[d, e, k, j, i] = ... (advection.py:260)
-decided  isl            advection.py:260  reference_velocity             v[2] is in bounds for every instance of V[d, e, k, j, i] = ... (advection.py:260)
-decided  isl            advection.py:260  reference_velocity             distinct instances of V[d, e, k, j, i] = ... (advection.py:260) write distinct cells of V
-decided  isl            advection.py:248  reference_velocity             the source order runs every dependence forward in time
-tested   interpreter    advection.py:248  reference_velocity             the traced term computes what the body computes
-decided  isl            advection.py:276  normal_velocity                vn[e, f, a, b] is in bounds for every instance of vn[e, f, a, b] = ... (advection.py:276)
-decided  isl            advection.py:276  normal_velocity                sJ[e, f, a, b] is in bounds for every instance of vn[e, f, a, b] = ... (advection.py:276)
-decided  isl            advection.py:276  normal_velocity                normal[0, e, f, a, b] is in bounds for every instance of vn[e, f, a, b] = ... (advection.py:276)
-decided  isl            advection.py:276  normal_velocity                v[0] is in bounds for every instance of vn[e, f, a, b] = ... (advection.py:276)
-decided  isl            advection.py:276  normal_velocity                normal[1, e, f, a, b] is in bounds for every instance of vn[e, f, a, b] = ... (advection.py:276)
-decided  isl            advection.py:276  normal_velocity                v[1] is in bounds for every instance of vn[e, f, a, b] = ... (advection.py:276)
-decided  isl            advection.py:276  normal_velocity                normal[2, e, f, a, b] is in bounds for every instance of vn[e, f, a, b] = ... (advection.py:276)
-decided  isl            advection.py:276  normal_velocity                v[2] is in bounds for every instance of vn[e, f, a, b] = ... (advection.py:276)
-decided  isl            advection.py:276  normal_velocity                distinct instances of vn[e, f, a, b] = ... (advection.py:276) write distinct cells of vn
-decided  isl            advection.py:267  normal_velocity                the source order runs every dependence forward in time
-tested   interpreter    advection.py:267  normal_velocity                the traced term computes what the body computes
-decided  isl            advection.py:303  upwind                         flux[e, f, a, b] is in bounds for every instance of flux[e, f, a, b] = upwind_flux(...)
-                                                                           (advection.py:303)
-decided  isl            advection.py:303  upwind                         vn[e, f, a, b] is in bounds for every instance of flux[e, f, a, b] = upwind_flux(...)
-                                                                           (advection.py:303)
-decided  isl            advection.py:303  upwind                         u[e, inside[f, a, b, 0], inside[f, a, b, 1], inside[f, a, b, 2]] is in bounds
-                                                                           for every instance of flux[e, f, a, b] = upwind_flux(...) (advection.py:303)
+tested   python         advection.py:234  lift_is_the_gather_transposed  the term computes what the annotations compute
+decided  isl            advection.py:288  reference_velocity             V[d, e, k, j, i] is in bounds for every instance of V[d, e, k, j, i] = ... (advection.py:288)
+decided  isl            advection.py:288  reference_velocity             G[d, e, k, j, i] is in bounds for every instance of V[d, e, k, j, i] = ... (advection.py:288)
+decided  isl            advection.py:288  reference_velocity             v[0] is in bounds for every instance of V[d, e, k, j, i] = ... (advection.py:288)
+decided  isl            advection.py:288  reference_velocity             G[3 + d, e, k, j, i] is in bounds for every instance of V[d, e, k, j, i] = ... (advection.py:288)
+decided  isl            advection.py:288  reference_velocity             v[1] is in bounds for every instance of V[d, e, k, j, i] = ... (advection.py:288)
+decided  isl            advection.py:288  reference_velocity             G[6 + d, e, k, j, i] is in bounds for every instance of V[d, e, k, j, i] = ... (advection.py:288)
+decided  isl            advection.py:288  reference_velocity             v[2] is in bounds for every instance of V[d, e, k, j, i] = ... (advection.py:288)
+decided  isl            advection.py:288  reference_velocity             distinct instances of V[d, e, k, j, i] = ... (advection.py:288) write distinct cells of V
+decided  isl            advection.py:276  reference_velocity             the source order runs every dependence forward in time
+tested   interpreter    advection.py:276  reference_velocity             the traced term computes what the body computes
+decided  isl            advection.py:304  normal_velocity                vn[e, f, a, b] is in bounds for every instance of vn[e, f, a, b] = ... (advection.py:304)
+decided  isl            advection.py:304  normal_velocity                sJ[e, f, a, b] is in bounds for every instance of vn[e, f, a, b] = ... (advection.py:304)
+decided  isl            advection.py:304  normal_velocity                normal[0, e, f, a, b] is in bounds for every instance of vn[e, f, a, b] = ... (advection.py:304)
+decided  isl            advection.py:304  normal_velocity                v[0] is in bounds for every instance of vn[e, f, a, b] = ... (advection.py:304)
+decided  isl            advection.py:304  normal_velocity                normal[1, e, f, a, b] is in bounds for every instance of vn[e, f, a, b] = ... (advection.py:304)
+decided  isl            advection.py:304  normal_velocity                v[1] is in bounds for every instance of vn[e, f, a, b] = ... (advection.py:304)
+decided  isl            advection.py:304  normal_velocity                normal[2, e, f, a, b] is in bounds for every instance of vn[e, f, a, b] = ... (advection.py:304)
+decided  isl            advection.py:304  normal_velocity                v[2] is in bounds for every instance of vn[e, f, a, b] = ... (advection.py:304)
+decided  isl            advection.py:304  normal_velocity                distinct instances of vn[e, f, a, b] = ... (advection.py:304) write distinct cells of vn
+decided  isl            advection.py:295  normal_velocity                the source order runs every dependence forward in time
+tested   interpreter    advection.py:295  normal_velocity                the traced term computes what the body computes
+decided  isl            advection.py:331  upwind                         flux[e, f, a, b] is in bounds for every instance of flux[e, f, a, b] = upwind_flux(...)
+                                                                           (advection.py:331)
+decided  isl            advection.py:331  upwind                         vn[e, f, a, b] is in bounds for every instance of flux[e, f, a, b] = upwind_flux(...)
+                                                                           (advection.py:331)
+decided  isl            advection.py:331  upwind                         u[e, inside[f, a, b, 0], inside[f, a, b, 1], inside[f, a, b, 2]] is in bounds
+                                                                           for every instance of flux[e, f, a, b] = upwind_flux(...) (advection.py:331)
                                                                            (inside[f, a, b, 0] : Fin(n), inside[f, a, b, 1] : Fin(n), inside[f, a, b, 2] : Fin(n), by type)
-decided  isl            advection.py:303  upwind                         inside[f, a, b, 0] is in bounds for every instance of flux[e, f, a, b] = upwind_flux(...)
-                                                                           (advection.py:303)
-decided  isl            advection.py:303  upwind                         inside[f, a, b, 1] is in bounds for every instance of flux[e, f, a, b] = upwind_flux(...)
-                                                                           (advection.py:303)
-decided  isl            advection.py:303  upwind                         inside[f, a, b, 2] is in bounds for every instance of flux[e, f, a, b] = upwind_flux(...)
-                                                                           (advection.py:303)
-decided  type           advection.py:303  upwind                         u[nbr[e, f], outside[f, a, b, 0], outside[f, a, b, 1], outside[f, a, b, 2]] is in bounds by type
+decided  isl            advection.py:331  upwind                         inside[f, a, b, 0] is in bounds for every instance of flux[e, f, a, b] = upwind_flux(...)
+                                                                           (advection.py:331)
+decided  isl            advection.py:331  upwind                         inside[f, a, b, 1] is in bounds for every instance of flux[e, f, a, b] = upwind_flux(...)
+                                                                           (advection.py:331)
+decided  isl            advection.py:331  upwind                         inside[f, a, b, 2] is in bounds for every instance of flux[e, f, a, b] = upwind_flux(...)
+                                                                           (advection.py:331)
+decided  type           advection.py:331  upwind                         u[nbr[e, f], outside[f, a, b, 0], outside[f, a, b, 1], outside[f, a, b, 2]] is in bounds by type
                                                                            (nbr[e, f] : Fin(ne), outside[f, a, b, 0] : Fin(n), outside[f, a, b, 1] : Fin(n),
                                                                              outside[f, a, b, 2] : Fin(n))
-decided  isl            advection.py:303  upwind                         nbr[e, f] is in bounds for every instance of flux[e, f, a, b] = upwind_flux(...) (advection.py:303)
-decided  isl            advection.py:303  upwind                         outside[f, a, b, 0] is in bounds for every instance of flux[e, f, a, b] = upwind_flux(...)
-                                                                           (advection.py:303)
-decided  isl            advection.py:303  upwind                         outside[f, a, b, 1] is in bounds for every instance of flux[e, f, a, b] = upwind_flux(...)
-                                                                           (advection.py:303)
-decided  isl            advection.py:303  upwind                         outside[f, a, b, 2] is in bounds for every instance of flux[e, f, a, b] = upwind_flux(...)
-                                                                           (advection.py:303)
-decided  isl            advection.py:303  upwind                         distinct instances of flux[e, f, a, b] = upwind_flux(...) (advection.py:303) write
+decided  isl            advection.py:331  upwind                         nbr[e, f] is in bounds for every instance of flux[e, f, a, b] = upwind_flux(...) (advection.py:331)
+decided  isl            advection.py:331  upwind                         outside[f, a, b, 0] is in bounds for every instance of flux[e, f, a, b] = upwind_flux(...)
+                                                                           (advection.py:331)
+decided  isl            advection.py:331  upwind                         outside[f, a, b, 1] is in bounds for every instance of flux[e, f, a, b] = upwind_flux(...)
+                                                                           (advection.py:331)
+decided  isl            advection.py:331  upwind                         outside[f, a, b, 2] is in bounds for every instance of flux[e, f, a, b] = upwind_flux(...)
+                                                                           (advection.py:331)
+decided  isl            advection.py:331  upwind                         distinct instances of flux[e, f, a, b] = upwind_flux(...) (advection.py:331) write
                                                                            distinct cells of flux
-decided  isl            advection.py:292  upwind                         the source order runs every dependence forward in time
-tested   interpreter    advection.py:292  upwind                         the traced term computes what the body computes
-decided  isl            advection.py:330  volume                         rhs[e, k, j, i] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:330)
-decided  isl            advection.py:330  volume                         invJ[e, k, j, i] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:330)
-decided  isl            advection.py:330  volume                         D[i, a] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:330)
-decided  isl            advection.py:330  volume                         V[0, e, k, j, a] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:330)
-decided  isl            advection.py:330  volume                         u[e, k, j, a] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:330)
-decided  isl            advection.py:330  volume                         D[j, b] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:330)
-decided  isl            advection.py:330  volume                         V[1, e, k, b, i] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:330)
-decided  isl            advection.py:330  volume                         u[e, k, b, i] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:330)
-decided  isl            advection.py:330  volume                         D[k, c] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:330)
-decided  isl            advection.py:330  volume                         V[2, e, c, j, i] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:330)
-decided  isl            advection.py:330  volume                         u[e, c, j, i] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:330)
-decided  isl            advection.py:330  volume                         distinct instances of rhs[e, k, j, i] = ... (advection.py:330) write distinct cells of rhs
-decided  isl            advection.py:320  volume                         the source order runs every dependence forward in time
-decided  type           advection.py:330  volume                         the accumulation into rhs[e, k, j, i] over a is approx
-decided  type           advection.py:330  volume                         the accumulation into rhs[e, k, j, i] over b is approx
-decided  type           advection.py:330  volume                         the accumulation into rhs[e, k, j, i] over c is approx
-tested   interpreter    advection.py:320  volume                         the traced term computes what the body computes
-decided  isl            advection.py:355  lift                           rhs[e, k, j, i] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:355)
-decided  isl            advection.py:355  lift                           invJ[e, k, j, i] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:355)
-decided  isl            advection.py:355  lift                           L[0, k] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:355)
-decided  isl            advection.py:355  lift                           flux[e, 0, j, i] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:355)
-decided  isl            advection.py:355  lift                           L[1, k] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:355)
-decided  isl            advection.py:355  lift                           flux[e, 1, j, i] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:355)
-decided  isl            advection.py:355  lift                           L[0, i] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:355)
-decided  isl            advection.py:355  lift                           flux[e, 2, k, j] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:355)
-decided  isl            advection.py:355  lift                           L[1, i] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:355)
-decided  isl            advection.py:355  lift                           flux[e, 3, k, j] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:355)
-decided  isl            advection.py:355  lift                           L[0, j] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:355)
-decided  isl            advection.py:355  lift                           flux[e, 4, k, i] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:355)
-decided  isl            advection.py:355  lift                           L[1, j] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:355)
-decided  isl            advection.py:355  lift                           flux[e, 5, k, i] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:355)
-decided  isl            advection.py:355  lift                           distinct instances of rhs[e, k, j, i] = ... (advection.py:355) write distinct cells of rhs
-decided  isl            advection.py:346  lift                           the source order runs every dependence forward in time
-tested   interpreter    advection.py:346  lift                           the traced term computes what the body computes
-decided  isl            advection.py:382  lift_on_faces                  rhs[e, 0, a, b] is in bounds for every instance of rhs[e, 0, a, b] -= ... (advection.py:382)
-decided  isl            advection.py:382  lift_on_faces                  invJ[e, 0, a, b] is in bounds for every instance of rhs[e, 0, a, b] -= ... (advection.py:382)
-decided  isl            advection.py:382  lift_on_faces                  ends[0] is in bounds for every instance of rhs[e, 0, a, b] -= ... (advection.py:382)
-decided  isl            advection.py:382  lift_on_faces                  flux[e, 0, a, b] is in bounds for every instance of rhs[e, 0, a, b] -= ... (advection.py:382)
-decided  isl            advection.py:383  lift_on_faces                  rhs[e, n - 1, a, b] is in bounds for every instance of rhs[e, last, a, b] -= ... (advection.py:383)
-decided  isl            advection.py:383  lift_on_faces                  invJ[e, n - 1, a, b] is in bounds for every instance of rhs[e, last, a, b] -= ... (advection.py:383)
-decided  isl            advection.py:383  lift_on_faces                  ends[1] is in bounds for every instance of rhs[e, last, a, b] -= ... (advection.py:383)
-decided  isl            advection.py:383  lift_on_faces                  flux[e, 1, a, b] is in bounds for every instance of rhs[e, last, a, b] -= ... (advection.py:383)
-decided  isl            advection.py:385  lift_on_faces                  rhs[e, a, b, 0] is in bounds for every instance of rhs[e, a, b, 0] -= ... (advection.py:385)
-decided  isl            advection.py:385  lift_on_faces                  invJ[e, a, b, 0] is in bounds for every instance of rhs[e, a, b, 0] -= ... (advection.py:385)
-decided  isl            advection.py:385  lift_on_faces                  ends[0] is in bounds for every instance of rhs[e, a, b, 0] -= ... (advection.py:385)
-decided  isl            advection.py:385  lift_on_faces                  flux[e, 2, a, b] is in bounds for every instance of rhs[e, a, b, 0] -= ... (advection.py:385)
-decided  isl            advection.py:386  lift_on_faces                  rhs[e, a, b, n - 1] is in bounds for every instance of rhs[e, a, b, last] -= ... (advection.py:386)
-decided  isl            advection.py:386  lift_on_faces                  invJ[e, a, b, n - 1] is in bounds for every instance of rhs[e, a, b, last] -= ... (advection.py:386)
-decided  isl            advection.py:386  lift_on_faces                  ends[1] is in bounds for every instance of rhs[e, a, b, last] -= ... (advection.py:386)
-decided  isl            advection.py:386  lift_on_faces                  flux[e, 3, a, b] is in bounds for every instance of rhs[e, a, b, last] -= ... (advection.py:386)
-decided  isl            advection.py:388  lift_on_faces                  rhs[e, a, 0, b] is in bounds for every instance of rhs[e, a, 0, b] -= ... (advection.py:388)
-decided  isl            advection.py:388  lift_on_faces                  invJ[e, a, 0, b] is in bounds for every instance of rhs[e, a, 0, b] -= ... (advection.py:388)
-decided  isl            advection.py:388  lift_on_faces                  ends[0] is in bounds for every instance of rhs[e, a, 0, b] -= ... (advection.py:388)
-decided  isl            advection.py:388  lift_on_faces                  flux[e, 4, a, b] is in bounds for every instance of rhs[e, a, 0, b] -= ... (advection.py:388)
-decided  isl            advection.py:389  lift_on_faces                  rhs[e, a, n - 1, b] is in bounds for every instance of rhs[e, a, last, b] -= ... (advection.py:389)
-decided  isl            advection.py:389  lift_on_faces                  invJ[e, a, n - 1, b] is in bounds for every instance of rhs[e, a, last, b] -= ... (advection.py:389)
-decided  isl            advection.py:389  lift_on_faces                  ends[1] is in bounds for every instance of rhs[e, a, last, b] -= ... (advection.py:389)
-decided  isl            advection.py:389  lift_on_faces                  flux[e, 5, a, b] is in bounds for every instance of rhs[e, a, last, b] -= ... (advection.py:389)
-decided  isl            advection.py:382  lift_on_faces                  distinct instances of rhs[e, 0, a, b] -= ... (advection.py:382) write distinct cells of rhs
-decided  isl            advection.py:383  lift_on_faces                  distinct instances of rhs[e, last, a, b] -= ... (advection.py:383) write distinct cells of rhs
-decided  isl            advection.py:385  lift_on_faces                  distinct instances of rhs[e, a, b, 0] -= ... (advection.py:385) write distinct cells of rhs
-decided  isl            advection.py:386  lift_on_faces                  distinct instances of rhs[e, a, b, last] -= ... (advection.py:386) write distinct cells of rhs
-decided  isl            advection.py:388  lift_on_faces                  distinct instances of rhs[e, a, 0, b] -= ... (advection.py:388) write distinct cells of rhs
-decided  isl            advection.py:389  lift_on_faces                  distinct instances of rhs[e, a, last, b] -= ... (advection.py:389) write distinct cells of rhs
-decided  isl            advection.py:366  lift_on_faces                  the source order runs every dependence forward in time
-tested   interpreter    advection.py:366  lift_on_faces                  the traced term computes what the body computes
-decided  isl            advection.py:303  advection_rhs                  u[e, inside[f, a, b, 0], inside[f, a, b, 1], inside[f, a, b, 2]] is in bounds
-                                                                           for every instance of flux[e, f, a, b] = upwind_flux(...) (advection.py:303),
-                                                                           where upwind is called at advection.py:401
-decided  isl            advection.py:402  advection_rhs                  every cell of V that volume reads, reference_velocity stored before it
-decided  isl            advection.py:401  advection_rhs                  every cell of vn that upwind reads, normal_velocity stored before it
-decided  isl            advection.py:403  advection_rhs                  every cell of flux that lift reads, upwind stored before it
-tested   interpreter    advection.py:392  advection_rhs                  the traced term computes what the body computes
-decided  isl            advection.py:396  advection_rhs                  every cell of advection_rhs.V that advection_rhs reads,
+decided  isl            advection.py:320  upwind                         the source order runs every dependence forward in time
+tested   interpreter    advection.py:320  upwind                         the traced term computes what the body computes
+decided  isl            advection.py:358  volume                         rhs[e, k, j, i] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:358)
+decided  isl            advection.py:358  volume                         invJ[e, k, j, i] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:358)
+decided  isl            advection.py:358  volume                         D[i, a] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:358)
+decided  isl            advection.py:358  volume                         V[0, e, k, j, a] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:358)
+decided  isl            advection.py:358  volume                         u[e, k, j, a] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:358)
+decided  isl            advection.py:358  volume                         D[j, b] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:358)
+decided  isl            advection.py:358  volume                         V[1, e, k, b, i] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:358)
+decided  isl            advection.py:358  volume                         u[e, k, b, i] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:358)
+decided  isl            advection.py:358  volume                         D[k, c] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:358)
+decided  isl            advection.py:358  volume                         V[2, e, c, j, i] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:358)
+decided  isl            advection.py:358  volume                         u[e, c, j, i] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:358)
+decided  isl            advection.py:358  volume                         distinct instances of rhs[e, k, j, i] = ... (advection.py:358) write distinct cells of rhs
+decided  isl            advection.py:348  volume                         the source order runs every dependence forward in time
+decided  type           advection.py:358  volume                         the accumulation into rhs[e, k, j, i] over a is approx
+decided  type           advection.py:358  volume                         the accumulation into rhs[e, k, j, i] over b is approx
+decided  type           advection.py:358  volume                         the accumulation into rhs[e, k, j, i] over c is approx
+tested   interpreter    advection.py:348  volume                         the traced term computes what the body computes
+decided  isl            advection.py:383  lift                           rhs[e, k, j, i] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:383)
+decided  isl            advection.py:383  lift                           invJ[e, k, j, i] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:383)
+decided  isl            advection.py:383  lift                           L[0, k] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:383)
+decided  isl            advection.py:383  lift                           flux[e, 0, j, i] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:383)
+decided  isl            advection.py:383  lift                           L[1, k] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:383)
+decided  isl            advection.py:383  lift                           flux[e, 1, j, i] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:383)
+decided  isl            advection.py:383  lift                           L[0, i] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:383)
+decided  isl            advection.py:383  lift                           flux[e, 2, k, j] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:383)
+decided  isl            advection.py:383  lift                           L[1, i] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:383)
+decided  isl            advection.py:383  lift                           flux[e, 3, k, j] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:383)
+decided  isl            advection.py:383  lift                           L[0, j] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:383)
+decided  isl            advection.py:383  lift                           flux[e, 4, k, i] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:383)
+decided  isl            advection.py:383  lift                           L[1, j] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:383)
+decided  isl            advection.py:383  lift                           flux[e, 5, k, i] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:383)
+decided  isl            advection.py:383  lift                           distinct instances of rhs[e, k, j, i] = ... (advection.py:383) write distinct cells of rhs
+decided  isl            advection.py:374  lift                           the source order runs every dependence forward in time
+tested   interpreter    advection.py:374  lift                           the traced term computes what the body computes
+decided  isl            advection.py:410  lift_on_faces                  rhs[e, 0, a, b] is in bounds for every instance of rhs[e, 0, a, b] -= ... (advection.py:410)
+decided  isl            advection.py:410  lift_on_faces                  invJ[e, 0, a, b] is in bounds for every instance of rhs[e, 0, a, b] -= ... (advection.py:410)
+decided  isl            advection.py:410  lift_on_faces                  ends[0] is in bounds for every instance of rhs[e, 0, a, b] -= ... (advection.py:410)
+decided  isl            advection.py:410  lift_on_faces                  flux[e, 0, a, b] is in bounds for every instance of rhs[e, 0, a, b] -= ... (advection.py:410)
+decided  isl            advection.py:411  lift_on_faces                  rhs[e, n - 1, a, b] is in bounds for every instance of rhs[e, last, a, b] -= ... (advection.py:411)
+decided  isl            advection.py:411  lift_on_faces                  invJ[e, n - 1, a, b] is in bounds for every instance of rhs[e, last, a, b] -= ... (advection.py:411)
+decided  isl            advection.py:411  lift_on_faces                  ends[1] is in bounds for every instance of rhs[e, last, a, b] -= ... (advection.py:411)
+decided  isl            advection.py:411  lift_on_faces                  flux[e, 1, a, b] is in bounds for every instance of rhs[e, last, a, b] -= ... (advection.py:411)
+decided  isl            advection.py:413  lift_on_faces                  rhs[e, a, b, 0] is in bounds for every instance of rhs[e, a, b, 0] -= ... (advection.py:413)
+decided  isl            advection.py:413  lift_on_faces                  invJ[e, a, b, 0] is in bounds for every instance of rhs[e, a, b, 0] -= ... (advection.py:413)
+decided  isl            advection.py:413  lift_on_faces                  ends[0] is in bounds for every instance of rhs[e, a, b, 0] -= ... (advection.py:413)
+decided  isl            advection.py:413  lift_on_faces                  flux[e, 2, a, b] is in bounds for every instance of rhs[e, a, b, 0] -= ... (advection.py:413)
+decided  isl            advection.py:414  lift_on_faces                  rhs[e, a, b, n - 1] is in bounds for every instance of rhs[e, a, b, last] -= ... (advection.py:414)
+decided  isl            advection.py:414  lift_on_faces                  invJ[e, a, b, n - 1] is in bounds for every instance of rhs[e, a, b, last] -= ... (advection.py:414)
+decided  isl            advection.py:414  lift_on_faces                  ends[1] is in bounds for every instance of rhs[e, a, b, last] -= ... (advection.py:414)
+decided  isl            advection.py:414  lift_on_faces                  flux[e, 3, a, b] is in bounds for every instance of rhs[e, a, b, last] -= ... (advection.py:414)
+decided  isl            advection.py:416  lift_on_faces                  rhs[e, a, 0, b] is in bounds for every instance of rhs[e, a, 0, b] -= ... (advection.py:416)
+decided  isl            advection.py:416  lift_on_faces                  invJ[e, a, 0, b] is in bounds for every instance of rhs[e, a, 0, b] -= ... (advection.py:416)
+decided  isl            advection.py:416  lift_on_faces                  ends[0] is in bounds for every instance of rhs[e, a, 0, b] -= ... (advection.py:416)
+decided  isl            advection.py:416  lift_on_faces                  flux[e, 4, a, b] is in bounds for every instance of rhs[e, a, 0, b] -= ... (advection.py:416)
+decided  isl            advection.py:417  lift_on_faces                  rhs[e, a, n - 1, b] is in bounds for every instance of rhs[e, a, last, b] -= ... (advection.py:417)
+decided  isl            advection.py:417  lift_on_faces                  invJ[e, a, n - 1, b] is in bounds for every instance of rhs[e, a, last, b] -= ... (advection.py:417)
+decided  isl            advection.py:417  lift_on_faces                  ends[1] is in bounds for every instance of rhs[e, a, last, b] -= ... (advection.py:417)
+decided  isl            advection.py:417  lift_on_faces                  flux[e, 5, a, b] is in bounds for every instance of rhs[e, a, last, b] -= ... (advection.py:417)
+decided  isl            advection.py:410  lift_on_faces                  distinct instances of rhs[e, 0, a, b] -= ... (advection.py:410) write distinct cells of rhs
+decided  isl            advection.py:411  lift_on_faces                  distinct instances of rhs[e, last, a, b] -= ... (advection.py:411) write distinct cells of rhs
+decided  isl            advection.py:413  lift_on_faces                  distinct instances of rhs[e, a, b, 0] -= ... (advection.py:413) write distinct cells of rhs
+decided  isl            advection.py:414  lift_on_faces                  distinct instances of rhs[e, a, b, last] -= ... (advection.py:414) write distinct cells of rhs
+decided  isl            advection.py:416  lift_on_faces                  distinct instances of rhs[e, a, 0, b] -= ... (advection.py:416) write distinct cells of rhs
+decided  isl            advection.py:417  lift_on_faces                  distinct instances of rhs[e, a, last, b] -= ... (advection.py:417) write distinct cells of rhs
+decided  isl            advection.py:394  lift_on_faces                  the source order runs every dependence forward in time
+tested   interpreter    advection.py:394  lift_on_faces                  the traced term computes what the body computes
+decided  isl            advection.py:445  weak_rhs                       w[0, e, k, j, i] is in bounds for every instance of w[0, e, k, j, i] = V[0, e, k, j, i] *
+                                                                           u[e, k, j, i] (advection.py:445)
+decided  isl            advection.py:445  weak_rhs                       V[0, e, k, j, i] is in bounds for every instance of w[0, e, k, j, i] = V[0, e, k, j, i] *
+                                                                           u[e, k, j, i] (advection.py:445)
+decided  isl            advection.py:445  weak_rhs                       u[e, k, j, i] is in bounds for every instance of w[0, e, k, j, i] = V[0, e, k, j, i] * u[e, k, j, i]
+                                                                           (advection.py:445)
+decided  isl            advection.py:446  weak_rhs                       w[1, e, k, i, j] is in bounds for every instance of w[1, e, k, i, j] = V[1, e, k, j, i] *
+                                                                           u[e, k, j, i] (advection.py:446)
+decided  isl            advection.py:446  weak_rhs                       V[1, e, k, j, i] is in bounds for every instance of w[1, e, k, i, j] = V[1, e, k, j, i] *
+                                                                           u[e, k, j, i] (advection.py:446)
+decided  isl            advection.py:446  weak_rhs                       u[e, k, j, i] is in bounds for every instance of w[1, e, k, i, j] = V[1, e, k, j, i] * u[e, k, j, i]
+                                                                           (advection.py:446)
+decided  isl            advection.py:447  weak_rhs                       w[2, e, j, i, k] is in bounds for every instance of w[2, e, j, i, k] = V[2, e, k, j, i] *
+                                                                           u[e, k, j, i] (advection.py:447)
+decided  isl            advection.py:447  weak_rhs                       V[2, e, k, j, i] is in bounds for every instance of w[2, e, j, i, k] = V[2, e, k, j, i] *
+                                                                           u[e, k, j, i] (advection.py:447)
+decided  isl            advection.py:447  weak_rhs                       u[e, k, j, i] is in bounds for every instance of w[2, e, j, i, k] = V[2, e, k, j, i] * u[e, k, j, i]
+                                                                           (advection.py:447)
+decided  isl            advection.py:449  weak_rhs                       rhs[e_0, k_0, j_0, i_0] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:449)
+decided  isl            advection.py:449  weak_rhs                       invJ[e_0, k_0, j_0, i_0] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:449)
+decided  isl            advection.py:449  weak_rhs                       Mi[k_0, c] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:449)
+decided  isl            advection.py:449  weak_rhs                       Mi[j_0, b] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:449)
+decided  isl            advection.py:449  weak_rhs                       Mi[i_0, a] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:449)
+decided  isl            advection.py:449  weak_rhs                       M[c, t] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:449)
+decided  isl            advection.py:449  weak_rhs                       M[b, s] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:449)
+decided  isl            advection.py:449  weak_rhs                       S[a, r] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:449)
+decided  isl            advection.py:449  weak_rhs                       w[0, e_0, t, s, r] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:449)
+decided  isl            advection.py:449  weak_rhs                       Mi[i_0, b] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:449)
+decided  isl            advection.py:449  weak_rhs                       Mi[j_0, a] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:449)
+decided  isl            advection.py:449  weak_rhs                       w[1, e_0, t, s, r] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:449)
+decided  isl            advection.py:449  weak_rhs                       Mi[j_0, c] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:449)
+decided  isl            advection.py:449  weak_rhs                       Mi[k_0, a] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:449)
+decided  isl            advection.py:449  weak_rhs                       w[2, e_0, t, s, r] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:449)
+decided  isl            advection.py:449  weak_rhs                       ends[0, a] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:449)
+decided  isl            advection.py:449  weak_rhs                       flux[e_0, 0, t, s] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:449)
+decided  isl            advection.py:449  weak_rhs                       ends[1, a] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:449)
+decided  isl            advection.py:449  weak_rhs                       flux[e_0, 1, t, s] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:449)
+decided  isl            advection.py:449  weak_rhs                       flux[e_0, 2, t, s] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:449)
+decided  isl            advection.py:449  weak_rhs                       flux[e_0, 3, t, s] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:449)
+decided  isl            advection.py:449  weak_rhs                       flux[e_0, 4, t, s] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:449)
+decided  isl            advection.py:449  weak_rhs                       flux[e_0, 5, t, s] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:449)
+decided  isl            advection.py:445  weak_rhs                       distinct instances of w[0, e, k, j, i] = V[0, e, k, j, i] * u[e, k, j, i] (advection.py:445) write
+                                                                           distinct cells of w
+decided  isl            advection.py:446  weak_rhs                       distinct instances of w[1, e, k, i, j] = V[1, e, k, j, i] * u[e, k, j, i] (advection.py:446) write
+                                                                           distinct cells of w
+decided  isl            advection.py:447  weak_rhs                       distinct instances of w[2, e, j, i, k] = V[2, e, k, j, i] * u[e, k, j, i] (advection.py:447) write
+                                                                           distinct cells of w
+decided  isl            advection.py:449  weak_rhs                       distinct instances of rhs[e, k, j, i] = ... (advection.py:449) write distinct cells of rhs
+decided  isl            advection.py:449  weak_rhs                       every cell of w that rhs[e, k, j, i] = ...
+                                                                           (advection.py:449) reads was written before the read,
+                                                                           by w[0, e, k, j, i] = V[0, e, k, j, i] * u[e, k, j, i] (advection.py:445),
+                                                                           w[1, e, k, i, j] = V[1, e, k, j, i] * u[e, k, j, i] (advection.py:446)
+                                                                           or w[2, e, j, i, k] = V[2, e, k, j, i] * u[e, k, j, i] (advection.py:447)
+decided  isl            advection.py:420  weak_rhs                       the source order runs every dependence forward in time
+decided  type           advection.py:449  weak_rhs                       the accumulation into rhs[e_0, k_0, j_0, i_0] over c, b, a is approx
+decided  type           advection.py:449  weak_rhs                       the accumulation into rhs[e_0, k_0, j_0, i_0] over t, s, r is approx
+decided  type           advection.py:449  weak_rhs                       the accumulation into rhs[e_0, k_0, j_0, i_0] over c, b, a is approx
+decided  type           advection.py:449  weak_rhs                       the accumulation into rhs[e_0, k_0, j_0, i_0] over t, s, r is approx
+decided  type           advection.py:449  weak_rhs                       the accumulation into rhs[e_0, k_0, j_0, i_0] over c, b, a is approx
+decided  type           advection.py:449  weak_rhs                       the accumulation into rhs[e_0, k_0, j_0, i_0] over t, s, r is approx
+decided  type           advection.py:449  weak_rhs                       the accumulation into rhs[e_0, k_0, j_0, i_0] over c, b, a is approx
+decided  type           advection.py:449  weak_rhs                       the accumulation into rhs[e_0, k_0, j_0, i_0] over t, s is approx
+decided  type           advection.py:449  weak_rhs                       the accumulation into rhs[e_0, k_0, j_0, i_0] over c, b, a is approx
+decided  type           advection.py:449  weak_rhs                       the accumulation into rhs[e_0, k_0, j_0, i_0] over t, s is approx
+decided  type           advection.py:449  weak_rhs                       the accumulation into rhs[e_0, k_0, j_0, i_0] over c, b, a is approx
+decided  type           advection.py:449  weak_rhs                       the accumulation into rhs[e_0, k_0, j_0, i_0] over t, s is approx
+decided  type           advection.py:449  weak_rhs                       the accumulation into rhs[e_0, k_0, j_0, i_0] over c, b, a is approx
+decided  type           advection.py:449  weak_rhs                       the accumulation into rhs[e_0, k_0, j_0, i_0] over t, s is approx
+decided  type           advection.py:449  weak_rhs                       the accumulation into rhs[e_0, k_0, j_0, i_0] over c, b, a is approx
+decided  type           advection.py:449  weak_rhs                       the accumulation into rhs[e_0, k_0, j_0, i_0] over t, s is approx
+decided  type           advection.py:449  weak_rhs                       the accumulation into rhs[e_0, k_0, j_0, i_0] over c, b, a is approx
+decided  type           advection.py:449  weak_rhs                       the accumulation into rhs[e_0, k_0, j_0, i_0] over t, s is approx
+tested   interpreter    advection.py:420  weak_rhs                       the traced term computes what the body computes
+tested   interpreter    advection.py:646  weak_rhs                       rewrite(rhs, by=inverse_mass_inward):
+                                                                           over the reals, what rhs stores is unchanged wherever
+                                                                           (forall p in Fin(n). sum(Mi[p, c]*M[c, p] for c in Fin(n)) == 1)
+                                                                           and (forall p in Fin(n), q in Fin(n) where p != q. sum(Mi[p, c]*M[c, q] for c in Fin(n)) == 0):
+                                                                           sum(Mi[k, c]*Mi[j, b]*Mi[i,
+                                                                               a]*sum(M[c, t]*M[...,
+                                                                                 sum(Mi[k, c]*Mi[i, b]*Mi[j,
+                                                                                     a]*sum(M[c, t]*M[... and 1 more become their inverse mass inwards, in 3 places
+tested   interpreter    advection.py:646  weak_rhs                       rewrite(rhs, by=lift_inward): over the reals,
+                                                                           what rhs stores is unchanged wherever
+                                                                           (forall p in Fin(n). sum(Mi[p, c]*M[c, p] for c in Fin(n)) == 1)
+                                                                           and (forall p in Fin(n), q in Fin(n) where p != q. sum(Mi[p, c]*M[c, q] for c in Fin(n)) == 0):
+                                                                           sum(Mi[j, c]*Mi[i, b]*Mi[k, a]*(ends[0, a]*su...,
+                                                                               sum(Mi[j, c]*Mi[i, b]*Mi[k, a]*(ends[1, a]*su...
+                                                                                   and 4 more become their lift inwards, in 6 places
+tested   interpreter    advection.py:646  weak_rhs                       keep=(D, L): D and L are computed once, before rhs, over the indices each reads,
+                                                                           and rhs reads them where their sums were (D in 3 places and L in 6 places):
+                                                                           what rhs stores is unchanged
+decided  isl            advection.py:646  weak_rhs                       no cell of D is stored twice, or read before its store
+decided  isl            advection.py:646  weak_rhs                       no cell of L is stored twice, or read before its store
+decided  isl            advection.py:449  weak_rhs                       no cell of rhs is stored twice, or read before its store
+decided  isl            advection.py:445  weak_rhs                       no cell of w is stored twice, or read before its store
+decided  isl            advection.py:646  weak_rhs                       D[i_1, r_0] is in bounds for every instance of D[i, r] = reduce_sum(...) (advection.py:646)
+decided  isl            advection.py:646  weak_rhs                       Mi[i_1, a_0] is in bounds for every instance of D[i, r] = reduce_sum(...) (advection.py:646)
+decided  isl            advection.py:646  weak_rhs                       S[a_0, r_0] is in bounds for every instance of D[i, r] = reduce_sum(...) (advection.py:646)
+decided  isl            advection.py:646  weak_rhs                       L[k_1, p] is in bounds for every instance of L[k, p] = reduce_sum(...) (advection.py:646)
+decided  isl            advection.py:646  weak_rhs                       Mi[k_1, a_1] is in bounds for every instance of L[k, p] = reduce_sum(...) (advection.py:646)
+decided  isl            advection.py:646  weak_rhs                       ends[p, a_1] is in bounds for every instance of L[k, p] = reduce_sum(...) (advection.py:646)
+decided  isl            advection.py:449  weak_rhs                       L[k_0, 0] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:449)
+decided  isl            advection.py:449  weak_rhs                       L[k_0, 1] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:449)
+decided  isl            advection.py:449  weak_rhs                       L[i_0, 0] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:449)
+decided  isl            advection.py:449  weak_rhs                       L[i_0, 1] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:449)
+decided  isl            advection.py:449  weak_rhs                       L[j_0, 0] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:449)
+decided  isl            advection.py:449  weak_rhs                       L[j_0, 1] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:449)
+decided  isl            advection.py:449  weak_rhs                       D[i_0, r] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:449)
+decided  isl            advection.py:449  weak_rhs                       D[j_0, r] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:449)
+decided  isl            advection.py:449  weak_rhs                       D[k_0, r] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:449)
+decided  isl            advection.py:646  weak_rhs                       distinct instances of D[i, r] = reduce_sum(...) (advection.py:646) write distinct cells of D
+decided  isl            advection.py:646  weak_rhs                       distinct instances of L[k, p] = reduce_sum(...) (advection.py:646) write distinct cells of L
+decided  isl            advection.py:449  weak_rhs                       every cell of D that rhs[e, k, j, i] = ...
+                                                                           (advection.py:449) reads was written before the read,
+                                                                           by D[i, r] = reduce_sum(...) (advection.py:646)
+decided  isl            advection.py:449  weak_rhs                       every cell of L that rhs[e, k, j, i] = ...
+                                                                           (advection.py:449) reads was written before the read,
+                                                                           by L[k, p] = reduce_sum(...) (advection.py:646)
+tested   run            advection.py:646  weak_rhs                       (forall p in Fin(n). sum(Mi[p, c]*M[c, p] for c in Fin(n)) == 1)
+                                                                           and (forall p in Fin(n), q in Fin(n) where p != q. sum(Mi[p, c]*M[c, q] for c in Fin(n)) == 0),
+                                                                           which inverse_mass_inward and lift_inward need, at the tables' digits, on the example inputs
+decided  isl            advection.py:646  weak_rhs                       n >= 0 and (k >= 0 and k < n) and (j >= 0 and j < n) and (i >= 0 and i < n) for every k and every j
+                                                                           and every i, which inverse_mass_inward and lift_inward need
+decided  type           advection.py:646  weak_rhs                       after rewrite(rhs, ...), rhs is compared at approx (it was approx)
+tested   run            advection.py:646  weak_rhs                       the compiled derived agrees with the native weak_rhs in rhs at approx,
+                                                                           within 1e-06 of each value (measured 8e-16 of the largest), on its example inputs and 3 drawn ones
+decided  isl            advection.py:331  advection_rhs                  u[e, inside[f, a, b, 0], inside[f, a, b, 1], inside[f, a, b, 2]] is in bounds
+                                                                           for every instance of flux[e, f, a, b] = upwind_flux(...) (advection.py:331),
+                                                                           where upwind is called at advection.py:611
+decided  isl            advection.py:612  advection_rhs                  every cell of V that volume reads, reference_velocity stored before it
+decided  isl            advection.py:611  advection_rhs                  every cell of vn that upwind reads, normal_velocity stored before it
+decided  isl            advection.py:613  advection_rhs                  every cell of flux that lift reads, upwind stored before it
+tested   interpreter    advection.py:602  advection_rhs                  the traced term computes what the body computes
+decided  isl            advection.py:606  advection_rhs                  every cell of advection_rhs.V that advection_rhs reads,
                                                                            advection_rhs.reference_velocity has stored by the time it is read,
                                                                            so advection_rhs runs without the zeros advection_rhs.V is made with
-decided  isl            advection.py:397  advection_rhs                  every cell of advection_rhs.vn that advection_rhs reads,
+decided  isl            advection.py:607  advection_rhs                  every cell of advection_rhs.vn that advection_rhs reads,
                                                                            advection_rhs.normal_velocity has stored by the time it is read,
                                                                            so advection_rhs runs without the zeros advection_rhs.vn is made with
-decided  isl            advection.py:398  advection_rhs                  every cell of advection_rhs.flux that advection_rhs reads,
+decided  isl            advection.py:608  advection_rhs                  every cell of advection_rhs.flux that advection_rhs reads,
                                                                            advection_rhs.upwind has stored by the time it is read,
                                                                            so advection_rhs runs without the zeros advection_rhs.flux is made with
-decided  isl            advection.py:424  advection_rhs                  substitute(advection_rhs.V) renames the instances of advection_rhs one for one
-decided  isl            advection.py:424  advection_rhs                  the order after substitute(advection_rhs.V) runs every dependence of advection_rhs forward
-decided  isl            advection.py:425  advection_rhs                  substitute(advection_rhs.vn) renames the instances of advection_rhs one for one
-decided  isl            advection.py:425  advection_rhs                  the order after substitute(advection_rhs.vn) runs every dependence of advection_rhs forward
-decided  isl            advection.py:426  advection_rhs                  fuse(advection_rhs.volume.i, advection_rhs.lift.i) renames the instances of
+decided  isl            advection.py:634  advection_rhs                  substitute(advection_rhs.V) renames the instances of advection_rhs one for one
+decided  isl            advection.py:634  advection_rhs                  the order after substitute(advection_rhs.V) runs every dependence of advection_rhs forward
+decided  isl            advection.py:635  advection_rhs                  substitute(advection_rhs.vn) renames the instances of advection_rhs one for one
+decided  isl            advection.py:635  advection_rhs                  the order after substitute(advection_rhs.vn) runs every dependence of advection_rhs forward
+decided  isl            advection.py:636  advection_rhs                  fuse(advection_rhs.volume.i, advection_rhs.lift.i) renames the instances of
                                                                            advection_rhs one for one
-decided  isl            advection.py:426  advection_rhs                  the order after fuse(advection_rhs.volume.i, advection_rhs.lift.i) runs every dependence of
+decided  isl            advection.py:636  advection_rhs                  the order after fuse(advection_rhs.volume.i, advection_rhs.lift.i) runs every dependence of
                                                                            advection_rhs forward
-decided  isl            advection.py:427  advection_rhs                  fuse(advection_rhs.upwind.e, advection_rhs.volume.e) renames the instances of
+decided  isl            advection.py:637  advection_rhs                  fuse(advection_rhs.upwind.e, advection_rhs.volume.e) renames the instances of
                                                                            advection_rhs one for one
-decided  isl            advection.py:427  advection_rhs                  the order after fuse(advection_rhs.upwind.e, advection_rhs.volume.e) runs every dependence of
+decided  isl            advection.py:637  advection_rhs                  the order after fuse(advection_rhs.upwind.e, advection_rhs.volume.e) runs every dependence of
                                                                            advection_rhs forward
-decided  isl            advection.py:431  advection_rhs                  no read of advection_rhs.flux sees its slot overwritten after
+decided  isl            advection.py:641  advection_rhs                  no read of advection_rhs.flux sees its slot overwritten after
                                                                            contract(advection_rhs.flux, lambda e, f, a, b: (f, a, b)):
                                                                            advection_rhs.flux kept in 6*n*n cells, flux[e, f, a, b] in slot (f, a, b)
-decided  isl            advection.py:303  folded_rhs                     u[e, inside[f, a, b, 0], inside[f, a, b, 1], inside[f, a, b, 2]] is in bounds
-                                                                           for every instance of flux[e, f, a, b] = upwind_flux(...) (advection.py:303),
-                                                                           where upwind is called at advection.py:410
-decided  isl            advection.py:412  folded_rhs                     every cell of flux that lift reads, upwind stored before it
-tested   interpreter    advection.py:406  folded_rhs                     the traced term computes what the body computes
-decided  isl            advection.py:303  surface                        u[e, inside[f, a, b, 0], inside[f, a, b, 1], inside[f, a, b, 2]] is in bounds
-                                                                           for every instance of flux[e, f, a, b] = upwind_flux(...) (advection.py:303),
-                                                                           where upwind is called at advection.py:438
-decided  isl            advection.py:439  surface                        every cell of flux that lift reads, upwind stored before it
-tested   interpreter    advection.py:434  surface                        the traced term computes what the body computes
-tested   interpreter    advection.py:442  volume_and_lift                the traced term computes what the body computes
+decided  isl            advection.py:331  folded_rhs                     u[e, inside[f, a, b, 0], inside[f, a, b, 1], inside[f, a, b, 2]] is in bounds
+                                                                           for every instance of flux[e, f, a, b] = upwind_flux(...) (advection.py:331),
+                                                                           where upwind is called at advection.py:620
+decided  isl            advection.py:622  folded_rhs                     every cell of flux that lift reads, upwind stored before it
+tested   interpreter    advection.py:616  folded_rhs                     the traced term computes what the body computes
+decided  isl            advection.py:331  surface                        u[e, inside[f, a, b, 0], inside[f, a, b, 1], inside[f, a, b, 2]] is in bounds
+                                                                           for every instance of flux[e, f, a, b] = upwind_flux(...) (advection.py:331),
+                                                                           where upwind is called at advection.py:655
+decided  isl            advection.py:656  surface                        every cell of flux that lift reads, upwind stored before it
+tested   interpreter    advection.py:651  surface                        the traced term computes what the body computes
+tested   interpreter    advection.py:659  volume_and_lift                the traced term computes what the body computes
 
-131 facts: 115 decided, 16 tested
+218 facts: 196 decided, 22 tested
 
-WITHOUT LEAN: inverse_mass_inward, lift_inward, lift_is_the_gather_transposed and 111 more rows are not proved. To have Lean prove what it can: pip install "lanky[lean]", and Lean v4.29.1 from elan (elan default leanprover/lean4:v4.29.1).
-WITHOUT MATHLIB: inverse_mass_inward, lift_inward and lift_is_the_gather_transposed are not proved, since only Lean with Mathlib can state them. To have Lean prove them: python -m lanky.mathlib ~/mathlib (about 7 GB), then export LANKY_LEAN_MATHLIB=~/mathlib.
+WITHOUT LEAN: inverse_mass_inward, lift_inward, lift_is_the_gather_transposed and 175 more rows are not proved. To have Lean prove what it can: pip install "lanky[lean]", and Lean v4.29.1 from elan (elan default leanprover/lean4:v4.29.1).
+WITHOUT MATHLIB: inverse_mass_inward, lift_inward, lift_is_the_gather_transposed and 3 more rows are not proved, since only Lean with Mathlib can state them. To have Lean prove them: python -m lanky.mathlib ~/mathlib (about 7 GB), then export LANKY_LEAN_MATHLIB=~/mathlib.
 ```
 
 ### loopty run examples/advection.py
@@ -2337,6 +2487,9 @@ advection_rhs: Schedule(advection_rhs, target='c').substitute(advection_rhs.V).s
   rhs: difference 0 within 1.01e-06 (approx) -> tested
 advection_rhs: Schedule(advection_rhs, target='c').substitute(advection_rhs.V).substitute(advection_rhs.vn).fuse(advection_rhs.volume.i, advection_rhs.lift.i).fuse(advection_rhs.upwind.e, advection_rhs.volume.e).contract(advection_rhs.flux, lambda e, f, a, b: (f, a, b))
   rhs: difference 0 within 1.01e-06 (approx) -> tested
+weak_rhs: Schedule(weak_rhs, target='c').rewrite(weak_rhs.rhs, by=(inverse_mass_inward, lift_inward), keep=('D', 'L'))
+  w: difference 0 within 1.03e-06 (approx) -> tested
+  rhs: difference 3.55e-15 within 1.26e-06 (approx) -> tested
 reference_velocity: Schedule(reference_velocity, target='c')
   V: difference 0 within 1.07e-06 (approx) -> tested
 normal_velocity: Schedule(normal_velocity, target='c')
@@ -2356,52 +2509,107 @@ surface: Schedule(surface, target='c')
 volume_and_lift: Schedule(volume_and_lift, target='c')
   rhs: difference 0 within 1.03e-06 (approx) -> tested
 
-STATUS   BY     WHERE             OWNER               STATEMENT
--------  -----  ----------------  ------------------  --------------------------------------------------------------------------------------------------
-decided  isl    advection.py:396  advection_rhs       every cell of advection_rhs.V that advection_rhs reads,
-                                                        advection_rhs.reference_velocity has stored by the time it is read,
-                                                        so advection_rhs runs without the zeros advection_rhs.V is made with
-decided  isl    advection.py:397  advection_rhs       every cell of advection_rhs.vn that advection_rhs reads,
-                                                        advection_rhs.normal_velocity has stored by the time it is read,
-                                                        so advection_rhs runs without the zeros advection_rhs.vn is made with
-decided  isl    advection.py:398  advection_rhs       every cell of advection_rhs.flux that advection_rhs reads,
-                                                        advection_rhs.upwind has stored by the time it is read,
-                                                        so advection_rhs runs without the zeros advection_rhs.flux is made with
-decided  isl    advection.py:424  advection_rhs       substitute(advection_rhs.V) renames the instances of advection_rhs one for one
-decided  isl    advection.py:424  advection_rhs       the order after substitute(advection_rhs.V) runs every dependence of advection_rhs forward
-decided  isl    advection.py:425  advection_rhs       substitute(advection_rhs.vn) renames the instances of advection_rhs one for one
-decided  isl    advection.py:425  advection_rhs       the order after substitute(advection_rhs.vn) runs every dependence of advection_rhs forward
-decided  isl    advection.py:426  advection_rhs       fuse(advection_rhs.volume.i, advection_rhs.lift.i) renames the instances of
-                                                        advection_rhs one for one
-decided  isl    advection.py:426  advection_rhs       the order after fuse(advection_rhs.volume.i, advection_rhs.lift.i) runs every dependence of
-                                                        advection_rhs forward
-decided  isl    advection.py:427  advection_rhs       fuse(advection_rhs.upwind.e, advection_rhs.volume.e) renames the instances of
-                                                        advection_rhs one for one
-decided  isl    advection.py:427  advection_rhs       the order after fuse(advection_rhs.upwind.e, advection_rhs.volume.e) runs every dependence of
-                                                        advection_rhs forward
-tested   loopy  advection.py:427  advection_rhs       the scheduled run of advection_rhs agrees with the native run to the accuracy its types state
-decided  isl    advection.py:431  advection_rhs       no read of advection_rhs.flux sees its slot overwritten after
-                                                        contract(advection_rhs.flux, lambda e, f, a, b: (f, a, b)):
-                                                        advection_rhs.flux kept in 6*n*n cells, flux[e, f, a, b] in slot (f, a, b)
-tested   loopy  advection.py:431  advection_rhs       the scheduled run of advection_rhs agrees with the native run to the accuracy its types state
-tested   loopy  advection.py:248  reference_velocity  the scheduled run of reference_velocity agrees with the native run to the accuracy its types state
-tested   loopy  advection.py:267  normal_velocity     the scheduled run of normal_velocity agrees with the native run to the accuracy its types state
-tested   loopy  advection.py:292  upwind              the scheduled run of upwind agrees with the native run to the accuracy its types state
-tested   loopy  advection.py:320  volume              the scheduled run of volume agrees with the native run to the accuracy its types state
-tested   loopy  advection.py:346  lift                the scheduled run of lift agrees with the native run to the accuracy its types state
-tested   loopy  advection.py:366  lift_on_faces       the scheduled run of lift_on_faces agrees with the native run to the accuracy its types state
-decided  isl    advection.py:409  folded_rhs          every cell of folded_rhs.flux that folded_rhs reads,
-                                                        folded_rhs.upwind has stored by the time it is read,
-                                                        so folded_rhs runs without the zeros folded_rhs.flux is made with
-tested   loopy  advection.py:406  folded_rhs          the scheduled run of folded_rhs agrees with the native run to the accuracy its types state
-decided  isl    advection.py:437  surface             every cell of surface.flux that surface reads, surface.upwind has stored by the time it is read,
-                                                        so surface runs without the zeros surface.flux is made with
-tested   loopy  advection.py:434  surface             the scheduled run of surface agrees with the native run to the accuracy its types state
-tested   loopy  advection.py:442  volume_and_lift     the scheduled run of volume_and_lift agrees with the native run to the accuracy its types state
+STATUS                                                  EFFECTIVE  BY           WHERE             OWNER               STATEMENT
+------------------------------------------------------  ---------  -----------  ----------------  ------------------  ----------------------------------------------------------------------------------------------------
+decided                                                 decided    isl          advection.py:606  advection_rhs       every cell of advection_rhs.V that advection_rhs reads,
+                                                                                                                        advection_rhs.reference_velocity has stored by the time it is read,
+                                                                                                                        so advection_rhs runs without the zeros advection_rhs.V is made with
+decided                                                 decided    isl          advection.py:607  advection_rhs       every cell of advection_rhs.vn that advection_rhs reads,
+                                                                                                                        advection_rhs.normal_velocity has stored by the time it is read,
+                                                                                                                        so advection_rhs runs without the zeros advection_rhs.vn is made with
+decided                                                 decided    isl          advection.py:608  advection_rhs       every cell of advection_rhs.flux that advection_rhs reads,
+                                                                                                                        advection_rhs.upwind has stored by the time it is read,
+                                                                                                                        so advection_rhs runs without the zeros advection_rhs.flux is made with
+decided                                                 decided    isl          advection.py:634  advection_rhs       substitute(advection_rhs.V) renames the instances of advection_rhs one for one
+decided                                                 decided    isl          advection.py:634  advection_rhs       the order after substitute(advection_rhs.V) runs every dependence of advection_rhs forward
+decided                                                 decided    isl          advection.py:635  advection_rhs       substitute(advection_rhs.vn) renames the instances of advection_rhs one for one
+decided                                                 decided    isl          advection.py:635  advection_rhs       the order after substitute(advection_rhs.vn) runs every dependence of advection_rhs forward
+decided                                                 decided    isl          advection.py:636  advection_rhs       fuse(advection_rhs.volume.i, advection_rhs.lift.i) renames the instances of
+                                                                                                                        advection_rhs one for one
+decided                                                 decided    isl          advection.py:636  advection_rhs       the order after fuse(advection_rhs.volume.i, advection_rhs.lift.i) runs every dependence of
+                                                                                                                        advection_rhs forward
+decided                                                 decided    isl          advection.py:637  advection_rhs       fuse(advection_rhs.upwind.e, advection_rhs.volume.e) renames the instances of
+                                                                                                                        advection_rhs one for one
+decided                                                 decided    isl          advection.py:637  advection_rhs       the order after fuse(advection_rhs.upwind.e, advection_rhs.volume.e) runs every dependence of
+                                                                                                                        advection_rhs forward
+tested                                                  tested     loopy        advection.py:637  advection_rhs       the scheduled run of advection_rhs agrees with the native run to the accuracy its types state
+decided                                                 decided    isl          advection.py:641  advection_rhs       no read of advection_rhs.flux sees its slot overwritten after
+                                                                                                                        contract(advection_rhs.flux, lambda e, f, a, b: (f, a, b)):
+                                                                                                                        advection_rhs.flux kept in 6*n*n cells, flux[e, f, a, b] in slot (f, a, b)
+tested                                                  tested     loopy        advection.py:641  advection_rhs       the scheduled run of advection_rhs agrees with the native run to the accuracy its types state
+tested under theorem:advection.inverse_mass_inward@153  assumed    interpreter  advection.py:646  weak_rhs            rewrite(rhs, by=inverse_mass_inward):
+                                                                                                                        over the reals, what rhs stores is unchanged wherever
+                                                                                                                        (forall p in Fin(n). sum(Mi[p, c]*M[c, p] for c in Fin(n)) == 1)
+                                                                                                                        and (forall p in Fin(n), q in Fin(n) where p != q. sum(Mi[p, c]*M[c, q] for c in Fin(n)) == 0):
+                                                                                                                        sum(Mi[k, c]*Mi[j, b]*Mi[i,
+                                                                                                                            a]*sum(M[c, t]*M[...,
+                                                                                                                              sum(Mi[k, c]*Mi[i, b]*Mi[j,
+                                                                                                                                  a]*sum(M[c, t]*M[... and 1 more become their inverse mass inwards, in 3 places
+tested under theorem:advection.lift_inward@197          assumed    interpreter  advection.py:646  weak_rhs            rewrite(rhs, by=lift_inward): over the reals,
+                                                                                                                        what rhs stores is unchanged wherever
+                                                                                                                        (forall p in Fin(n). sum(Mi[p, c]*M[c, p] for c in Fin(n)) == 1)
+                                                                                                                        and (forall p in Fin(n), q in Fin(n) where p != q. sum(Mi[p, c]*M[c, q] for c in Fin(n)) == 0):
+                                                                                                                        sum(Mi[j, c]*Mi[i, b]*Mi[k, a]*(ends[0, a]*su...,
+                                                                                                                            sum(Mi[j, c]*Mi[i, b]*Mi[k, a]*(ends[1, a]*su...
+                                                                                                                                and 4 more become their lift inwards, in 6 places
+tested                                                  tested     interpreter  advection.py:646  weak_rhs            keep=(D, L): D and L are computed once, before rhs, over the indices each reads,
+                                                                                                                        and rhs reads them where their sums were (D in 3 places and L in 6 places):
+                                                                                                                        what rhs stores is unchanged
+decided                                                 decided    isl          advection.py:646  weak_rhs            no cell of D is stored twice, or read before its store
+decided                                                 decided    isl          advection.py:646  weak_rhs            no cell of L is stored twice, or read before its store
+decided                                                 decided    isl          advection.py:449  weak_rhs            no cell of rhs is stored twice, or read before its store
+decided                                                 decided    isl          advection.py:445  weak_rhs            no cell of w is stored twice, or read before its store
+decided                                                 decided    isl          advection.py:646  weak_rhs            D[i_1, r_0] is in bounds for every instance of D[i, r] = reduce_sum(...) (advection.py:646)
+decided                                                 decided    isl          advection.py:646  weak_rhs            Mi[i_1, a_0] is in bounds for every instance of D[i, r] = reduce_sum(...) (advection.py:646)
+decided                                                 decided    isl          advection.py:646  weak_rhs            S[a_0, r_0] is in bounds for every instance of D[i, r] = reduce_sum(...) (advection.py:646)
+decided                                                 decided    isl          advection.py:646  weak_rhs            L[k_1, p] is in bounds for every instance of L[k, p] = reduce_sum(...) (advection.py:646)
+decided                                                 decided    isl          advection.py:646  weak_rhs            Mi[k_1, a_1] is in bounds for every instance of L[k, p] = reduce_sum(...) (advection.py:646)
+decided                                                 decided    isl          advection.py:646  weak_rhs            ends[p, a_1] is in bounds for every instance of L[k, p] = reduce_sum(...) (advection.py:646)
+decided                                                 decided    isl          advection.py:449  weak_rhs            L[k_0, 0] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:449)
+decided                                                 decided    isl          advection.py:449  weak_rhs            L[k_0, 1] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:449)
+decided                                                 decided    isl          advection.py:449  weak_rhs            L[i_0, 0] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:449)
+decided                                                 decided    isl          advection.py:449  weak_rhs            L[i_0, 1] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:449)
+decided                                                 decided    isl          advection.py:449  weak_rhs            L[j_0, 0] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:449)
+decided                                                 decided    isl          advection.py:449  weak_rhs            L[j_0, 1] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:449)
+decided                                                 decided    isl          advection.py:449  weak_rhs            D[i_0, r] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:449)
+decided                                                 decided    isl          advection.py:449  weak_rhs            D[j_0, r] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:449)
+decided                                                 decided    isl          advection.py:449  weak_rhs            D[k_0, r] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:449)
+decided                                                 decided    isl          advection.py:646  weak_rhs            distinct instances of D[i, r] = reduce_sum(...) (advection.py:646) write distinct cells of D
+decided                                                 decided    isl          advection.py:646  weak_rhs            distinct instances of L[k, p] = reduce_sum(...) (advection.py:646) write distinct cells of L
+decided                                                 decided    isl          advection.py:449  weak_rhs            every cell of D that rhs[e, k, j, i] = ...
+                                                                                                                        (advection.py:449) reads was written before the read,
+                                                                                                                        by D[i, r] = reduce_sum(...) (advection.py:646)
+decided                                                 decided    isl          advection.py:449  weak_rhs            every cell of L that rhs[e, k, j, i] = ...
+                                                                                                                        (advection.py:449) reads was written before the read,
+                                                                                                                        by L[k, p] = reduce_sum(...) (advection.py:646)
+tested                                                  tested     run          advection.py:646  weak_rhs            (forall p in Fin(n). sum(Mi[p, c]*M[c, p] for c in Fin(n)) == 1)
+                                                                                                                        and (forall p in Fin(n), q in Fin(n) where p != q. sum(Mi[p, c]*M[c, q] for c in Fin(n)) == 0),
+                                                                                                                        which inverse_mass_inward and lift_inward need, at the tables' digits, on the example inputs
+decided                                                 decided    isl          advection.py:646  weak_rhs            n >= 0 and (k >= 0 and k < n) and (j >= 0 and j < n) and (i >= 0 and i < n) for every k and every j
+                                                                                                                        and every i, which inverse_mass_inward and lift_inward need
+decided                                                 decided    type         advection.py:646  weak_rhs            after rewrite(rhs, ...), rhs is compared at approx (it was approx)
+tested                                                  tested     run          advection.py:646  weak_rhs            the compiled derived agrees with the native weak_rhs in rhs at approx,
+                                                                                                                        within 1e-06 of each value (measured 8e-16 of the largest), on its example inputs and 3 drawn ones
+tested                                                  tested     loopy        advection.py:646  weak_rhs            the scheduled run of weak_rhs agrees with the native run to the accuracy its types state
+tested                                                  tested     loopy        advection.py:276  reference_velocity  the scheduled run of reference_velocity agrees with the native run to the accuracy its types state
+tested                                                  tested     loopy        advection.py:295  normal_velocity     the scheduled run of normal_velocity agrees with the native run to the accuracy its types state
+tested                                                  tested     loopy        advection.py:320  upwind              the scheduled run of upwind agrees with the native run to the accuracy its types state
+tested                                                  tested     loopy        advection.py:348  volume              the scheduled run of volume agrees with the native run to the accuracy its types state
+tested                                                  tested     loopy        advection.py:374  lift                the scheduled run of lift agrees with the native run to the accuracy its types state
+tested                                                  tested     loopy        advection.py:394  lift_on_faces       the scheduled run of lift_on_faces agrees with the native run to the accuracy its types state
+decided                                                 decided    isl          advection.py:619  folded_rhs          every cell of folded_rhs.flux that folded_rhs reads,
+                                                                                                                        folded_rhs.upwind has stored by the time it is read,
+                                                                                                                        so folded_rhs runs without the zeros folded_rhs.flux is made with
+tested                                                  tested     loopy        advection.py:616  folded_rhs          the scheduled run of folded_rhs agrees with the native run to the accuracy its types state
+decided                                                 decided    isl          advection.py:654  surface             every cell of surface.flux that surface reads, surface.upwind has stored by the time it is read,
+                                                                                                                        so surface runs without the zeros surface.flux is made with
+tested                                                  tested     loopy        advection.py:651  surface             the scheduled run of surface agrees with the native run to the accuracy its types state
+tested                                                  tested     loopy        advection.py:659  volume_and_lift     the scheduled run of volume_and_lift agrees with the native run to the accuracy its types state
 
-25 facts: 14 decided, 11 tested
+56 facts: 39 decided, 17 tested
 
-WITHOUT LEAN: 14 rows are not proved. To have Lean prove what it can: pip install "lanky[lean]", and Lean v4.29.1 from elan (elan default leanprover/lean4:v4.29.1).
+WITHOUT LEAN: 40 rows are not proved. To have Lean prove what it can: pip install "lanky[lean]", and Lean v4.29.1 from elan (elan default leanprover/lean4:v4.29.1).
+WITHOUT MATHLIB: 3 rows are not proved, since only Lean with Mathlib can state them. To have Lean prove them: python -m lanky.mathlib ~/mathlib (about 7 GB), then export LANKY_LEAN_MATHLIB=~/mathlib.
 ```
 
 ## calls.py
@@ -2621,12 +2829,16 @@ Lean: sympy, lanky's `cas` extra, decides that the rule is exact on
 quadratics, `decided (heuristic)` by `cas`, and the other two read `tested`.
 
 `mass_ffc` promises the element's mass in closed form, `|J| (1 + delta_jk) /
-24`, which it computes from FFC's 15-digit tables, so to the last digits
-only. Its postcondition is compared as its compiled run is with its native
-one, at the approx tolerance, `|a - b| <= 1e-6 (|b| + 1)`, and its row says
-so (`..., to the approx tolerance`): `tested` on its runs, and, with Mathlib,
-`proved` by Lean over the reals from what the kernel stores, with each table
-at the value it holds, resting on `no cell of A is stored twice, or read
+24`, by `element_mass`, which it cites (`@kernel(uses=[element_mass])`). The
+theorem is about tables that are the rule, the P1 basis at its points and its
+weights in exact rationals (`tabulated`); FFC's tables round them to 15
+digits, so at the kernel the hypothesis is a condition on the tables, a row of
+its own tested at their digits: `0.666666666666667` is `2/3` to the last
+digit. The postcondition reads `..., by element_mass`: `tested` on its runs,
+at the approx tolerance, `|a - b| <= 1e-6 (|b| + 1)`, as its compiled run is
+compared with its native one, and, with Mathlib, `proved` by Lean over the
+reals from what the kernel stores, with its tables as the theorem takes them,
+resting on the condition's row, on `no cell of A is stored twice, or read
 before its store` and on the kernel's trace. After each call it is restated
 of the cell's `Ae[c]`.
 
@@ -2657,7 +2869,7 @@ W3 and FE0 are the rule to 3.3e-16: True
 mass_ffc's postcondition, its matrix |J| (1 + delta_jk) / 24 to the approx tolerance -> tested
 
 Schedule(mass_action).split(mass_action.c, 32).tag({mass_action.c.outer: 'g.0', mass_action.c.inner: 'l.0'}) ->
-  IllegalCast: tag({mass_action.c.outer: 'g.0', mass_action.c.inner: 'l.0'}) illegal: y[cell[c, a]] += reduce_sum(...) (assembly.py:269) at c=0, a=2 and at c=1, a=1 both update y[3] on example_inputs() (nc=2, nv=4), where cell[0, 2] = 3 and cell[1, 1] = 3, and the loop mass_action.c.inner on l.0 runs them on two work items, so one can overwrite what the other added; make the updates atomic, with atomic(mass_action.y) before this step
+  IllegalCast: tag({mass_action.c.outer: 'g.0', mass_action.c.inner: 'l.0'}) illegal: y[cell[c, a]] += reduce_sum(...) (assembly.py:282) at c=0, a=2 and at c=1, a=1 both update y[3] on example_inputs() (nc=2, nv=4), where cell[0, 2] = 3 and cell[1, 1] = 3, and the loop mass_action.c.inner on l.0 runs them on two work items, so one can overwrite what the other added; make the updates atomic, with atomic(mass_action.y) before this step
 
 accepted: Schedule(mass_action, target='c').assume(mass_action.nc >= 1).atomic(mass_action.y).split(mass_action.c, 32).tag({mass_action.c.outer: 'g.0', mass_action.c.inner: 'l.0'})
   assumed  -    mass_action.nc >= 1, which mass_action is scheduled assuming
@@ -2679,43 +2891,58 @@ schedule: Schedule(mass_action, target='c').assume(mass_action.nc % 4 == 0).atom
 $ uv run lanky check examples/assembly.py
 STATUS                                         EFFECTIVE  BY             WHERE            OWNER                STATEMENT
 ---------------------------------------------  ---------  -------------  ---------------  -------------------  ----------------------------------------------------------------------------------------------------
-decided (heuristic)                            tested     cas            assembly.py:160  exact_to_degree_two  a : Real, b : Real, c : Real, d : Real, e : Real, f : Real
+decided (heuristic)                            tested     cas            assembly.py:163  exact_to_degree_two  a : Real, b : Real, c : Real, d : Real, e : Real, f : Real
                                                                                                                |- (a + b*(1/6) + c*(1/6) + d*(1/6)*(1/6) + e*(1/6)*(1/6) + f*(1/6)*(1/6) + a + b*(1/6) + c*(2/3) +
                                                                                                                      d*(1/6)*(1/6) + e*(1/6)*(2/3) + f*(2/3)*(2/3) + a + b*(2/3) + c*(1/6) + d*(2/3)*(2/3) +
                                                                                                                      e*(2/3)*(1/6) + f*(1/6)*(1/6)) / 6 == a / 2 + b / 6 + c / 6 + d / 12 + e / 24 + f / 12
-tested                                         tested     python         assembly.py:160  exact_to_degree_two  the term computes what the annotations compute
-tested                                         tested     property-test  assembly.py:173  element_mass         J : Real, u : Fn[Fin(3), Real]
-                                                                                                               |- abs(J)*((2/3*(u[0]*(2/3) + u[1]*(1/6) + u[2]*(1/6)) + 1/6*(u[0]*(1/6) + u[1]*(1/6) + u[2]*(2/3))
-                                                                                                                       + 1/6*(u[0]*(1/6) + u[1]*(2/3) + u[2]*(1/6))) / 6)
-                                                                                                                   == abs(J)*(u[0] + u[0] + u[1] + u[2]) / 24
-                                                                                                                   and abs(J)*((1/6*(u[0]*(2/3) + u[1]*(1/6) + u[2]*(1/6)) +
-                                                                                                                       1/6*(u[0]*(1/6) + u[1]*(1/6) + u[2]*(2/3)) + 2/3*(u[0]*(1/6) + u[1]*(2/3) + u[2]*(1/6))) /
-                                                                                                                     6) == abs(J)*(u[1] + u[0] + u[1] + u[2]) / 24
-                                                                                                                   and abs(J)*((1/6*(u[0]*(2/3) + u[1]*(1/6) + u[2]*(1/6)) +
-                                                                                                                       2/3*(u[0]*(1/6) + u[1]*(1/6) + u[2]*(2/3)) + 1/6*(u[0]*(1/6) + u[1]*(2/3) + u[2]*(1/6))) /
-                                                                                                                     6) == abs(J)*(u[2] + u[0] + u[1] + u[2]) / 24
-tested                                         tested     python         assembly.py:173  element_mass         the term computes what the annotations compute
-tested                                         tested     property-test  assembly.py:187  conservation         nc : Nat, nv : Nat, d : Nat, cell : Fn[Fin(nc), Fin(d), Fin(nv)], yl : Fn[Fin(nc), Fin(d), Real],
+tested                                         tested     python         assembly.py:163  exact_to_degree_two  the term computes what the annotations compute
+tested                                         tested     property-test  assembly.py:176  element_mass         J : Real, FE : Fn[Fin(3), Fin(3), Real], W : Fn[Fin(3), Real]
+                                                                                                               | tabulated: (FE[0, 0] == 2/3 and FE[0, 1] == 1/6 and FE[0, 2] == 1/6 and FE[1, 0] == 1/6
+                                                                                                                     and FE[1, 1] == 1/6 and FE[1, 2] == 2/3 and FE[2, 0] == 1/6 and FE[2, 1] == 2/3
+                                                                                                                     and FE[2, 2] == 1/6) and (W[0] == 1/6 and W[1] == 1/6 and W[2] == 1/6)
+                                                                                                               |- 0 + FE[0, 0]*FE[0, 0]*W[0]*abs(J) + FE[1, 0]*FE[1, 0]*W[1]*abs(J) + FE[2, 0]*FE[2, 0]*W[2]*abs(J)
+                                                                                                                   == abs(J)*2 / 24 and 0 + FE[0, 0]*FE[0, 1]*W[0]*abs(J) + FE[1, 0]*FE[1, 1]*W[1]*abs(J) +
+                                                                                                                   FE[2, 0]*FE[2, 1]*W[2]*abs(J) == abs(J)*1 / 24
+                                                                                                                   and 0 + FE[0, 0]*FE[0, 2]*W[0]*abs(J) + FE[1, 0]*FE[1, 2]*W[1]*abs(J) +
+                                                                                                                   FE[2, 0]*FE[2, 2]*W[2]*abs(J) == abs(J)*1 / 24
+                                                                                                                   and 0 + FE[0, 1]*FE[0, 0]*W[0]*abs(J) + FE[1, 1]*FE[1, 0]*W[1]*abs(J) +
+                                                                                                                   FE[2, 1]*FE[2, 0]*W[2]*abs(J) == abs(J)*1 / 24
+                                                                                                                   and 0 + FE[0, 1]*FE[0, 1]*W[0]*abs(J) + FE[1, 1]*FE[1, 1]*W[1]*abs(J) +
+                                                                                                                   FE[2, 1]*FE[2, 1]*W[2]*abs(J) == abs(J)*2 / 24
+                                                                                                                   and 0 + FE[0, 1]*FE[0, 2]*W[0]*abs(J) + FE[1, 1]*FE[1, 2]*W[1]*abs(J) +
+                                                                                                                   FE[2, 1]*FE[2, 2]*W[2]*abs(J) == abs(J)*1 / 24
+                                                                                                                   and 0 + FE[0, 2]*FE[0, 0]*W[0]*abs(J) + FE[1, 2]*FE[1, 0]*W[1]*abs(J) +
+                                                                                                                   FE[2, 2]*FE[2, 0]*W[2]*abs(J) == abs(J)*1 / 24
+                                                                                                                   and 0 + FE[0, 2]*FE[0, 1]*W[0]*abs(J) + FE[1, 2]*FE[1, 1]*W[1]*abs(J) +
+                                                                                                                   FE[2, 2]*FE[2, 1]*W[2]*abs(J) == abs(J)*1 / 24
+                                                                                                                   and 0 + FE[0, 2]*FE[0, 2]*W[0]*abs(J) + FE[1, 2]*FE[1, 2]*W[1]*abs(J) +
+                                                                                                                   FE[2, 2]*FE[2, 2]*W[2]*abs(J) == abs(J)*2 / 24
+tested                                         tested     python         assembly.py:176  element_mass         the term computes what the annotations compute
+tested                                         tested     property-test  assembly.py:199  conservation         nc : Nat, nv : Nat, d : Nat, cell : Fn[Fin(nc), Fin(d), Fin(nv)], yl : Fn[Fin(nc), Fin(d), Real],
                                                                                                                  y : Fn[Fin(nv), Real]
                                                                                                                | scatter: forall i in Fin(nv). y[i]
                                                                                                                    == sum(yl[c][k] for c in Fin(nc), k in Fin(d) if cell[c][k] == i)
                                                                                                                |- sum(y[i] for i in Fin(nv)) == sum(yl[c][k] for c in Fin(nc), k in Fin(d))
-tested                                         tested     python         assembly.py:187  conservation         the term computes what the annotations compute
-decided                                        decided    isl            assembly.py:252  mass_ffc             A[j, k] is in bounds for every instance of A[j, k] = reduce_sum(...) (assembly.py:252)
-decided                                        decided    isl            assembly.py:252  mass_ffc             FE0[ip, j] is in bounds for every instance of A[j, k] = reduce_sum(...) (assembly.py:252)
-decided                                        decided    isl            assembly.py:252  mass_ffc             FE0[ip, k] is in bounds for every instance of A[j, k] = reduce_sum(...) (assembly.py:252)
-decided                                        decided    isl            assembly.py:252  mass_ffc             W3[ip] is in bounds for every instance of A[j, k] = reduce_sum(...) (assembly.py:252)
-decided                                        decided    isl            assembly.py:252  mass_ffc             x[1, 0] is in bounds for every instance of A[j, k] = reduce_sum(...) (assembly.py:252)
-decided                                        decided    isl            assembly.py:252  mass_ffc             x[0, 0] is in bounds for every instance of A[j, k] = reduce_sum(...) (assembly.py:252)
-decided                                        decided    isl            assembly.py:252  mass_ffc             x[2, 1] is in bounds for every instance of A[j, k] = reduce_sum(...) (assembly.py:252)
-decided                                        decided    isl            assembly.py:252  mass_ffc             x[0, 1] is in bounds for every instance of A[j, k] = reduce_sum(...) (assembly.py:252)
-decided                                        decided    isl            assembly.py:252  mass_ffc             x[2, 0] is in bounds for every instance of A[j, k] = reduce_sum(...) (assembly.py:252)
-decided                                        decided    isl            assembly.py:252  mass_ffc             x[1, 1] is in bounds for every instance of A[j, k] = reduce_sum(...) (assembly.py:252)
-decided                                        decided    isl            assembly.py:252  mass_ffc             distinct instances of A[j, k] = reduce_sum(...) (assembly.py:252) write distinct cells of A
-decided                                        decided    isl            assembly.py:237  mass_ffc             the source order runs every dependence forward in time
-decided                                        decided    type           assembly.py:252  mass_ffc             the accumulation into A[j, k] over ip is approx
-decided                                        decided    isl            assembly.py:252  mass_ffc             no cell of A is stored twice, or read before its store
-tested                                         tested     native         assembly.py:237  mass_ffc             (A[0, 0] == abs((x[1, 0] - x[0, 0])*(x[2, 1] - x[0, 1]) - (x[2, 0] - x[0, 0])*(x[1, 1] - x[0, 1])) /
+tested                                         tested     python         assembly.py:199  conservation         the term computes what the annotations compute
+decided                                        decided    isl            assembly.py:265  mass_ffc             A[j, k] is in bounds for every instance of A[j, k] = reduce_sum(...) (assembly.py:265)
+decided                                        decided    isl            assembly.py:265  mass_ffc             FE0[ip, j] is in bounds for every instance of A[j, k] = reduce_sum(...) (assembly.py:265)
+decided                                        decided    isl            assembly.py:265  mass_ffc             FE0[ip, k] is in bounds for every instance of A[j, k] = reduce_sum(...) (assembly.py:265)
+decided                                        decided    isl            assembly.py:265  mass_ffc             W3[ip] is in bounds for every instance of A[j, k] = reduce_sum(...) (assembly.py:265)
+decided                                        decided    isl            assembly.py:265  mass_ffc             x[1, 0] is in bounds for every instance of A[j, k] = reduce_sum(...) (assembly.py:265)
+decided                                        decided    isl            assembly.py:265  mass_ffc             x[0, 0] is in bounds for every instance of A[j, k] = reduce_sum(...) (assembly.py:265)
+decided                                        decided    isl            assembly.py:265  mass_ffc             x[2, 1] is in bounds for every instance of A[j, k] = reduce_sum(...) (assembly.py:265)
+decided                                        decided    isl            assembly.py:265  mass_ffc             x[0, 1] is in bounds for every instance of A[j, k] = reduce_sum(...) (assembly.py:265)
+decided                                        decided    isl            assembly.py:265  mass_ffc             x[2, 0] is in bounds for every instance of A[j, k] = reduce_sum(...) (assembly.py:265)
+decided                                        decided    isl            assembly.py:265  mass_ffc             x[1, 1] is in bounds for every instance of A[j, k] = reduce_sum(...) (assembly.py:265)
+decided                                        decided    isl            assembly.py:265  mass_ffc             distinct instances of A[j, k] = reduce_sum(...) (assembly.py:265) write distinct cells of A
+decided                                        decided    isl            assembly.py:249  mass_ffc             the source order runs every dependence forward in time
+decided                                        decided    type           assembly.py:265  mass_ffc             the accumulation into A[j, k] over ip is approx
+decided                                        decided    isl            assembly.py:265  mass_ffc             no cell of A is stored twice, or read before its store
+tested                                         tested     run            assembly.py:249  mass_ffc             (FE0[0, 0] == 2/3 and FE0[0, 1] == 1/6 and FE0[0, 2] == 1/6 and FE0[1, 0] == 1/6
+                                                                                                                   and FE0[1, 1] == 1/6 and FE0[1, 2] == 2/3 and FE0[2, 0] == 1/6 and FE0[2, 1] == 2/3
+                                                                                                                   and FE0[2, 2] == 1/6) and (W3[0] == 1/6 and W3[1] == 1/6 and W3[2] == 1/6),
+                                                                                                                 which element_mass needs, at the tables' digits
+tested                                         tested     native         assembly.py:249  mass_ffc             (A[0, 0] == abs((x[1, 0] - x[0, 0])*(x[2, 1] - x[0, 1]) - (x[2, 0] - x[0, 0])*(x[1, 1] - x[0, 1])) /
                                                                                                                    12 and A[1, 1] ==
                                                                                                                    abs((x[1, 0] - x[0, 0])*(x[2, 1] - x[0, 1]) - (x[2, 0] - x[0, 0])*(x[1, 1] - x[0, 1])) / 12
                                                                                                                    and A[2, 2] == abs((x[1, 0] - x[0, 0])*(x[2, 1] - x[0, 1]) -
@@ -2731,44 +2958,44 @@ tested                                         tested     native         assembl
                                                                                                                    and A[2, 0] == abs((x[1, 0] - x[0, 0])*(x[2, 1] - x[0, 1]) -
                                                                                                                      (x[2, 0] - x[0, 0])*(x[1, 1] - x[0, 1])) / 24
                                                                                                                    and A[2, 1] == abs((x[1, 0] - x[0, 0])*(x[2, 1] - x[0, 1]) -
-                                                                                                                     (x[2, 0] - x[0, 0])*(x[1, 1] - x[0, 1])) / 24), to the approx tolerance
-tested                                         tested     interpreter    assembly.py:237  mass_ffc             the traced term computes what the body computes
-decided                                        decided    isl            assembly.py:252  mass_action          Ae[c, j, k] is in bounds for every instance of A[j, k] = reduce_sum(...) (assembly.py:252)
-decided                                        decided    isl            assembly.py:252  mass_action          FE0[ip, j] is in bounds for every instance of A[j, k] = reduce_sum(...) (assembly.py:252)
-decided                                        decided    isl            assembly.py:252  mass_action          FE0[ip, k] is in bounds for every instance of A[j, k] = reduce_sum(...) (assembly.py:252)
-decided                                        decided    isl            assembly.py:252  mass_action          W3[ip] is in bounds for every instance of A[j, k] = reduce_sum(...) (assembly.py:252)
-decided                                        decided    isl            assembly.py:252  mass_action          coords[cell[c, 1], 0] is in bounds
-                                                                                                                 for every instance of A[j, k] = reduce_sum(...) (assembly.py:252) (cell[c, 1] : Fin(nv), by type)
-decided                                        decided    isl            assembly.py:252  mass_action          cell[c, 1] is in bounds for every instance of A[j, k] = reduce_sum(...) (assembly.py:252)
-decided                                        decided    isl            assembly.py:252  mass_action          coords[cell[c, 0], 0] is in bounds
-                                                                                                                 for every instance of A[j, k] = reduce_sum(...) (assembly.py:252) (cell[c, 0] : Fin(nv), by type)
-decided                                        decided    isl            assembly.py:252  mass_action          cell[c, 0] is in bounds for every instance of A[j, k] = reduce_sum(...) (assembly.py:252)
-decided                                        decided    isl            assembly.py:252  mass_action          coords[cell[c, 2], 1] is in bounds
-                                                                                                                 for every instance of A[j, k] = reduce_sum(...) (assembly.py:252) (cell[c, 2] : Fin(nv), by type)
-decided                                        decided    isl            assembly.py:252  mass_action          cell[c, 2] is in bounds for every instance of A[j, k] = reduce_sum(...) (assembly.py:252)
-decided                                        decided    isl            assembly.py:252  mass_action          coords[cell[c, 0], 1] is in bounds
-                                                                                                                 for every instance of A[j, k] = reduce_sum(...) (assembly.py:252) (cell[c, 0] : Fin(nv), by type)
-decided                                        decided    isl            assembly.py:252  mass_action          coords[cell[c, 2], 0] is in bounds
-                                                                                                                 for every instance of A[j, k] = reduce_sum(...) (assembly.py:252) (cell[c, 2] : Fin(nv), by type)
-decided                                        decided    isl            assembly.py:252  mass_action          coords[cell[c, 1], 1] is in bounds
-                                                                                                                 for every instance of A[j, k] = reduce_sum(...) (assembly.py:252) (cell[c, 1] : Fin(nv), by type)
-decided                                        decided    type           assembly.py:269  mass_action          y[cell[c, a]] is in bounds by type (cell[c, a] : Fin(nv))
-decided                                        decided    isl            assembly.py:269  mass_action          cell[c, a] is in bounds for every instance of y[cell[c, a]] += reduce_sum(...) (assembly.py:269)
-decided                                        decided    isl            assembly.py:269  mass_action          Ae[c, a, b] is in bounds for every instance of y[cell[c, a]] += reduce_sum(...) (assembly.py:269)
-decided                                        decided    type           assembly.py:269  mass_action          u[cell[c, b]] is in bounds by type (cell[c, b] : Fin(nv))
-decided                                        decided    isl            assembly.py:269  mass_action          cell[c, b] is in bounds for every instance of y[cell[c, a]] += reduce_sum(...) (assembly.py:269)
-decided                                        decided    isl            assembly.py:252  mass_action          distinct instances of A[j, k] = reduce_sum(...) (assembly.py:252) write distinct cells of Ae
-decided                                        decided    isl            assembly.py:269  mass_action          every cell of Ae that y[cell[c, a]] += reduce_sum(...) (assembly.py:269) reads was written before
-                                                                                                                 the read, by A[j, k] = reduce_sum(...) (assembly.py:252)
-decided                                        decided    isl            assembly.py:257  mass_action          the source order runs every dependence forward in time
-decided                                        decided    type           assembly.py:252  mass_action          the accumulation into Ae[c, j, k] over ip is approx
-decided                                        decided    type           assembly.py:269  mass_action          the accumulation into y[cell[c, a]] over c, a is approx
-decided                                        decided    type           assembly.py:269  mass_action          the accumulation into y[cell[c, a]] over b is approx
-decided                                        decided    isl            assembly.py:267  mass_action          cell[c], the indices of the cells passed as x,
-                                                                                                                 is in bounds wherever mass_ffc is called at assembly.py:267
-decided                                        decided    type           assembly.py:267  mass_action          the cells coords[cell[c]] picks, passed as x, are in bounds by type (the entries of cell : Fin(nv))
-decided                                        decided    isl            assembly.py:267  mass_action          Ae[c], the row passed to mass_ffc as A, is in bounds wherever mass_ffc is called at assembly.py:267
-decided                                        tested     call           assembly.py:267  mass_action          after each call mass_ffc(coords[cell[c]], Ae[c]) at assembly.py:267:
+                                                                                                                     (x[2, 0] - x[0, 0])*(x[1, 1] - x[0, 1])) / 24), by element_mass
+tested                                         tested     interpreter    assembly.py:249  mass_ffc             the traced term computes what the body computes
+decided                                        decided    isl            assembly.py:265  mass_action          Ae[c, j, k] is in bounds for every instance of A[j, k] = reduce_sum(...) (assembly.py:265)
+decided                                        decided    isl            assembly.py:265  mass_action          FE0[ip, j] is in bounds for every instance of A[j, k] = reduce_sum(...) (assembly.py:265)
+decided                                        decided    isl            assembly.py:265  mass_action          FE0[ip, k] is in bounds for every instance of A[j, k] = reduce_sum(...) (assembly.py:265)
+decided                                        decided    isl            assembly.py:265  mass_action          W3[ip] is in bounds for every instance of A[j, k] = reduce_sum(...) (assembly.py:265)
+decided                                        decided    isl            assembly.py:265  mass_action          coords[cell[c, 1], 0] is in bounds
+                                                                                                                 for every instance of A[j, k] = reduce_sum(...) (assembly.py:265) (cell[c, 1] : Fin(nv), by type)
+decided                                        decided    isl            assembly.py:265  mass_action          cell[c, 1] is in bounds for every instance of A[j, k] = reduce_sum(...) (assembly.py:265)
+decided                                        decided    isl            assembly.py:265  mass_action          coords[cell[c, 0], 0] is in bounds
+                                                                                                                 for every instance of A[j, k] = reduce_sum(...) (assembly.py:265) (cell[c, 0] : Fin(nv), by type)
+decided                                        decided    isl            assembly.py:265  mass_action          cell[c, 0] is in bounds for every instance of A[j, k] = reduce_sum(...) (assembly.py:265)
+decided                                        decided    isl            assembly.py:265  mass_action          coords[cell[c, 2], 1] is in bounds
+                                                                                                                 for every instance of A[j, k] = reduce_sum(...) (assembly.py:265) (cell[c, 2] : Fin(nv), by type)
+decided                                        decided    isl            assembly.py:265  mass_action          cell[c, 2] is in bounds for every instance of A[j, k] = reduce_sum(...) (assembly.py:265)
+decided                                        decided    isl            assembly.py:265  mass_action          coords[cell[c, 0], 1] is in bounds
+                                                                                                                 for every instance of A[j, k] = reduce_sum(...) (assembly.py:265) (cell[c, 0] : Fin(nv), by type)
+decided                                        decided    isl            assembly.py:265  mass_action          coords[cell[c, 2], 0] is in bounds
+                                                                                                                 for every instance of A[j, k] = reduce_sum(...) (assembly.py:265) (cell[c, 2] : Fin(nv), by type)
+decided                                        decided    isl            assembly.py:265  mass_action          coords[cell[c, 1], 1] is in bounds
+                                                                                                                 for every instance of A[j, k] = reduce_sum(...) (assembly.py:265) (cell[c, 1] : Fin(nv), by type)
+decided                                        decided    type           assembly.py:282  mass_action          y[cell[c, a]] is in bounds by type (cell[c, a] : Fin(nv))
+decided                                        decided    isl            assembly.py:282  mass_action          cell[c, a] is in bounds for every instance of y[cell[c, a]] += reduce_sum(...) (assembly.py:282)
+decided                                        decided    isl            assembly.py:282  mass_action          Ae[c, a, b] is in bounds for every instance of y[cell[c, a]] += reduce_sum(...) (assembly.py:282)
+decided                                        decided    type           assembly.py:282  mass_action          u[cell[c, b]] is in bounds by type (cell[c, b] : Fin(nv))
+decided                                        decided    isl            assembly.py:282  mass_action          cell[c, b] is in bounds for every instance of y[cell[c, a]] += reduce_sum(...) (assembly.py:282)
+decided                                        decided    isl            assembly.py:265  mass_action          distinct instances of A[j, k] = reduce_sum(...) (assembly.py:265) write distinct cells of Ae
+decided                                        decided    isl            assembly.py:282  mass_action          every cell of Ae that y[cell[c, a]] += reduce_sum(...) (assembly.py:282) reads was written before
+                                                                                                                 the read, by A[j, k] = reduce_sum(...) (assembly.py:265)
+decided                                        decided    isl            assembly.py:270  mass_action          the source order runs every dependence forward in time
+decided                                        decided    type           assembly.py:265  mass_action          the accumulation into Ae[c, j, k] over ip is approx
+decided                                        decided    type           assembly.py:282  mass_action          the accumulation into y[cell[c, a]] over c, a is approx
+decided                                        decided    type           assembly.py:282  mass_action          the accumulation into y[cell[c, a]] over b is approx
+decided                                        decided    isl            assembly.py:280  mass_action          cell[c], the indices of the cells passed as x,
+                                                                                                                 is in bounds wherever mass_ffc is called at assembly.py:280
+decided                                        decided    type           assembly.py:280  mass_action          the cells coords[cell[c]] picks, passed as x, are in bounds by type (the entries of cell : Fin(nv))
+decided                                        decided    isl            assembly.py:280  mass_action          Ae[c], the row passed to mass_ffc as A, is in bounds wherever mass_ffc is called at assembly.py:280
+decided                                        tested     call           assembly.py:280  mass_action          after each call mass_ffc(coords[cell[c]], Ae[c]) at assembly.py:280:
                                                                                                                  (Ae[c, 0, 0] == abs((coords[cell[c, 1], 0] - coords[cell[c, 0], 0])*(coords[cell[c, 2], 1] -
                                                                                                                        coords[cell[c, 0], 1]) -
                                                                                                                      (coords[cell[c, 2], 0] - coords[cell[c, 0], 0])*(coords[cell[c, 1], 1] -
@@ -2805,16 +3032,16 @@ decided                                        tested     call           assembl
                                                                                                                        coords[cell[c, 0], 1]) -
                                                                                                                      (coords[cell[c, 2], 0] - coords[cell[c, 0], 0])*(coords[cell[c, 1], 1] -
                                                                                                                        coords[cell[c, 0], 1])) / 24), to the approx tolerance
-tested                                         tested     interpreter    assembly.py:257  mass_action          the traced term computes what the body computes
-assumed                                        assumed    -              assembly.py:387  mass_action          mass_action.nc % 4 == 0, which mass_action is scheduled assuming
-decided under assume(mass_action.nc % 4 == 0)  assumed    isl            assembly.py:389  mass_action          split(mass_action.c, 4) renames the instances of mass_action one for one
-decided under assume(mass_action.nc % 4 == 0)  assumed    isl            assembly.py:389  mass_action          the order after split(mass_action.c, 4) runs every dependence of mass_action forward
-decided under assume(mass_action.nc % 4 == 0)  assumed    isl            assembly.py:390  mass_action          tag(mass_action.c.inner, 'ilp') renames the instances of mass_action one for one
-decided under assume(mass_action.nc % 4 == 0)  assumed    isl            assembly.py:390  mass_action          the order after tag(mass_action.c.inner, 'ilp') runs every dependence of mass_action forward
-decided                                        decided    isl            assembly.py:390  mass_action          atomic updates of mass_action.y run at the same time after tag(mass_action.c.inner, 'ilp'),
+tested                                         tested     interpreter    assembly.py:270  mass_action          the traced term computes what the body computes
+assumed                                        assumed    -              assembly.py:400  mass_action          mass_action.nc % 4 == 0, which mass_action is scheduled assuming
+decided under assume(mass_action.nc % 4 == 0)  assumed    isl            assembly.py:402  mass_action          split(mass_action.c, 4) renames the instances of mass_action one for one
+decided under assume(mass_action.nc % 4 == 0)  assumed    isl            assembly.py:402  mass_action          the order after split(mass_action.c, 4) runs every dependence of mass_action forward
+decided under assume(mass_action.nc % 4 == 0)  assumed    isl            assembly.py:403  mass_action          tag(mass_action.c.inner, 'ilp') renames the instances of mass_action one for one
+decided under assume(mass_action.nc % 4 == 0)  assumed    isl            assembly.py:403  mass_action          the order after tag(mass_action.c.inner, 'ilp') runs every dependence of mass_action forward
+decided                                        decided    isl            assembly.py:403  mass_action          atomic updates of mass_action.y run at the same time after tag(mass_action.c.inner, 'ilp'),
                                                                                                                  so their sum is reassociated and compared at 'reassoc'
 
-57 facts: 1 assumed, 48 decided, 8 tested
+58 facts: 1 assumed, 48 decided, 9 tested
 
 WITHOUT LEAN: exact_to_degree_two, element_mass, conservation and 39 more rows are not proved. To have Lean prove what it can: pip install "lanky[lean]", and Lean v4.29.1 from elan (elan default leanprover/lean4:v4.29.1).
 WITHOUT MATHLIB: exact_to_degree_two, element_mass, conservation and 1 more row are not proved, since only Lean with Mathlib can state them. To have Lean prove them: python -m lanky.mathlib ~/mathlib (about 7 GB), then export LANKY_LEAN_MATHLIB=~/mathlib.
@@ -2832,15 +3059,15 @@ mass_ffc: Schedule(mass_ffc, target='c')
 
 STATUS                                         EFFECTIVE  BY     WHERE            OWNER        STATEMENT
 ---------------------------------------------  ---------  -----  ---------------  -----------  --------------------------------------------------------------------------------------------
-assumed                                        assumed    -      assembly.py:387  mass_action  mass_action.nc % 4 == 0, which mass_action is scheduled assuming
-decided under assume(mass_action.nc % 4 == 0)  assumed    isl    assembly.py:389  mass_action  split(mass_action.c, 4) renames the instances of mass_action one for one
-decided under assume(mass_action.nc % 4 == 0)  assumed    isl    assembly.py:389  mass_action  the order after split(mass_action.c, 4) runs every dependence of mass_action forward
-decided under assume(mass_action.nc % 4 == 0)  assumed    isl    assembly.py:390  mass_action  tag(mass_action.c.inner, 'ilp') renames the instances of mass_action one for one
-decided under assume(mass_action.nc % 4 == 0)  assumed    isl    assembly.py:390  mass_action  the order after tag(mass_action.c.inner, 'ilp') runs every dependence of mass_action forward
-decided                                        decided    isl    assembly.py:390  mass_action  atomic updates of mass_action.y run at the same time after tag(mass_action.c.inner, 'ilp'),
+assumed                                        assumed    -      assembly.py:400  mass_action  mass_action.nc % 4 == 0, which mass_action is scheduled assuming
+decided under assume(mass_action.nc % 4 == 0)  assumed    isl    assembly.py:402  mass_action  split(mass_action.c, 4) renames the instances of mass_action one for one
+decided under assume(mass_action.nc % 4 == 0)  assumed    isl    assembly.py:402  mass_action  the order after split(mass_action.c, 4) runs every dependence of mass_action forward
+decided under assume(mass_action.nc % 4 == 0)  assumed    isl    assembly.py:403  mass_action  tag(mass_action.c.inner, 'ilp') renames the instances of mass_action one for one
+decided under assume(mass_action.nc % 4 == 0)  assumed    isl    assembly.py:403  mass_action  the order after tag(mass_action.c.inner, 'ilp') runs every dependence of mass_action forward
+decided                                        decided    isl    assembly.py:403  mass_action  atomic updates of mass_action.y run at the same time after tag(mass_action.c.inner, 'ilp'),
                                                                                                  so their sum is reassociated and compared at 'reassoc'
-tested                                         tested     loopy  assembly.py:390  mass_action  the scheduled run of mass_action agrees with the native run to the accuracy its types state
-tested                                         tested     loopy  assembly.py:237  mass_ffc     the scheduled run of mass_ffc agrees with the native run to the accuracy its types state
+tested                                         tested     loopy  assembly.py:403  mass_action  the scheduled run of mass_action agrees with the native run to the accuracy its types state
+tested                                         tested     loopy  assembly.py:249  mass_ffc     the scheduled run of mass_ffc agrees with the native run to the accuracy its types state
 
 8 facts: 1 assumed, 5 decided, 2 tested
 
