@@ -44,7 +44,7 @@ import sys
 from types import ModuleType
 from typing import TYPE_CHECKING, Any
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 #: The module each top-level name is defined in, imported on first use.
 _EXPORTS = {
