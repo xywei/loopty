@@ -6,6 +6,8 @@ All notable changes to loopty are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-18
+
 The demos read as engineers write checks, in lanky 0.6's claims. A claim is
 `@claim`, and its body, where it has one, is its proof: a loop over the
 points of its conclusion, `for n in line_taylor.conclusion.domain:`, with
