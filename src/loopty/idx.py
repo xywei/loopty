@@ -20,7 +20,7 @@ representation at all; :meth:`Layout.to_map` says so with
 helpers give the inverse direction symbolically for the term language.
 
 ``Fin`` belongs to ``lanky.prelude`` and is imported from there: an index type
-is a lanky object, because the same ``Fin[n]`` appears in a theorem's statement
+is a lanky object, because the same ``Fin[n]`` appears in a claim's statement
 and in a kernel's annotation and the two have to be the same thing.
 """
 

@@ -1,4 +1,4 @@
-"""sumpy's compressed Taylor reconstruction: theorem, kernel and schedule in one file.
+"""sumpy's compressed Taylor reconstruction: claim, kernel and schedule in one file.
 
 One file, three layers, and one ledger. It is the seed of the demo's flagship,
 sumpy's L2P for the 2-D Laplace kernel.
@@ -9,9 +9,9 @@ sumpy's L2P for the 2-D Laplace kernel.
     derivative it stands for, and runs the schedule compiled.
 
 ``lanky check examples/taylor_reconstruction.py``
-    The ledger, in one table: the theorem, proved by Lean with Mathlib for
+    The ledger, in one table: the claim, proved by Lean with Mathlib for
     every ``p``; the kernel's facts, its postcondition decided from what its
-    statements store; the theorem applied to the postcondition, which is what
+    statements store; the claim applied to the postcondition, which is what
     the kernel's output is; and the schedule's casts.
 
 ``loopty run examples/taylor_reconstruction.py``
@@ -28,7 +28,7 @@ that reconstruction, written as loops over the triangle.
 
 What links the layers:
 
-- ``on_the_triangle`` is the theorem: a table ``R`` that copies a table ``c``
+- ``on_the_triangle`` is the claim: a table ``R`` that copies a table ``c``
   where ``a < 2`` and follows the recurrence inside the triangle is ``D``
   there, for any ``D`` that satisfies the PDE and whose entries ``c`` holds
   where ``a < 2``. It is lanky's sumpy demonstration's claim on the triangle
@@ -37,13 +37,13 @@ What links the layers:
   copies, and the recurrence. That is decided from its term, since every
   cell of ``R`` is stored once and read only after its store
   (``loopty.dataflow``), and with Lean, proved.
-- ``@kernel(uses=[on_the_triangle])`` applies the theorem to the
-  postcondition: its copies and recurrence are two of the theorem's
+- ``@kernel(uses=[on_the_triangle])`` applies the claim to the
+  postcondition: its copies and recurrence are two of the claim's
   hypotheses, so ``R[a, b] == D(a)(b)`` on the triangle for every ``D``
   that the other two, ``pde`` and ``stored``, hold of. The row ``by
   on_the_triangle, for every D with pde and stored`` rests on the
-  theorem's proof and on the postcondition, and Lean checks that the
-  theorem applies.
+  claim's proof and on the postcondition, and Lean checks that the
+  claim applies.
 - ``cpu`` schedules the kernel, and each step is a cast, checked; its casts
   are rows of the same ledger. Running ``b`` outside ``a`` is refused, with
   the pair of instances it would reorder: ``R[a, b]`` reads ``R[a - 2, b +
@@ -54,7 +54,7 @@ from __future__ import annotations
 
 import math
 
-from lanky import theorem
+from lanky import claim
 from lanky.prelude import Fn, Nat, Real
 
 from loopty import Arr, Fin, Schedule, Where, kernel
@@ -67,10 +67,10 @@ ORDER = 6
 POINT = complex(0.6, 0.8)
 
 
-# {{{ the theorem
+# {{{ the claim
 
 
-@theorem
+@claim
 def on_the_triangle(
     p: Nat,
     c: Fn[Nat, Fn[Nat, Real]],

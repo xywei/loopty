@@ -1409,7 +1409,7 @@ def kernel(fn: Any = None, /, *, uses: Any = ()) -> Any:
         return decorate
     if not callable(fn) or getattr(fn, "__code__", None) is None:
         raise TypeError(
-            f"@kernel decorates a function, and was given {fn!r}; the theorems a "
+            f"@kernel decorates a function, and was given {fn!r}; the claims a "
             "kernel cites go in uses=[...]"
         )
     return registry.register_object(Kernel(fn, uses=uses))
@@ -1432,7 +1432,7 @@ def program(fn: Any = None, /, *, uses: Any = ()) -> Any:
         return decorate
     if not callable(fn) or getattr(fn, "__code__", None) is None:
         raise TypeError(
-            f"@program decorates a function, and was given {fn!r}; the theorems "
+            f"@program decorates a function, and was given {fn!r}; the claims "
             "a program cites go in uses=[...]"
         )
     return registry.register_object(Program(fn, uses=uses))
@@ -1448,7 +1448,7 @@ def _theorems(uses: Any, owner: str) -> tuple[Any, ...]:
     """
     if uses is None:
         raise TypeError(
-            f"uses=None names no theorem for {owner}; a program that cites none "
+            f"uses=None names no claim for {owner}; a program that cites none "
             "leaves uses= out"
         )
     entries = [uses] if _is_statement(uses) or isinstance(uses, str) else list(uses)
@@ -1456,9 +1456,9 @@ def _theorems(uses: Any, owner: str) -> tuple[Any, ...]:
     for entry in entries:
         if not _is_statement(entry):
             raise TypeError(
-                f"uses= of {owner} names theorems, which are offered as "
+                f"uses= of {owner} names claims, which are offered as "
                 f"hypotheses by their statements, and {entry!r} states nothing a "
-                "program can instantiate; pass the theorem itself, as "
+                "program can instantiate; pass the claim itself, as "
                 "uses=[scan_monotone]"
             )
         if not any(entry is seen for seen in out):

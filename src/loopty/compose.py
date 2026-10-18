@@ -1145,7 +1145,7 @@ def _theorem_standing(theorem: Any) -> str | None:
 
         fact = theorem.fact()
         if fact.is_axiom:
-            why: str | None = f"the axiom {name} is assumed on its citation"
+            why: str | None = f"the cited claim {name} is assumed on its source"
         elif fact.rests_on:
             why = (
                 f"{name} rests on {', '.join(fact.rests_on)}, whose status the "

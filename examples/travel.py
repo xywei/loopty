@@ -33,7 +33,7 @@ is decided under that: a cell ``n - 1 - i`` with ``0 <= i < n`` is a point of
 ``Fin[n]``. The fact rests on ``number``'s postcondition, which is ``tested``
 against ``number``'s native runs, so it is worth a test.
 
-*So is a theorem the program cites.* ``through`` scans the counts into the
+*So is a claim the program cites.* ``through`` scans the counts into the
 offsets that ``rowsums`` reads the rows of ``val`` through. ``rowsums``'s
 contract compares them with the offsets the counts give, which is ``scan``'s
 postcondition verbatim, so isl decides it from that alone, and the fact does
@@ -61,7 +61,7 @@ decided under the postcondition and the check.
 from __future__ import annotations
 
 import numpy as np
-from lanky import theorem
+from lanky import claim
 from lanky.prelude import Fn, Nat, Real
 
 from loopty import Arr, Fin, Schedule, kernel, program, reduce_sum
@@ -122,7 +122,7 @@ def scan(
         off[r + 1] = off[r] + cnt[r]
 
 
-@theorem
+@claim
 def scan_monotone(
     n: Nat,
     cnt: Fn[Fin[n], Nat],

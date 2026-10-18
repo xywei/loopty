@@ -544,7 +544,7 @@ def test_a_claim_about_a_rules_value_is_refused_naming_the_fix() -> None:
     def positive(x: Arr[Fin[n], Real]) -> Real & (x[0] > 0):  # noqa: F821
         return x[0]
 
-    with pytest.raises(TraceError, match="State it as a theorem"):
+    with pytest.raises(TraceError, match="State it as a claim"):
         positive.term
 
 

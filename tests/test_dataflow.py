@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from lanky import theorem
+from lanky import claim
 from lanky.ledger import Ledger, Status
 from lanky.plugins import registry
 from lanky.prelude import Fn, Int, Nat, Real
@@ -316,7 +316,7 @@ def test_a_conjunct_the_cited_theorem_gives_is_decided_under_it() -> None:
 
 def test_a_cited_theorem_gives_its_conclusion_from_the_postcondition() -> None:
     (applied,) = facts(kernels.scan_cited, APPLIED)
-    assert (applied.status, applied.decided_by) == (Status.DECIDED, "theorem")
+    assert (applied.status, applied.decided_by) == (Status.DECIDED, "claim")
     assert applied.statement == (
         "by offsets_increase: forall a in Fin(n + 1), b in Fin(n + 1) where a <= b. "
         "off[a] <= off[b]"
@@ -350,13 +350,33 @@ def test_the_flagships_theorem_gives_r_is_d_for_every_d_c_holds() -> None:
     ]
 
 
+def test_a_claim_under_a_condition_is_applied_and_its_row_says_under_what() -> None:
+    """A claim in a ``with`` block of a ``@condition`` holds under it (lanky 0.6).
+
+    Its row says so after the claim's name, as lanky's own rows do, and lists
+    no hypothesis the condition gives: ``pde`` is ``harmonic``'s.
+    """
+    (applied,) = facts(kernels.reconstruct_under, APPLIED)
+    assert applied.statement.startswith(
+        "by on_the_triangle_of_a_harmonic_table under harmonic, for every D with "
+        "stored: "
+    )
+    claim = applied.term.application.claim
+    assert [var.name for var, _ in claim.binders] == ["D"]
+    # the condition's pde is a hypothesis of what Lean is handed all the same
+    assert render(claim.guard).startswith(
+        "(forall a in Nat, b in Nat. D(a + 2)(b) + D(a)(b + 2) == 0) and "
+    )
+    assert applied.rests_on[0] == kernels.on_the_triangle_of_a_harmonic_table.fact_id
+
+
 def test_a_kernel_computing_another_recurrence_gets_nothing_from_its_theorem() -> None:
     """It claims the theorem's recurrence: refuted by its runs, never applied."""
     (post,) = facts(kernels.wrong_coefficient, "postcondition")
     assert post.status is Status.REFUTED
     assert not facts(kernels.wrong_coefficient, APPLIED)
     assert nothing(kernels.wrong_coefficient) == (
-        "the postcondition of wrong_coefficient is refuted, and a theorem is applied "
+        "the postcondition of wrong_coefficient is refuted, and a claim is applied "
         "to one that holds"
     )
     from loopty.dataflow import decide_postcondition
@@ -412,7 +432,7 @@ def test_a_conjunct_that_rounds_is_no_hypothesis_of_a_theorem_about_reals(
     }[name]
     assert nothing(k) == (
         f"the conjunct forall i in Fin(n). {conjunct} would be its hypothesis h, and "
-        "it is about reals and rounds in floating point, so a theorem about the "
+        "it is about reals and rounds in floating point, so a claim about the "
         "reals is not given it"
     )
 
@@ -502,7 +522,7 @@ def test_a_theorem_that_does_not_apply_gives_nothing() -> None:
     assert kernels.naturals_increase.fact_id not in post.rests_on
     assert nothing(kernels.scan_naturals) == (
         "its off would be off, but scan_naturals writes off, and nothing says its "
-        "cells are points of Nat: a theorem about them is over Int"
+        "cells are points of Nat: a claim about them is over Int"
     )
 
 
@@ -524,9 +544,9 @@ def test_a_matcher_that_raises_says_so_in_the_theorems_row(monkeypatch) -> None:
 def test_uses_takes_theorems_and_refuses_anything_else() -> None:
     from loopty import kernel
 
-    with pytest.raises(TypeError, match="uses= of the kernel names theorems"):
+    with pytest.raises(TypeError, match="uses= of the kernel names claims"):
         kernel(uses=["postcondition:spmv.scan@69"])
-    with pytest.raises(TypeError, match="the theorems a kernel cites go in uses="):
+    with pytest.raises(TypeError, match="the claims a kernel cites go in uses="):
         kernel(kernels.offsets_increase)
 
 
@@ -545,7 +565,7 @@ class Sized:
     """
 
     def __init__(self) -> None:
-        @theorem
+        @claim
         def sized(
             n: Nat,
             c: Fn[Nat, Real],
@@ -577,7 +597,7 @@ class Sized:
             for j in s.dom:
                 s[j] = 0.0
 
-        @theorem
+        @claim
         def sized_late(
             n: Nat,
             D: Fn[Fin[m], Real],  # noqa: F821
@@ -602,7 +622,7 @@ class Sized:
             for j in s.dom:
                 s[j] = 0.0
 
-        @theorem
+        @claim
         def negated(
             n: Nat,
             c: Fn[Nat, Real],
@@ -620,7 +640,7 @@ class Sized:
             for i in b.dom:
                 b[i] = a[i]
 
-        @theorem
+        @claim
         def squared(
             n: Nat,
             m: Int,
@@ -679,7 +699,7 @@ def test_a_family_nothing_bound_ranges_over_the_kernels_size(sized: Sized) -> No
     """
     for k in (sized.copy_p, sized.copy_pn):
         (applied,) = facts(k, APPLIED)
-        assert (applied.status, applied.decided_by) == (Status.DECIDED, "theorem")
+        assert (applied.status, applied.decided_by) == (Status.DECIDED, "claim")
         claim = applied.term.application.claim
         assert [(var.name, str(sort)) for var, sort in claim.binders] == [
             ("D", "Fn[Fin(p), Real]")

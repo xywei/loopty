@@ -1307,6 +1307,24 @@ def _room(
 # {{{ theorems as hypotheses
 
 
+def held_under(theorem: Any) -> tuple[str, frozenset[str]]:
+    """What a row citing ``theorem`` says it holds under, and the names that gives.
+
+    A claim defined in a ``with`` block of a ``@condition`` holds under it,
+    and a row that applies the claim says so after its name, ``by line_taylor
+    under away_from_zero``, as lanky's own rows do (``Claim.cited_under``).
+    The condition's named conditions, ``nonzero``, are said by that, so a row
+    does not list them again among the hypotheses it assumes: the second
+    item is their names, and the names of the condition's variables. A claim
+    under nothing gives ``("", frozenset())``.
+    """
+    under = getattr(theorem, "cited_under", "")
+    if not isinstance(under, str) or not under:
+        return "", frozenset()
+    bound = getattr(theorem, "bound", ())
+    return under, frozenset(name for name in bound if isinstance(name, str))
+
+
 class _Matcher:
     """Matches a theorem's proposition against a program's, binding its variables.
 

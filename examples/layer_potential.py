@@ -13,34 +13,41 @@ y`` and ``beta = z - c``, expanded in ``tau`` to the QBX order and summed at
 
 One file holds the three layers of it:
 
-- **The algorithm.** ``line_taylor`` is the theorem behind the coefficients,
+- **The algorithm.** ``line_taylor`` is the claim behind the coefficients,
   for every order, lanky's ``examples/line_taylor.py``: a table ``a`` that
   satisfies what the differential equation ``(alpha + tau * beta) f'(tau) ==
   beta`` says about its coefficients is the closed form ``coefficient``
   writes, at the ratio ``-beta / alpha``. ``reciprocal_taylor`` is the same
   for the double layer's series, the coefficients of ``alpha / (alpha + tau
-  * beta)``, which are the powers of that ratio. Each body is its proof, an
-  induction on the order that Lean checks. That the Taylor coefficients
-  satisfy the hypotheses, comparing the powers of ``tau``, is cited, not
-  proved: lanky has no power series (lanky#174). The kernels say the math as
-  written, ``log|alpha|``, ``coefficient(-beta / alpha, k)`` and ``(-beta /
-  alpha) ** k``, so each cites its theorem directly, and its ledger has the
-  row that links them: ``single_layer adds line_taylor's a(n) for n in
-  1..5`` and ``double_layer adds reciprocal_taylor's b(n) for n in 0..5``,
-  about the term each evaluates read over the complex numbers, not about the
-  floats it produces.
+  * beta)``, which are the powers of that ratio. Both assume one thing, the
+  condition ``away_from_zero``: ``alpha``, the center less the source, is
+  not zero. It is stated once, and the two claims are written in a ``with
+  away_from_zero as (alpha, beta, nonzero):`` block, so each holds under
+  it. Each body is its proof, an induction on the order, read aloud as
+  "for each n, in order: at the first n, by the first term; otherwise the
+  ODE at n - 1 gives a[n] from a[n - 1], and it holds by line_taylor at
+  n - 1". That the Taylor coefficients satisfy the conditions, comparing the
+  powers of ``tau``, is cited, not proved: lanky has no power series
+  (lanky#174). The kernels say the math as written, ``log|alpha|``,
+  ``coefficient(-beta / alpha, k)`` and ``(-beta / alpha) ** k``, so each
+  cites its claim directly, and its ledger has the row that links them:
+  ``single_layer adds line_taylor's a(n) for n in 1..5, under
+  away_from_zero`` and the same for ``double_layer`` and
+  ``reciprocal_taylor``'s ``b(n)``, about the term each evaluates read over
+  the complex numbers, not about the floats it produces.
 - **The kernels and their transforms.** ``single_layer`` and ``double_layer``
   are pytential's ``S`` and ``D`` over complex points (lanky's ``Complex``,
   stored as ``complex128``). ``as_sumpy_computes`` is the single layer in
   sumpy's arithmetic: each division by ``alpha`` through its conjugate, one
   real division where a complex one takes three (``conjugate_form``), and
   ``log|alpha|`` with no square root (``log_of_the_modulus``), two math steps
-  of the schedule, each a theorem. lanky proves ``conjugate_form`` alone;
-  ``log_of_the_modulus`` has its proof written out, a two-line chain through
-  ``log(abs(alpha) ** 2) / 2`` that cites two facts lanky knows,
-  ``log_of_a_power`` and ``modulus_squared``. Lean proves each step exact over the
-  complex numbers wherever ``c[t] - y[s] != 0``, which is tested on the
-  example inputs; the compiled run is compared with the native one, and at
+  of the schedule, each a claim. lanky proves ``conjugate_form`` alone;
+  ``log_of_the_modulus`` has its proof written out: an ``assert`` that
+  ``log|alpha|`` is half the log of ``|alpha| ** 2``, by ``log_of_a_power``,
+  and the rest of the way by ``modulus_squared``, two facts lanky knows.
+  Lean proves each step exact over the complex numbers wherever ``c[t] -
+  y[s] != 0``, which is tested on the example inputs; the compiled run is
+  compared with the native one, and at
   inputs of extreme magnitude the row notes where ``alpha * conj(alpha)``
   underflows or overflows and ``log|alpha|`` does not, as sumpy's arithmetic
   does. ``sumpy_tile()`` is sumpy's CPU schedule on that arithmetic, as
@@ -68,16 +75,18 @@ Run this file three ways.
     the panels shrink.
 
 ``lanky check examples/layer_potential.py``
-    The ledger. ``line_taylor`` and ``reciprocal_taylor`` read ``proved`` by
-    Lean where Mathlib is installed, each by its written proof, and
-    ``assumed`` without it, since the property tester draws no table over
-    ``Nat``; ``conjugate_form`` reads ``proved`` with Mathlib and ``tested``
-    without, and so does ``log_of_the_modulus``, by its written proof, which
-    lanky's search would not find alone; the two facts it cites are rows of
-    the ledger, from ``lanky.known``. The rows that ``single_layer`` adds
-    the first theorem's ``a(n)``, and ``double_layer`` the second's
-    ``b(n)``, are ``decided`` by ``theorem``, and proved by Lean with
-    Mathlib. Each math step of ``as_sumpy_computes`` is a row, proved by
+    The ledger. ``away_from_zero``'s row says that its condition can hold.
+    ``line_taylor`` and ``reciprocal_taylor`` read ``proved`` by Lean where
+    Mathlib is installed, each under ``away_from_zero`` and by its written
+    proof, and ``assumed`` without it, with a line under the table saying
+    that the proof was run at drawn tables instead and every step held;
+    ``conjugate_form`` reads ``proved`` with Mathlib and ``tested`` without,
+    and so does ``log_of_the_modulus``, by its written proof, which lanky's
+    search would not find alone; the two facts it cites are rows of the
+    ledger, from ``lanky.known``. The rows that ``single_layer`` adds the
+    first claim's ``a(n)``, and ``double_layer`` the second's ``b(n)``, each
+    under ``away_from_zero``, are ``decided`` by ``claim``, and proved by
+    Lean with Mathlib. Each math step of ``as_sumpy_computes`` is a row, proved by
     Lean with Mathlib and tested on drawn inputs without it; the condition
     ``c[t] - y[s] != 0`` is tested on the example inputs; and the compiled
     schedule's agreement with the native kernel is a row. Each kernel's
@@ -143,7 +152,7 @@ import json
 from pathlib import Path
 
 import numpy as np
-from lanky import theorem
+from lanky import by, claim, condition
 from lanky.known import log_of_a_power, modulus_squared
 from lanky.prelude import Complex, Fn, Nat, Real
 
@@ -168,64 +177,63 @@ def coefficient(ratio, k):
     return -(ratio**k) / k
 
 
-@theorem
-def line_taylor(
-    alpha: Complex,
-    beta: Complex,
-    a: Fn[Nat, Complex],
-    nonzero: alpha != 0,
-    first_term: alpha * a[1] == beta,
-    ode: all((n + 1) * alpha * a[n + 1] + n * beta * a[n] == 0 for n in Nat if n >= 1),
-) -> all(a[n] == coefficient(-beta / alpha, n) for n in Nat if n >= 1):
-    """The line-Taylor coefficients of ``log(alpha + tau * beta)``, at every order.
+@condition
+def away_from_zero(alpha: Complex, beta: Complex, nonzero: alpha != 0):
+    """``alpha``, the center less the source, is not zero.
 
-    ``f(tau) = log(alpha + tau * beta)`` solves ``(alpha + tau * beta) * f'(tau)
-    == beta``; comparing the powers of ``tau`` in it gives ``first_term`` and
-    ``ode`` (L. V. Ahlfors, Complex Analysis, 3rd ed., 1979, chs. 2 and 5;
-    lanky's ``examples/line_taylor.py`` states the equation as an axiom and
-    checks sumpy's own coefficients against the closed form through order 6).
+    ``beta``, the target less the center, may be any complex number.
     """
-    ratio = -beta / alpha
-
-    def claim(n):
-        if n == 1:
-            return first_term
-        recurrence = a[n].equals((n - 1) / n * ratio * a[n - 1], by=ode)
-        return recurrence, claim(n - 1)
-
-    return claim
 
 
-@theorem
-def reciprocal_taylor(
-    alpha: Complex,
-    beta: Complex,
-    b: Fn[Nat, Complex],
-    nonzero: alpha != 0,
-    first_term: b[0] == 1,
-    ode: all(alpha * b[n + 1] + beta * b[n] == 0 for n in Nat),
-) -> all(b[n] == (-beta / alpha) ** n for n in Nat):
-    """The line-Taylor coefficients of ``alpha / (alpha + tau * beta)``, at every order.
+with away_from_zero as (alpha, beta, nonzero):
 
-    ``g(tau) = alpha / (alpha + tau * beta)`` solves ``(alpha + tau * beta) *
-    g(tau) == alpha``; comparing the powers of ``tau`` in it gives
-    ``first_term`` and ``ode``. ``-1 / (alpha + tau * beta)`` is the
-    derivative of ``log(alpha + tau * beta)`` along the source, so these are
-    the coefficients of the double layer's series, :func:`double`'s, as
-    ``line_taylor``'s are the single layer's.
-    """
-    ratio = -beta / alpha
+    @claim
+    def line_taylor(
+        a: Fn[Nat, Complex],
+        first_term: alpha * a[1] == beta,
+        ode: all(
+            (n + 1) * alpha * a[n + 1] + n * beta * a[n] == 0 for n in Nat if n >= 1
+        ),
+    ) -> all(a[n] == coefficient(-beta / alpha, n) for n in Nat if n >= 1):
+        """The line-Taylor coefficients of ``log(alpha + tau * beta)``, at every order.
 
-    def claim(n):
-        if n == 0:
-            return first_term
-        recurrence = b[n].equals(ratio * b[n - 1], by=ode)
-        return recurrence, claim(n - 1)
+        ``f(tau) = log(alpha + tau * beta)`` solves ``(alpha + tau * beta) *
+        f'(tau) == beta``; comparing the powers of ``tau`` in it gives
+        ``first_term`` and ``ode`` (L. V. Ahlfors, Complex Analysis, 3rd ed.,
+        1979, chs. 2 and 5; lanky's ``examples/line_taylor.py`` checks sumpy's
+        own coefficients against the closed form through order 6).
+        """
+        for n in line_taylor.conclusion.domain:
+            if n == 1:
+                yield by(first_term)
+            else:
+                assert a[n] == (n - 1) / n * (-beta / alpha) * a[n - 1], by(ode[n - 1])
+                yield by(line_taylor.conclusion[n - 1])
 
-    return claim
+    @claim
+    def reciprocal_taylor(
+        b: Fn[Nat, Complex],
+        first_term: b[0] == 1,
+        ode: all(alpha * b[n + 1] + beta * b[n] == 0 for n in Nat),
+    ) -> all(b[n] == (-beta / alpha) ** n for n in Nat):
+        """The Taylor coefficients of ``alpha / (alpha + tau * beta)``, at every order.
+
+        ``g(tau) = alpha / (alpha + tau * beta)`` solves ``(alpha + tau * beta)
+        * g(tau) == alpha``; comparing the powers of ``tau`` in it gives
+        ``first_term`` and ``ode``. ``-1 / (alpha + tau * beta)`` is the
+        derivative of ``log(alpha + tau * beta)`` along the source, so these
+        are the coefficients of the double layer's series, :func:`double`'s,
+        as ``line_taylor``'s are the single layer's.
+        """
+        for n in reciprocal_taylor.conclusion.domain:
+            if n == 0:
+                yield by(first_term)
+            else:
+                assert b[n] == (-beta / alpha) * b[n - 1], by(ode[n - 1])
+                yield by(reciprocal_taylor.conclusion[n - 1])
 
 
-@theorem
+@claim
 def conjugate_form(x: Complex, alpha: Complex, nonzero: alpha != 0) -> (
     x / alpha == x * conj(alpha) * (1 / real(alpha * conj(alpha)))
 ):
@@ -237,16 +245,13 @@ def conjugate_form(x: Complex, alpha: Complex, nonzero: alpha != 0) -> (
     """
 
 
-@theorem
+@claim
 def log_of_the_modulus(alpha: Complex, nonzero: alpha != 0) -> (
     log(abs(alpha)) == log(real(alpha * conj(alpha))) / 2
 ):
     """``log|alpha|`` with no square root: half the log of alpha times its conjugate."""
-    return (
-        log(abs(alpha))
-        .equals(log(abs(alpha) ** 2) / 2, by=log_of_a_power)
-        .equals(log(real(alpha * conj(alpha))) / 2, by=modulus_squared)
-    )
+    assert log(abs(alpha)) == log(abs(alpha) ** 2) / 2, by(log_of_a_power)
+    return by(modulus_squared)
 
 
 def single(alpha, beta):
@@ -638,7 +643,7 @@ def main() -> int:
         )
         ok = ok and fact.status.value == "tested"
 
-    # each theorem and its kernel, in one row
+    # each claim and its kernel, in one row
     for kern in (single_layer, double_layer):
         (series,) = [fact for fact in kern.facts() if fact.kind == "by-theorem"]
         print(f"  {series.statement} -> {series.status.value}")
@@ -673,9 +678,9 @@ def main() -> int:
     print(f"  on C, an ilp loop for the work items: {'.'.join(tiled.history)}")
     print()
     print(f"accuracy at {', '.join(map(str, PANELS))} panels:")
-    for claim in (green_identity, jump_S, jump_D):
-        held, what = claim()
-        print(f"  {claim.__name__:15} {what} -> {'tested' if held else 'REFUTED'}")
+    for row in (green_identity, jump_S, jump_D):
+        held, what = row()
+        print(f"  {row.__name__:15} {what} -> {'tested' if held else 'REFUTED'}")
         ok = ok and held
     return 0 if ok else 1
 

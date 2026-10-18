@@ -6587,6 +6587,23 @@ def _axis_size(axis: Any) -> Any:
     raise TraceError(f"not an index type: {axis!r}")
 
 
+def _builtin_name(value: Any) -> str | None:
+    """The name of Python's builtin that an annotation read as ``value``, if any.
+
+    lanky reads ``abs``, ``all``, ``any``, ``max``, ``min`` and ``sum`` in an
+    annotation as its own terms (``lanky.terms.BUILTIN_OVERRIDES``), so a
+    size spelled ``max`` arrives as lanky's ``max`` and not as a name.
+    """
+    try:
+        from lanky.terms import BUILTIN_OVERRIDES
+    except ImportError:  # a lanky without them
+        return None
+    for builtin, meant in BUILTIN_OVERRIDES.items():
+        if value is meant:
+            return builtin
+    return None
+
+
 def array_type(
     spec: ArrSpec, parameters: Mapping[str, Any], name: str = ""
 ) -> ArrType:
@@ -6622,12 +6639,20 @@ def array_type(
     for size in axes:
         if not isinstance(size, int | np.integer | prim.ExpressionNode):
             at = f" of {name}" if name else ""
+            builtin = _builtin_name(size)
+            if builtin is not None:
+                raise TraceError(
+                    f"the type{at} has the size {builtin}, which is neither a "
+                    f"name nor a number: an annotation reads {builtin} as "
+                    "Python's own, as it reads abs, all, any, max, min and sum. "
+                    "Rename the size"
+                )
             raise TraceError(
                 f"the type{at}, {spec!r}, has the size {size!r}, which is "
                 "neither a name nor a number: the annotation reads a name that "
                 "the kernel's module or Python already gives a meaning (abs, "
-                "any, all, or a function, a class or a module the file "
-                "defines or imports) as that meaning. Rename the size"
+                "all, any, max, min, sum, or a function, a class or a module "
+                "the file defines or imports) as that meaning. Rename the size"
             )
     ragged = []
     for position, size in enumerate(axes):
@@ -7089,7 +7114,7 @@ def trace(kernel: Any, arg_types: Any) -> Term:
     if isinstance(returns, Refined):
         raise TraceError(
             f"{name} returns {returns}, a refined sort: a claim about the value "
-            "a rule returns has no name to say it by. State it as a theorem about "
+            "a rule returns has no name to say it by. State it as a claim about "
             "the rule, or have the kernel write the value into a parameter and "
             "claim it after the ->"
         )

@@ -404,14 +404,14 @@ def test_a_theorem_reads_them_as_the_functions_they_are() -> None:
     A family named ``conj`` would make the claim about any function at all.
     Natively, and in a kernel's trace, they are numpy's and a call.
     """
-    from lanky import theorem
+    from lanky import claim
     from lanky.plugins import registry
     from lanky.prelude import Complex
     from lanky.terms import Call, Elementary
 
     with registry.collecting():
 
-        @theorem
+        @claim
         def conjugate(
             alpha: Complex, beta: Complex, away: alpha != 0  # noqa: F821
         ) -> _ratio(alpha, beta) == -beta / alpha:  # noqa: F821

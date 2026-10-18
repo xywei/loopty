@@ -3,7 +3,7 @@
 Run this file three ways and it answers three different questions.
 
 ``python examples/spmv.py``
-    The kernels run natively on numpy and the theorem runs as a property test.
+    The kernels run natively on numpy and the claim runs as a property test.
     Nothing but lanky, loopty and numpy is loaded; loopy is not involved.
 
 ``lanky check examples/spmv.py``
@@ -34,7 +34,7 @@ is decided by the shape of the data.
 
 *The offsets come with a claim.* ``scan`` writes them, and its return
 annotation is not a result type (outputs are parameters) but a postcondition:
-``off[0] == 0`` and the recurrence. ``scan_monotone`` is the theorem that turns
+``off[0] == 0`` and the recurrence. ``scan_monotone`` is the claim that turns
 that recurrence into the monotonicity a flat CSR layout needs. lanky decides it
 with the property tester, or proves it with Lean when the Lean extra is
 installed.
@@ -60,12 +60,12 @@ that does build, and did run on two device classes.
 from __future__ import annotations
 
 import numpy as np
-from lanky import theorem
+from lanky import claim
 from lanky.prelude import Fn, Nat, Real
 
 from loopty import Arr, Fin, Schedule, kernel, program, reduce_sum
 
-# {{{ the kernels and the theorem
+# {{{ the kernels and the claim
 
 
 @kernel
@@ -83,7 +83,7 @@ def scan(
         off[r + 1] = off[r] + cnt[r]
 
 
-@theorem
+@claim
 def scan_monotone(
     n: Nat,
     cnt: Fn[Fin[n], Nat],
@@ -94,7 +94,7 @@ def scan_monotone(
     """The offsets an exclusive scan produces are monotone.
 
     The hypotheses are exactly ``scan``'s postcondition, written over families
-    rather than arrays because a theorem talks about the data and not about the
+    rather than arrays because a claim talks about the data and not about the
     storage. Counts are naturals, so nothing decreases; the interesting part is
     that this is the fact a flat CSR layout needs in order to be in bounds, and
     lanky establishes it once for every kernel that lays data out this way.

@@ -17,7 +17,7 @@ import islpy as isl
 import lanky
 import numpy as np
 import pytest
-from lanky import theorem
+from lanky import claim
 from lanky.ledger import Ledger, Status
 from lanky.prelude import Fin, Fn, Int, Nat, Real
 from lanky.terms import (
@@ -241,7 +241,7 @@ def test_a_theorems_family_is_checked_against_its_sorts_in_the_programs_names() 
     # bounded's f ranges over Fin[m], and its hypothesis binds m to the k of
     # the program's perm: the family's codomain is Fin(k) there, not Fin(m),
     # which would compare equal with an element sort the program calls m.
-    @theorem
+    @claim
     def bounded(
         n: Nat,  # noqa: F821
         m: Nat,  # noqa: F821
@@ -279,7 +279,7 @@ def test_a_sum_in_a_theorem_runs_over_the_programs_size() -> None:
     # total's n is the program's k: its sum runs over Fin(k). Left at Fin(n),
     # it would be over a size the program does not have, or one it spells n
     # and means otherwise (#239).
-    @theorem
+    @claim
     def total(
         n: Nat,  # noqa: F821
         m: Int,  # noqa: F821
@@ -304,7 +304,7 @@ def test_a_theorems_variable_in_a_power_is_never_the_programs_of_its_spelling() 
     # off holding the program's m**2 is not that, and gives no instance,
     # where read as the program's m it gave off[i] >= perm[i], false at k = 5
     # and m = 0 (#239).
-    @theorem
+    @claim
     def squares(
         n: Nat,  # noqa: F821
         m: Int,  # noqa: F821
@@ -630,14 +630,14 @@ def test_a_theorem_over_naturals_is_no_hypothesis_about_written_offsets() -> Non
     )
 
 
-def test_uses_takes_theorems_and_refuses_an_id() -> None:
+def test_uses_takes_claims_and_refuses_an_id() -> None:
     with pytest.raises(TypeError, match="states nothing a program can instantiate"):
 
-        @program(uses=["theorem:travel.scan_monotone@73"])
+        @program(uses=["claim:travel.scan_monotone@73"])
         def by_id(cnt, off):
             travel.scan(cnt, off)
 
-    with pytest.raises(TypeError, match="uses=None names no theorem"):
+    with pytest.raises(TypeError, match="uses=None names no claim"):
 
         @program(uses=None)
         def by_none(cnt, off):
@@ -1290,7 +1290,7 @@ def test_a_requirement_decided_under_an_axiom_is_checked_all_the_same() -> None:
     assert any(
         h.source.startswith("scan_monotone_cited at") for h in requirement.used
     )
-    assert "the axiom scan_monotone_cited is assumed on its citation" in (
+    assert "the cited claim scan_monotone_cited is assumed on its source" in (
         requirement.reason
     )
     assert term.checks

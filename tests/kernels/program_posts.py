@@ -6,7 +6,7 @@ isl decides, what is stated for Lean, and why the rest is neither.
 
 from __future__ import annotations
 
-from lanky import theorem
+from lanky import claim
 from lanky.prelude import Fn, Int, Nat, Real
 
 from loopty import Arr, Fin, kernel, program, reduce_sum
@@ -92,7 +92,7 @@ def misnamed(a, c) -> all(c[i] == 3 * a[i] for i in Fin[m]):
 # {{{ a cited theorem, used at the sections of the arrays
 
 
-@theorem
+@claim
 def two_passes(
     n: Nat,
     A: Fn[Fin[n], Fn[Fin[n], Real]],

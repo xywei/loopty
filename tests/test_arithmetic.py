@@ -3094,8 +3094,10 @@ def _object_size(x: Arr[Fin[abs], Real], y: Arr[Fin[abs], Real]):  # noqa: F821
 def test_a_name_isl_reads_as_a_keyword():
     # isl's reader takes max, floor and its other keywords as its own
     # whatever their case: a size or a loop variable max failed inside the
-    # trace with "isl_set_read_from_str failed: syntax error".
-    with pytest.raises(TraceError, match="isl's keywords: max"):
+    # trace with "isl_set_read_from_str failed: syntax error". A size max is
+    # refused before isl sees it: an annotation reads max as Python's own,
+    # lanky's, as it reads abs (lanky 0.6).
+    with pytest.raises(TraceError, match="the size max, which is neither a name"):
         kernel(_isl_size).trace()
     with pytest.raises(TraceError, match="isl's keywords: floor"):
         kernel(_isl_scalar).trace()

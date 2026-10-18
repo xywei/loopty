@@ -1,4 +1,4 @@
-"""sumpy's L2P for the 2-D Laplace kernel: the theorem, the kernels and the schedule.
+"""sumpy's L2P for the 2-D Laplace kernel: the claim, the kernels and the schedule.
 
 A fast multipole method ends by evaluating each leaf box's local expansion at
 the targets the box owns, the L2P. sumpy does it in ``E2PFromSingleBox``, for
@@ -16,20 +16,22 @@ L2P, read top to bottom, in three layers:
    form for a kernel of order ``p``: box by box, on the triangle ``a + b <=
    p``, what sumpy stores taken as a table ``c[i, a, b]``. Lean proves both,
    for every order, with Mathlib; ``lanky check --show-lean`` prints the Lean.
-   ``compressed_taylor``'s body is its proof, as a textbook writes it: the
-   claim at ``(a, b)`` is what is stored where ``a < 2``, and otherwise a
-   calculation, a line to a step, each with its reason: ``R[a, b]`` equals
-   ``-R[a - 2, b + 2]`` by the recurrence, ``-D[a - 2, b + 2]`` by the claim
-   at ``(a - 2, b + 2)``, and ``D[a, b]`` by the PDE. ``claim`` calling
-   itself closer to ``a < 2`` is the induction.
+   ``compressed_taylor``'s body is its proof, as a textbook writes it: a
+   loop over the points ``(a, b)`` of its conclusion, in order. Where
+   ``a < 2`` the point holds by what is stored; otherwise by the
+   recurrence, the conclusion at ``(a - 2, b + 2)`` and the PDE:
+   ``R[a, b]`` is ``-R[a - 2, b + 2]``, which is ``-D[a - 2, b + 2]``,
+   which is ``D[a, b]``. The point ``(a - 2, b + 2)`` comes earlier in the
+   loop than ``(a, b)``, since ``a``, the outer variable, is smaller, and
+   citing the conclusion there is the induction.
 2. **The kernels, in loopty.** ``unpack`` reads each box's ``2p + 1``
    coefficients, in sumpy's storage order, into that table: through sumpy's
    storage index, ``storage_index``, a layout whose three facts say it is one
    for one onto the ``2p + 1`` addresses, and its postcondition says which
    coefficient each cell holds. ``reconstruct`` fills each box's triangle
    from the table. Its postcondition is what it stores, decided from its
-   statements, and is the theorem's hypotheses about the kernel, so the
-   theorem applies: the triangle is the table of derivatives, for any
+   statements, and is the claim's conditions about the kernel, so the
+   claim applies: the triangle is the table of derivatives, for any
    harmonic table whose derivatives the coefficients hold. ``evaluate`` sums
    the Taylor polynomial at each target, and ``l2p`` runs the three in turn,
    the table and the triangles arrays it makes.
@@ -58,8 +60,8 @@ Run it three ways.
     ``on_a_device()``, and lists the facts of ``on_a_gpu``.
 
 ``lanky check examples/l2p.py``
-    The ledger: the theorems; the layout's facts; each kernel's accesses,
-    writes and postcondition; the theorem applied to it; the program's
+    The ledger: the claims; the layout's facts; each kernel's accesses,
+    writes and postcondition; the claim applied to it; the program's
     definedness; the casts of the schedules; and the row that compares
     ``l2p`` with sumpy's own kernel.
 
@@ -99,7 +101,7 @@ import math
 from pathlib import Path
 
 import numpy as np
-from lanky import theorem
+from lanky import by, claim
 from lanky.prelude import Fn, Nat, Real
 
 from loopty import (
@@ -132,7 +134,7 @@ SCALING = -1 / (2 * math.pi)
 # {{{ 1. the algorithm
 
 
-@theorem
+@claim
 def compressed_taylor(
     D: Fn[Nat, Nat, Real],
     R: Fn[Nat, Nat, Real],
@@ -147,21 +149,14 @@ def compressed_taylor(
     do. ``R`` agrees with it where sumpy stores, ``a < 2``, and follows the
     recurrence everywhere else.
     """
-
-    def claim(a, b):
+    for a, b in compressed_taylor.conclusion.domain:
         if a < 2:
-            return stored
-        return (
-            R[a, b]
-            .equals(-R[a - 2, b + 2], by=recurrence)
-            .equals(-D[a - 2, b + 2], by=claim(a - 2, b + 2))
-            .equals(D[a, b], by=pde)
-        )
-
-    return claim
+            yield by(stored)
+        else:
+            yield by(recurrence, compressed_taylor.conclusion[a - 2, b + 2], pde)
 
 
-@theorem
+@claim
 def on_every_triangle(
     n: Nat,
     p: Nat,

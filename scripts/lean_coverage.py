@@ -126,15 +126,15 @@ def _facts(path: Path) -> list[Any]:
 def _isls(fact: Any) -> bool:
     """Whether isl decides the fact: its term is a question, or a cast isl answered.
 
-    A theorem a kernel cites, applied to the postcondition isl decided
-    (``by-theorem``, decided by ``theorem``), is counted with them: it is
+    A claim a kernel cites, applied to the postcondition isl decided
+    (``by-theorem``, decided by ``claim``), is counted with them: it is
     stated for Lean the same way, and what it applies to is isl's.
     """
     from loopty.oracle import IslQuestion
 
     return isinstance(fact.term, IslQuestion) or (
         callable(getattr(fact.term, "lean_obligation", None))
-        and fact.decided_by in ("isl", "theorem", None)
+        and fact.decided_by in ("isl", "claim", None)
     )
 
 
@@ -224,12 +224,12 @@ def report(records: list[dict[str, Any]]) -> str:
     isl = [r for r in records if r["outcome"] != "not isl's"]
     counts = Counter(r["outcome"] for r in isl)
     proved = counts["proved"]
-    applied = sum(1 for r in isl if r.get("by") == "theorem")
+    applied = sum(1 for r in isl if r.get("by") == "claim")
     lines.append(
         f"Of {len(isl)} facts isl decides in {len({r['file'] for r in records})} "
         "files"
         + (
-            f" ({applied} of them a theorem a kernel cites, applied to what isl "
+            f" ({applied} of them a claim a kernel cites, applied to what isl "
             "decided)"
             if applied
             else ""

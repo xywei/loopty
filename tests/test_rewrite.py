@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from lanky import theorem
+from lanky import claim
 from lanky.prelude import Complex, Fn, Nat, Real
 from lanky.terms import render
 
@@ -29,33 +29,33 @@ def coefficient(ratio, k):
     return -(ratio**k) / k
 
 
-@theorem
+@claim
 def conjugate_form(x: Complex, alpha: Complex, nonzero: alpha != 0) -> (  # noqa: F821
     x / alpha == x * conj(alpha) * (1 / real(alpha * conj(alpha)))  # noqa: F821
 ):
     """Division by alpha through its conjugate."""
 
 
-@theorem
+@claim
 def log_of_the_modulus(alpha: Complex, nonzero: alpha != 0) -> (  # noqa: F821
     log(abs(alpha)) == log(real(alpha * conj(alpha))) / 2  # noqa: F821
 ):
     """``log|alpha|`` with no square root."""
 
 
-@theorem
+@claim
 def quotient_of_the_conjugate(x: Complex, alpha: Complex, nonzero: alpha != 0) -> (  # noqa: F821
     x * conj(alpha) * (1 / real(alpha * conj(alpha))) == x / alpha  # noqa: F821
 ):
     """The conjugate form read backwards: what a kernel should not be rewritten by."""
 
 
-@theorem
+@claim
 def doubling(x: Real) -> x + x == 2 * x:  # noqa: F821
     """A theorem neither side of which the kernel computes."""
 
 
-@theorem
+@claim
 def anything(x: Complex) -> x == x + 0:  # noqa: F821
     """A left side that is a bare variable matches every term."""
 
@@ -294,7 +294,7 @@ def test_a_data_condition_that_fails_on_the_example_inputs_is_refuted() -> None:
     )
 
 
-@theorem
+@claim
 def through_the_reciprocal(x: Real, a: Real, nonzero: a != 0) -> (  # noqa: F821
     x / a == x * (1 / a)  # noqa: F821
 ):
@@ -409,7 +409,7 @@ def test_a_rewrite_finite_before_and_nan_after_at_a_draw_is_refuted() -> None:
     comparison of drawn inputs, so the step read tested (Codex, #341).
     """
 
-    @theorem
+    @claim
     def log_of_a_square(x: Real) -> log(x * x) == 2 * log(x):  # noqa: F821
         """False for a negative x, where the right side is NaN."""
 
@@ -494,7 +494,7 @@ def test_a_disagreement_at_a_drawn_input_fails_the_compared_row() -> None:
     (Codex, #341).
     """
 
-    @theorem
+    @claim
     def abs_is_itself(x: Real) -> abs(x) == x:  # noqa: F821
         """False for a negative x."""
 
@@ -518,7 +518,7 @@ def test_draws_that_break_the_theorems_condition_are_not_compared() -> None:
     row says why it is not tested.
     """
 
-    @theorem
+    @claim
     def log_of_a_square(x: Real, positive: x > 0) -> log(x * x) == 2 * log(x):  # noqa: F821
         """True where x > 0."""
 
@@ -531,13 +531,13 @@ def test_draws_that_break_the_theorems_condition_are_not_compared() -> None:
     assert row.status.value in ("tested", "assumed"), row.provenance
     if row.status.value == "assumed":
         reason = row.provenance["reason"]
-        assert "broke a condition the theorems need, x[i] > 0" in reason, reason
+        assert "broke a condition the claims need, x[i] > 0" in reason, reason
 
 
 def test_a_later_step_leaves_an_earlier_steps_compared_row_as_it_was() -> None:
     """A rewrite compares the schedule it made, asked of a later one (Codex, #341)."""
 
-    @theorem
+    @claim
     def wrong_form(x: Complex, alpha: Complex, nonzero: alpha != 0) -> (  # noqa: F821
         x / alpha == x * alpha  # noqa: F821
     ):
@@ -595,7 +595,7 @@ def test_the_part_names_the_theorem_it_restates_as_a_citation() -> None:
 # {{{ structural rewrites: keep= and into=
 
 
-@theorem
+@claim
 def two_passes(
     n: Nat,
     F: Fn[Fin[n], Fin[n], Real],  # noqa: F821
@@ -788,7 +788,7 @@ def test_into_and_keep_are_one_or_the_other() -> None:
 # {{{ a size only an array set aside carries
 
 
-@theorem
+@claim
 def times_nothing(a: Real, b: Real) -> a * 0 + b == b:  # noqa: F821
     """A term times nothing adds nothing."""
 

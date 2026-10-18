@@ -7,7 +7,7 @@ the rest is not.
 from __future__ import annotations
 
 import numpy as np
-from lanky import theorem
+from lanky import claim, condition
 from lanky.prelude import Fn, Int, Nat, Real
 
 from loopty import Arr, Fin, Schedule, Where, kernel, layout, program
@@ -185,7 +185,7 @@ def doubled_beside(
 # {{{ cited theorems
 
 
-@theorem
+@claim
 def offsets_increase(
     n: Nat,
     cnt: Fn[Fin[n], Nat],
@@ -220,7 +220,7 @@ def scan_cited(cnt: Arr[Fin[n], Nat], off: Arr[Fin[n + 1], Int]) -> (off[0] == 0
         off[r + 1] = off[r] + cnt[r]
 
 
-@theorem
+@claim
 def on_the_triangle(
     p: Nat,
     c: Fn[Nat, Fn[Nat, Real]],
@@ -318,7 +318,7 @@ def wrong_coefficient(
                 R[a, b] = -R[a - 2, b + 1]
 
 
-@theorem
+@claim
 def tenfold(
     n: Nat,
     c: Fn[Nat, Real],
@@ -341,7 +341,7 @@ def scaled(c: Arr[Fin[n], Real], R: Arr[Fin[n], Real]) -> all(
         R[i] = c[i] * 0.1
 
 
-@theorem
+@claim
 def difference(
     n: Nat,
     a: Fn[Nat, Real],
@@ -361,7 +361,7 @@ def summed(a: Arr[Fin[n], Real], b: Arr[Fin[n], Real], s: Arr[Fin[n], Real]) -> 
         s[i] = a[i] + b[i]
 
 
-@theorem
+@claim
 def unrelated(n: Nat, f: Fn[Fin[n], Int], h: all(f(i) == 7 for i in Fin[n])) -> all(
     f(i) >= 7 for i in Fin[n]
 ):
@@ -378,7 +378,7 @@ def scan_unrelated(cnt: Arr[Fin[n], Nat], off: Arr[Fin[n + 1], Int]) -> (
         off[r + 1] = off[r] + cnt[r]
 
 
-@theorem
+@claim
 def naturals_increase(
     n: Nat,
     cnt: Fn[Fin[n], Nat],
@@ -399,7 +399,7 @@ def scan_naturals(cnt: Arr[Fin[n], Nat], off: Arr[Fin[n + 1], Int]) -> (
         off[r + 1] = off[r] + cnt[r]
 
 
-@theorem
+@claim
 def integral_fill(
     n: Nat, k: Int, R: Fn[Nat, Real], h: all(R(i) == k for i in Fin[n])
 ) -> all(R(i) * 2 != 1 for i in Fin[n]):
@@ -416,7 +416,7 @@ def fill(s: Real, R: Arr[Fin[n], Real]) -> all(R[i] == s for i in Fin[n]):
         R[i] = s
 
 
-@theorem
+@claim
 def copied(
     n: Nat, c: Fn[Nat, Real], R: Fn[Nat, Real], h: all(R(i) == c(i) for i in Fin[n])
 ) -> all(-R(i) == -c(i) for i in Fin[n]):
@@ -432,7 +432,7 @@ def copy64(c: Arr[Fin[n], np.float64], R: Arr[Fin[n], np.float64]) -> all(
         R[i] = c[i]
 
 
-@theorem
+@claim
 def plus_one(
     n: Nat, c: Fn[Nat, Real], R: Fn[Nat, Real], h: all(R(i) == c(i) for i in Fin[n])
 ) -> all((R(i) + 1) - R(i) == 1 for i in Fin[n]):
@@ -457,7 +457,7 @@ def ones(c: Arr[Fin[n], Real], R: Arr[Fin[n], Real]) -> all(
         R[i] = c[i]
 
 
-@theorem
+@claim
 def integral_half(
     n: Nat, k: Int, R: Fn[Nat, Real], h: all(R(i) == k for i in Fin[n])
 ) -> all(R(i) != 0.5 for i in Fin[n]):
@@ -473,7 +473,7 @@ def fill_half(s: Real, R: Arr[Fin[n], Real]) -> all(R[i] == s for i in Fin[n]) &
         R[i] = s
 
 
-@theorem
+@claim
 def constant_table(
     n: Nat, k: Real, R: Fn[Nat, Real], h: all(R(i) == k for i in Fin[n])
 ) -> all(R(i) == R(j) for i in Fin[n] for j in Fin[n]):
@@ -572,6 +572,72 @@ windowed_differences = (
     .fuse(differences.doubled.j, differences.differenced.i)
     .contract(differences.f)
 )
+
+
+# }}}
+
+
+# {{{ a claim under a named condition
+
+
+@condition
+def harmonic(
+    D: Fn[Nat, Fn[Nat, Real]],
+    pde: all(D(a + 2)(b) + D(a)(b + 2) == 0 for a in Nat for b in Nat),
+):
+    """``D`` satisfies Laplace's equation at every order."""
+
+
+with harmonic as (D, pde):
+
+    @claim
+    def on_the_triangle_of_a_harmonic_table(
+        p: Nat,
+        c: Fn[Nat, Fn[Nat, Real]],
+        R: Fn[Nat, Fn[Nat, Real]],
+        stored: all(
+            c(a)(b) == D(a)(b)
+            for a in Fin[p + 1]
+            for b in Fin[p + 1]
+            if a < 2
+            if a + b <= p
+        ),
+        copies: all(
+            R(a)(b) == c(a)(b)
+            for a in Fin[p + 1]
+            for b in Fin[p + 1]
+            if a < 2
+            if a + b <= p
+        ),
+        recurrence: all(
+            R(a + 2)(b) == -R(a)(b + 2)
+            for a in Fin[p + 1]
+            for b in Fin[p + 1]
+            if a + b + 2 <= p
+        ),
+    ) -> all(R(a)(b) == D(a)(b) for a in Fin[p + 1] for b in Fin[p + 1] if a + b <= p):
+        """``on_the_triangle``, with the PDE a named condition it holds under."""
+
+
+@kernel(uses=[on_the_triangle_of_a_harmonic_table])
+def reconstruct_under(
+    c: Arr[Where[a : Fin[2], b : Fin[p + 1], a + b <= p], Real],
+    R: Arr[Where[a : Fin[p + 1], b : Fin[p + 1], a + b <= p], Real],
+) -> all(
+    R[a, b] == c[a, b] for a in Fin[p + 1] for b in Fin[p + 1] if a < 2 if a + b <= p
+) & all(
+    R[a + 2, b] == -R[a, b + 2]
+    for a in Fin[p + 1]
+    for b in Fin[p + 1]
+    if a + b + 2 <= p
+):
+    """``reconstruct``, citing the claim that holds under ``harmonic``."""
+    for a in R.dom:
+        for b in R.dom[a]:
+            if a < 2:
+                R[a, b] = c[a, b]
+            if a >= 2:
+                R[a, b] = -R[a - 2, b + 2]
 
 
 # }}}

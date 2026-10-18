@@ -14,7 +14,7 @@ whose premise its row names. tests/test_summands.py reads them.
 from __future__ import annotations
 
 import numpy as np
-from lanky import theorem
+from lanky import claim
 from lanky.prelude import Fn, Nat, Real
 
 from loopty import Arr, Fin, kernel, reduce_sum
@@ -23,7 +23,7 @@ from loopty import Arr, Fin, kernel, reduce_sum
 ORDER = 3
 
 
-@theorem
+@claim
 def halves(
     x: Real,
     c: Fn[Nat, Real],
@@ -33,17 +33,17 @@ def halves(
     """A table that starts at 1 and multiplies by ``x / 2`` holds its powers."""
 
 
-@theorem
+@claim
 def halved(x: Real) -> x * 0.5 == x / 2:
     """Half of ``x``, by a product: what the kernel computes."""
 
 
-@theorem
+@claim
 def halved_from_zero(x: Real, nonnegative: x >= 0) -> x * 0.5 == x / 2:
     """``halved``, for a nonnegative ``x`` only: a premise ``halves`` does not have."""
 
 
-@theorem
+@claim
 def from_one(
     x: Real,
     c: Fn[Nat, Real],

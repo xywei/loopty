@@ -7427,13 +7427,13 @@ class Schedule:
                 f"before {taken[0]}"
             )
         if not theorems:
-            raise IllegalRewrite(f"{text}: by= names no theorem")
+            raise IllegalRewrite(f"{text}: by= names no claim")
         from loopty.tolerance import output_class
 
         was = output_class(self._term, array, self._reassoc)
         if was == "exact":
             raise IllegalRewrite(
-                f"{text}: {shown} is compared exact, bit for bit, and a theorem "
+                f"{text}: {shown} is compared exact, bit for bit, and a claim "
                 "rewrites it into another expression, which rounds otherwise; a "
                 "math step is for an output whose class allows it, approx, as "
                 "realize(...) is for one whose sum may be reordered"

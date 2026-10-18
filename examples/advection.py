@@ -28,17 +28,19 @@ The inverse mass is pushed inward, as grudge PR #362 rewrites it: on every
 axis but one it meets a mass and cancels, so the volume term is one pass of
 ``D = M^-1 S^T`` along each axis, and a face's term is the column ``L =
 M^-1 e`` of the face's end along its normal, times the face's flux. The two
-theorems are that rearrangement, for every order, under the hypothesis that
-``M^-1`` is the mass's inverse: ``M^-1 M`` is one on its diagonal and zero
-off it. That is a property of the tables a run is given, so where a kernel
-cites the theorems it is a condition on the tables, tested at their digits.
-``weak_rhs`` is grudge's operator as the math says it, dense, and
-``derived`` rewrites it by the two theorems into what ``volume`` and
+claims are that rearrangement, for every order, under one condition,
+``inverse_of_the_mass``: ``M^-1`` is the mass's inverse, ``M^-1 M`` one on
+its diagonal and zero off it. It is stated once, and both claims are written
+in a ``with inverse_of_the_mass as (n, Mi, M, inverse):`` block. That is a
+property of the tables a run is given, so where a kernel cites the claims it
+is a condition on the tables, tested at their digits. ``weak_rhs`` is
+grudge's operator as the math says it, dense, and ``derived`` rewrites it by
+the two claims into what ``volume`` and
 ``lift`` compute, with ``D`` and ``L`` computed once. The same kernels take
 the tables of the GLL quadrature's mass, which Alvey-Blanco's matched
 right-hand side and libParanumal use: there ``L`` is a face node's own
 weight and nothing else, and the lift adds each face node's flux into the
-node it sits on. A third theorem says that lift is the transpose of the
+node it sits on. A third claim says that lift is the transpose of the
 face gather the flux reads through, and so keeps the total.
 
 What the right-hand side reads, per element ``e`` of a periodic mesh:
@@ -72,8 +74,8 @@ Run this file three ways.
     race libParanumal's surface kernel avoids with its barriers.
 
 ``lanky check examples/advection.py``
-    The theorems, every kernel's facts, the programs', the schedules': for
-    ``derived``, each theorem's step, the condition on the tables, ``D`` and
+    The claims, every kernel's facts, the programs', the schedules': for
+    ``derived``, each claim's step, the condition on the tables, ``D`` and
     ``L`` computed once, and the compiled run against the dense kernel.
 
 ``loopty run examples/advection.py``
@@ -86,22 +88,22 @@ What is worth reading here
 operator as the math does: the inverse mass on every axis of the weak
 divergence less the face mass. It stores the field times the velocity along
 each axis with that axis last, so that each direction's term is the same
-Kronecker product, ``M (x) M (x) S^T``, and one theorem matches all three;
+Kronecker product, ``M (x) M (x) S^T``, and one claim matches all three;
 the six faces need no such care, since each face's flux is already over the
 face's own two axes. ``derived`` reads "weak_rhs, with rhs rewritten by the
 inverse mass pushed inward and the lift pushed inward, keeping ``D`` and
-``L``". Its rows: each theorem's step, over the reals wherever ``M^-1 M`` is
-the identity; that condition, tested at the tables' digits on the example
-inputs, ``np.linalg.inv``'s inverse being one to the last digits and not
-exactly; ``D`` and ``L``, sums of tables, computed once before the elements
-and read where the sums were; and the compiled run against the native dense
-kernel. The mass, cancelled, is read nowhere: the schedule takes it, and
-the compiled code does not.
+``L``". Its rows: each claim's step, under ``inverse_of_the_mass``, over
+the reals wherever ``M^-1 M`` is the identity; that condition, tested at
+the tables' digits on the example inputs, ``np.linalg.inv``'s inverse being
+one to the last digits and not exactly; ``D`` and ``L``, sums of tables,
+computed once before the elements and read where the sums were; and the
+compiled run against the native dense kernel. The mass, cancelled, is read
+nowhere: the schedule takes it, and the compiled code does not.
 
 *The face gather.* ``u[nbr[e, f], outside[f, a, b, 0], ...]`` reads the
 neighbor's node through the face maps, and every subscript is in bounds by
 type: ``nbr`` holds points of ``Fin[ne]``, ``outside`` points of ``Fin[n]``.
-Its transpose is the lift onto the face nodes, a theorem for every order
+Its transpose is the lift onto the face nodes, a claim for every order
 (``lift_is_the_gather_transposed``) that ``main`` checks on these maps.
 
 *How deep the fusion goes.* The lift at node ``(k, j, i)`` reads the fluxes
@@ -131,7 +133,7 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
-from lanky import theorem
+from lanky import claim, condition
 from lanky.prelude import Fn, Nat, Real
 
 from loopty import Arr, Fin, IllegalCast, Schedule, kernel, program, reduce_sum
@@ -147,19 +149,14 @@ ELEMENTS = 2
 VELOCITY = (0.7, -0.4, 0.3)
 
 
-# {{{ the theorems: the inverse mass, pushed inward, at every order
+# {{{ the claims: the inverse mass, pushed inward, at every order
 
 
-@theorem
-def inverse_mass_inward(
+@condition
+def inverse_of_the_mass(
     n: Nat,
     Mi: Fn[Fin[n], Fin[n], Real],
-    S: Fn[Fin[n], Fin[n], Real],
     M: Fn[Fin[n], Fin[n], Real],
-    w: Fn[Fin[n], Fin[n], Fin[n], Real],
-    k: Fin[n],
-    j: Fin[n],
-    i: Fin[n],
     inverse: all(sum(Mi[p, c] * M[c, p] for c in Fin[n]) == 1 for p in Fin[n])
     & all(
         sum(Mi[p, c] * M[c, q] for c in Fin[n]) == 0
@@ -167,71 +164,75 @@ def inverse_mass_inward(
         for q in Fin[n]
         if p != q
     ),
-) -> sum(
-    Mi[k, c]
-    * Mi[j, b]
-    * Mi[i, a]
-    * sum(
-        M[c, t] * M[b, s] * S[a, r] * w[t, s, r]
-        for t in Fin[n]
-        for s in Fin[n]
-        for r in Fin[n]
-    )
-    for c in Fin[n]
-    for b in Fin[n]
-    for a in Fin[n]
-) == sum(
-    sum(Mi[i, a] * S[a, r] for a in Fin[n]) * w[k, j, r] for r in Fin[n]
 ):
-    """The inverse mass after the weak derivative along ``r``: one pass of ``M^-1 S^T``.
+    """``Mi`` is the inverse of the mass ``M``: ``M^-1 M`` is the identity.
 
-    The left side is grudge's: ``S^T`` on ``r`` and the mass on ``s`` and
-    ``t`` (``M (x) M (x) S``), then the inverse mass on every axis.
-    ``inverse`` says that ``Mi`` is the mass's inverse: ``M^-1 M`` is one on
-    its diagonal and zero off it. There the mass cancels on ``s`` and
-    ``t``, and what is left is ``volume``'s pass of ``D = M^-1 S^T`` along
-    ``r``. The other two axes are the same with the axes renamed.
+    ``inverse`` says it entry by entry: one on the diagonal, zero off it.
     """
 
 
-@theorem
-def lift_inward(
-    n: Nat,
-    Mi: Fn[Fin[n], Fin[n], Real],
-    M: Fn[Fin[n], Fin[n], Real],
-    end: Fn[Fin[n], Real],
-    g: Fn[Fin[n], Fin[n], Real],
-    k: Fin[n],
-    j: Fin[n],
-    i: Fin[n],
-    inverse: all(sum(Mi[p, c] * M[c, p] for c in Fin[n]) == 1 for p in Fin[n])
-    & all(
-        sum(Mi[p, c] * M[c, q] for c in Fin[n]) == 0
-        for p in Fin[n]
-        for q in Fin[n]
-        if p != q
-    ),
-) -> sum(
-    Mi[k, c]
-    * Mi[j, b]
-    * Mi[i, a]
-    * (end[a] * sum(M[c, t] * M[b, s] * g[t, s] for t in Fin[n] for s in Fin[n]))
-    for c in Fin[n]
-    for b in Fin[n]
-    for a in Fin[n]
-) == sum(Mi[i, a] * end[a] for a in Fin[n]) * g[k, j]:
-    """The inverse mass after a face's mass is the face's column, times its flux.
+with inverse_of_the_mass as (n, Mi, M, inverse):
 
-    The left side is grudge's face mass of the face ``r = -1`` (``end`` is
-    the basis at ``r = -1``, the face's own mass on ``s`` and ``t``), then
-    the inverse mass. Where ``Mi`` is the mass's inverse (``inverse``) the
-    mass cancels on the face's two axes, and what is left is ``lift``'s term
-    for that face: the column ``L = M^-1 end`` along ``r``, times the face's
-    flux. The other five faces are the same with the axes renamed.
-    """
+    @claim
+    def inverse_mass_inward(
+        S: Fn[Fin[n], Fin[n], Real],
+        w: Fn[Fin[n], Fin[n], Fin[n], Real],
+        k: Fin[n],
+        j: Fin[n],
+        i: Fin[n],
+    ) -> sum(
+        Mi[k, c]
+        * Mi[j, b]
+        * Mi[i, a]
+        * sum(
+            M[c, t] * M[b, s] * S[a, r] * w[t, s, r]
+            for t in Fin[n]
+            for s in Fin[n]
+            for r in Fin[n]
+        )
+        for c in Fin[n]
+        for b in Fin[n]
+        for a in Fin[n]
+    ) == sum(
+        sum(Mi[i, a] * S[a, r] for a in Fin[n]) * w[k, j, r] for r in Fin[n]
+    ):
+        """The inverse mass after the derivative along ``r``: one pass of ``M^-1 S^T``.
+
+        The left side is grudge's: ``S^T`` on ``r`` and the mass on ``s`` and
+        ``t`` (``M (x) M (x) S``), then the inverse mass on every axis. The
+        mass cancels on ``s`` and ``t``, and what is left is ``volume``'s pass
+        of ``D = M^-1 S^T`` along ``r``. The other two axes are the same with
+        the axes renamed.
+        """
+
+    @claim
+    def lift_inward(
+        end: Fn[Fin[n], Real],
+        g: Fn[Fin[n], Fin[n], Real],
+        k: Fin[n],
+        j: Fin[n],
+        i: Fin[n],
+    ) -> sum(
+        Mi[k, c]
+        * Mi[j, b]
+        * Mi[i, a]
+        * (end[a] * sum(M[c, t] * M[b, s] * g[t, s] for t in Fin[n] for s in Fin[n]))
+        for c in Fin[n]
+        for b in Fin[n]
+        for a in Fin[n]
+    ) == sum(Mi[i, a] * end[a] for a in Fin[n]) * g[k, j]:
+        """The inverse mass after a face's mass is the face's column, times its flux.
+
+        The left side is grudge's face mass of the face ``r = -1`` (``end`` is
+        the basis at ``r = -1``, the face's own mass on ``s`` and ``t``), then
+        the inverse mass. The mass cancels on the face's two axes, and what is
+        left is ``lift``'s term for that face: the column ``L = M^-1 end``
+        along ``r``, times the face's flux. The other five faces are the same
+        with the axes renamed.
+        """
 
 
-@theorem
+@claim
 def lift_is_the_gather_transposed(
     faces: Nat,
     n: Nat,
@@ -1091,7 +1092,7 @@ def main() -> int:
         f"grudge's, inverse mass and all, to 1e-13 of the largest value: {native} "
         f"(M^-1 M is the identity: {inverse})"
     )
-    # the third theorem on these face maps: with unit ends and no 1/J,
+    # the third claim on these face maps: with unit ends and no 1/J,
     # lift_on_faces takes each face node's value from the node it sits on
     rng = np.random.default_rng(0)
     shape = data["u"].numpy().shape
@@ -1114,7 +1115,7 @@ def main() -> int:
     )
     print()
 
-    # volume and lift derived from grudge's operator by the two theorems, the
+    # volume and lift derived from grudge's operator by the two claims, the
     # tables M^-1 S^T and M^-1 e computed once: compiled, against the kernels
     print(f"derived: {derived!r}")
     for name in ("D", "L"):

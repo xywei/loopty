@@ -11,7 +11,7 @@ cites, or checked between the calls.
 from __future__ import annotations
 
 import numpy as np
-from lanky import theorem
+from lanky import claim
 from lanky.prelude import Fn, Int, Nat, Real
 
 from loopty import Arr, Fin, kernel, program, reduce_sum
@@ -72,7 +72,7 @@ def scan(
         off[r + 1] = off[r] + cnt[r]
 
 
-@theorem
+@claim
 def scan_monotone(
     n: Nat,
     cnt: Fn[Fin[n], Nat],
@@ -135,7 +135,7 @@ def scan_unit(
         off[r + 1] = off[r] + cnt[r]
 
 
-@theorem
+@claim
 def scan_monotone_int(
     n: Nat,
     cnt: Fn[Fin[n], Nat],

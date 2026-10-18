@@ -1215,10 +1215,10 @@ def test_the_hexahedra_theorem_holds_at_exact_matrices() -> None:
     for k in range(n):
         for j in range(n):
             for i in range(n):
-                claim = module.sum_factorization(
+                # a claim called at values answers True or False (lanky 0.6)
+                assert module.sum_factorization(
                     n=n, Fr=Fr, Fs=Fs, Ft=Ft, u=u, k=k, j=j, i=i
-                )
-                assert claim.holds, (k, j, i)
+                ), (k, j, i)
 
 
 @pytest.mark.parametrize("order", [1, 2, 3, 4, 5, 6])
@@ -1394,7 +1394,7 @@ def test_the_advection_demo_decides_every_access_and_every_launch() -> None:
 
 
 def test_volume_and_lift_are_derived_from_grudges_operator() -> None:
-    """The math-first form (#285, #342): a dense kernel, rewritten by the theorems.
+    """The math-first form (#285, #342): a dense kernel, rewritten by the claims.
 
     ``M^-1 M`` is the identity only for the tables a run is given: a
     condition on tables, tested at their digits; ``D`` and ``L``, sums of
@@ -1416,12 +1416,16 @@ def test_volume_and_lift_are_derived_from_grudges_operator() -> None:
     for fact in owned:
         statements[fact["kind"]].append(fact)
     first, second, kept = statements["rewrite"]
+    # both claims hold under the file's condition inverse_of_the_mass, and
+    # their rows say so after the claim's name
     assert first["statement"].startswith(
-        "rewrite(rhs, by=inverse_mass_inward): over the reals, what rhs stores is "
-        "unchanged wherever"
+        "rewrite(rhs, by=inverse_mass_inward), under inverse_of_the_mass: over the "
+        "reals, what rhs stores is unchanged wherever"
     )
     assert first["statement"].endswith(", in 3 places")
-    assert second["statement"].startswith("rewrite(rhs, by=lift_inward): ")
+    assert second["statement"].startswith(
+        "rewrite(rhs, by=lift_inward), under inverse_of_the_mass: "
+    )
     assert second["statement"].endswith(", in 6 places")
     assert kept["statement"] == (
         "keep=(D, L): D and L are computed once, before rhs, over the indices each "
@@ -1782,7 +1786,7 @@ def test_the_element_mass_is_mass_ffcs_postcondition_by_element_mass() -> None:
     (theorem,) = [
         fact
         for fact in facts
-        if fact["owner"] == "element_mass" and fact["kind"] == "theorem"
+        if fact["owner"] == "element_mass" and fact["kind"] == "claim"
     ]
     assert set(post["rests_on"]) >= {
         stored["id"],
@@ -1848,7 +1852,7 @@ def test_the_assembly_theorems_are_in_its_ledger() -> None:
     """The rule, the element's mass and the scatter's total: proved with Mathlib."""
     _result, facts = _invoke("assembly", "check")
     claims = {
-        fact["owner"]: fact["status"] for fact in facts if fact["kind"] == "theorem"
+        fact["owner"]: fact["status"] for fact in facts if fact["kind"] == "claim"
     }
     assert set(claims) == {"exact_to_degree_two", "element_mass", "conservation"}
     assert set(claims.values()) <= {"tested", "decided", "proved"}
@@ -1868,7 +1872,7 @@ def test_the_l2p_demo_applies_its_theorem_to_what_reconstruct_stores() -> None:
     assert (post["status"], post["decided_by"]) == ("decided", "isl")
     applied = [fact for fact in facts if fact["kind"] == "by-theorem"]
     assert [(fact["owner"], fact["decided_by"]) for fact in applied] == [
-        ("reconstruct", "theorem")
+        ("reconstruct", "claim")
     ]
     assert applied[0]["statement"].startswith(
         "by on_every_triangle, for every D with pde and stored: "
@@ -2093,12 +2097,14 @@ def test_the_qbx_ledger_says_single_layer_adds_line_taylors_terms() -> None:
         for fact in facts
         if fact["kind"] == "by-theorem" and fact["owner"] == "single_layer"
     ]
+    # line_taylor holds under away_from_zero, which the row names in place of
+    # the condition's nonzero
     assert row["statement"] == (
-        "single_layer adds line_taylor's a(n) for n in 1..5, for every a with "
-        "nonzero, first_term and ode, read over the complex numbers"
+        "single_layer adds line_taylor's a(n) for n in 1..5, under away_from_zero, "
+        "for every a with first_term and ode, read over the complex numbers"
     )
     assert row["status"] in ("decided", "proved"), row
-    assert row["decided_by"] in ("theorem", "lean"), row
+    assert row["decided_by"] in ("claim", "lean"), row
     provenance = row["provenance"]
     assert provenance["bindings"] == "alpha = c[t] - y[s], beta = z[t] - c[t]"
     assert provenance["orders"] == [1, 2, 3, 4, 5]
@@ -2113,7 +2119,7 @@ def test_the_qbx_ledger_says_single_layer_adds_line_taylors_terms() -> None:
 
 
 def test_the_qbx_ledger_says_double_layer_adds_reciprocal_taylors_terms() -> None:
-    """The double layer's series tied to a theorem (#281): its terms are b(n), from 0.
+    """The double layer's series tied to a claim (#281): its terms are b(n), from 0.
 
     ``double`` adds ``(-beta / alpha) ** k`` for ``k`` from 0 to 5, the
     coefficients of ``alpha / (alpha + tau * beta)``, which
@@ -2125,9 +2131,12 @@ def test_the_qbx_ledger_says_double_layer_adds_reciprocal_taylors_terms() -> Non
         for fact in facts
         if fact["kind"] == "by-theorem" and fact["owner"] == "double_layer"
     ]
+    # reciprocal_taylor holds under away_from_zero, which the row names in place
+    # of the condition's nonzero
     assert row["statement"] == (
-        "double_layer adds reciprocal_taylor's b(n) for n in 0..5, for every b with "
-        "nonzero, first_term and ode, read over the complex numbers"
+        "double_layer adds reciprocal_taylor's b(n) for n in 0..5, under "
+        "away_from_zero, for every b with first_term and ode, read over the "
+        "complex numbers"
     )
     assert row["status"] in ("decided", "proved"), row
     provenance = row["provenance"]
@@ -2138,7 +2147,7 @@ def test_the_qbx_ledger_says_double_layer_adds_reciprocal_taylors_terms() -> Non
     (theorem,) = [
         fact
         for fact in facts
-        if fact["owner"] == "reciprocal_taylor" and fact["kind"] == "theorem"
+        if fact["owner"] == "reciprocal_taylor" and fact["kind"] == "claim"
     ]
     # the property tester draws no table over Nat, and Lean proves it with Mathlib
     assert theorem["status"] in ("assumed", "proved"), theorem
@@ -2251,12 +2260,13 @@ def test_the_qbx_demo_prints_the_tile_the_fact_and_the_rows() -> None:
     for line in lines:
         assert line.endswith(", within 1e-12 of the largest value -> tested"), line
     assert (
-        "  single_layer adds line_taylor's a(n) for n in 1..5, for every a with "
-        "nonzero, first_term and ode, read over the complex numbers -> decided"
+        "  single_layer adds line_taylor's a(n) for n in 1..5, under away_from_zero, "
+        "for every a with first_term and ode, read over the complex numbers -> decided"
     ) in out.splitlines()
     assert (
-        "  double_layer adds reciprocal_taylor's b(n) for n in 0..5, for every b with "
-        "nonzero, first_term and ode, read over the complex numbers -> decided"
+        "  double_layer adds reciprocal_taylor's b(n) for n in 0..5, under "
+        "away_from_zero, for every b with first_term and ode, read over the complex "
+        "numbers -> decided"
     ) in out.splitlines()
     assert (
         "as sumpy computes it: rewrite(single_layer.out, by=(conjugate_form, "
