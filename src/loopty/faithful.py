@@ -488,7 +488,6 @@ def _class_of(body: Any, term: Term) -> str:
     ``exact`` for anything but an equation, and for one that reads no array
     the program writes.
     """
-    import pymbolic.primitives as prim
 
     from loopty.trace import EXACTNESS_ORDER
 
@@ -504,7 +503,6 @@ def _class_of(body: Any, term: Term) -> str:
 
 def _arrays_read(expr: Any) -> set[str]:
     """The arrays ``expr`` reads a cell of."""
-    import pymbolic.primitives as prim
     from lanky.terms import init_args
 
     out: set[str] = set()
@@ -1109,20 +1107,28 @@ def sample_arguments(
 
     ``given`` holds arrays to take as they are rather than draw, the tables a
     math step's conditions are about (:mod:`loopty.rewriting`): each size an
-    axis of one names is the extent it has, and the rest are drawn.
+    axis of one determines is what it has there, solved from ``Fin[n + 1]``
+    as a call solves it (:func:`loopty.contract.resolve_sizes`), and the
+    rest are drawn.
     """
     rng = np.random.default_rng(seed)
     types = dict(term.params)
     names = sorted((_size_names(term) - set(types)) | _integral_scalars(term))
     held: dict[str, int] = {}
-    for name, value in (given or {}).items():
-        typ = types.get(name)
-        if not isinstance(typ, ArrType) or typ.domain is not None or any(typ.ragged):
-            continue
-        shape = np.asarray(getattr(value, "numpy", lambda: value)()).shape
-        for axis, extent in zip(typ.axes, shape, strict=False):
-            if isinstance(axis, prim.Variable):
-                held.setdefault(axis.name, int(extent))
+    kept_types = {
+        name: typ
+        for name, typ in types.items()
+        if name in (given or {})
+        and isinstance(typ, ArrType)
+        and typ.domain is None
+        and not any(typ.ragged)
+    }
+    if kept_types:
+        from loopty.contract import resolve_sizes
+
+        # every size an axis of a table taken as it is determines, a bare
+        # Fin[n] or one solved from Fin[n + 1] or Fin[2 * n], as a call does
+        held = resolve_sizes(kept_types, {name: given[name] for name in kept_types})
     sizes = {
         name: held[name] if name in held else int(rng.integers(*SIZES))
         for name in names

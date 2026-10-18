@@ -307,6 +307,56 @@ def two_extents(
         out[i] = reduce_sum(A[i, q] * B[i, q] for q in B.dom[i])
 
 
+@kernel
+def shifted_rows(
+    T: Arr[Fin[n + 1], Real],  # noqa: F821
+    x: Arr[Fin[n], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """A table one longer than the data, read one on."""
+    for i in y.dom:
+        y[i] = T[i + 1] * x[i]
+
+
+def test_a_table_taken_as_it_is_fixes_the_size_its_axis_solves_for() -> None:
+    """``T: Fin[n + 1]`` of 6 cells makes ``n`` 5 in a draw (Codex, #348).
+
+    Only a bare ``Fin[n]`` axis fixed a size, so the other arrays were drawn
+    at a size of their own, and the draws compared the rewrite on inputs of
+    two shapes, or none.
+    """
+    from loopty.faithful import sample_arguments
+
+    table = Arr.from_numpy(np.arange(6.0))
+    arguments, sizes = sample_arguments(shifted_rows.term, given={"T": table})
+    assert sizes["n"] == 5
+    assert arguments["x"].numpy().shape == (5,)
+
+
+def test_a_kept_sum_of_complex_tables_is_complex_in_a_real_output() -> None:
+    """Stored at the output's type, its imaginary part was gone before ``real`` read it.
+
+    Codex on #348: the kept table took the destination's element type.
+    """
+    from lanky.prelude import Complex
+    from lanky.terms import Subscript, Var
+
+    from loopty.rewriting import _kept_dtype
+    from loopty.term import ArrType
+
+    types = {
+        "C": ArrType(axes=(3,), dtype=Complex, ragged=(False,)),
+        "W": ArrType(axes=(3,), dtype=Real, ragged=(False,)),
+        "Z": ArrType(axes=(3,), dtype=np.dtype(np.complex128), ragged=(False,)),
+    }
+    template = Subscript(Var("C"), Var("_b0")) * Subscript(Var("W"), Var("_b0"))
+    assert _kept_dtype(template, types, Real) is Complex
+    numpy = Subscript(Var("Z"), Var("_b0")) * Subscript(Var("W"), Var("_b0"))
+    assert _kept_dtype(numpy, types, np.dtype(np.float64)) == np.complex128
+    real_only = Subscript(Var("W"), Var("_b0")) * 2
+    assert _kept_dtype(real_only, types, Real) is Real
+
+
 def test_a_sum_reading_one_index_on_axes_of_two_extents_is_not_a_table() -> None:
     """Kept, it would run over ``A``'s rows and read ``B`` past its own (Codex, #348).
 

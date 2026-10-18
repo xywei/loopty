@@ -3249,7 +3249,7 @@ def _keep_sums(
                 name,
                 ArrType(
                     axes=tuple(found.axes),
-                    dtype=element,
+                    dtype=_kept_dtype(found.template, term.array_types, element),
                     ragged=(False,) * len(found.axes),
                 ),
             )
@@ -3280,6 +3280,45 @@ def _keep_sums(
         callsites=(*term.callsites, *callsites),
     )
     return dataclasses.replace(rewritten, after=after, kept=tuple(kept), tables=True)
+
+
+def _kept_dtype(template: Any, types: Mapping[str, Any], element: Any) -> Any:
+    """A kept sum's element type: the output's, or complex where a table it reads is.
+
+    A complex sum of tables under ``real(...)`` in a real output is complex,
+    and a table of it stored at the output's type would drop its imaginary
+    part before ``real`` reads it. The type is the first complex one among
+    the tables', as the kernel spells it (``Complex``, or a numpy type).
+    """
+    if _complex_sort(element):
+        return element
+    stack = [template]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, prim.Subscript) and isinstance(
+            node.aggregate, prim.Variable
+        ):
+            typ = types.get(node.aggregate.name)
+            if isinstance(typ, ArrType) and _complex_sort(typ.dtype):
+                return typ.dtype
+        if isinstance(node, prim.ExpressionNode):
+            stack.extend(init_args(node))
+        elif isinstance(node, tuple):
+            stack.extend(node)
+    return element
+
+
+def _complex_sort(sort: Any) -> bool:
+    """Whether the points of ``sort`` are complex numbers, ``Complex`` or numpy's."""
+    from lanky.prelude import Refined, Sort
+
+    base = sort.base if isinstance(sort, Refined) else sort
+    if isinstance(base, Sort):
+        return base.name == "Complex"
+    try:
+        return bool(np.issubdtype(np.dtype(base), np.complexfloating))
+    except TypeError:
+        return False
 
 
 def _taken(term: Term) -> set[str]:

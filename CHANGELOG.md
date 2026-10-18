@@ -234,6 +234,15 @@ All notable changes to loopty are recorded here. The format follows
   kept table ran over the first array's axis and read the other past its end
   (Codex on #348).
 
+- A kept sum of complex tables under `real(...)` in a real output is kept as
+  complex numbers; it took the output's element type, and lost its
+  imaginary part before `real` read it (Codex on #348).
+
+- The draws that compare a rewrite take a table kept as it is with the sizes
+  its axes determine, `n` from a `Fin[n + 1]` axis of 6 cells as a call
+  solves it; only a bare `Fin[n]` fixed a size, and the other arrays were
+  drawn at a size of their own (Codex on #348).
+
 - An array a rewrite set aside, as `M` once the inverse mass cancels it,
   stays aside through a later rewrite of the same schedule, which reads it
   no more; the later step worked the arrays out again from the term before
