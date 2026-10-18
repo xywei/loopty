@@ -298,7 +298,12 @@ def _call_arguments(
         if getattr(arg, "shape", "missing") is None
     }
     out: dict[str, np.ndarray] = {}
+    declared = {arg.name for arg in lowering.kernel.default_entrypoint.args}
     for name, value in supplied.items():
+        if name in term.set_aside and name not in declared:
+            # a math step left it unread, and the compiled code takes no such
+            # argument (loopty.term.Term.set_aside)
+            continue
         if isinstance(value, Arr) and value.domain is not None:
             storage = lowering.storage.get(name, "box")
             layout = layouts[name]

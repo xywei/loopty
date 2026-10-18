@@ -88,6 +88,7 @@ from lanky.rewrites import RewriteTerm
 from lanky.terms import (
     Comparison,
     Forall,
+    Subscript,
     Var,
     conjuncts,
     init_args,
@@ -112,8 +113,10 @@ __all__ = [
     "cited",
     "identity_of",
     "into_term",
+    "hoisted_facts",
     "keep_term",
     "rewrite_term",
+    "set_aside",
     "statement_claims",
     "structural",
     "structural_proof",
@@ -835,7 +838,7 @@ def _conditions(
                 theorem=identity.name,
                 hypothesis=name,
                 claim=claim,
-                kind=_condition_kind(claim, term),
+                kind=_condition_kind(claim, term, over),
                 over=over,
                 stmt=stmt.id,
                 spelled=tuple(
@@ -857,12 +860,19 @@ def _conjunction(parts: Sequence[Any]) -> Any:
     return conjunction(list(parts))
 
 
-def _condition_kind(claim: Any, term: Term) -> str:
+def _condition_kind(claim: Any, term: Term, over: Sequence[Any] = ()) -> str:
     """``index``, ``table`` or ``data``: who settles a condition.
 
     A condition on a scalar input of numbers, ``a != 0`` for ``a: Real``,
     is on data, as one on an array is: isl would read ``a`` as an integer
     parameter (Codex, #341).
+
+    A condition is on tables where it reads only the kernel's constant
+    tables, or where it reads arrays at no loop of the statement and no sum
+    around the match (``over`` is empty): ``M^-1 M`` is the identity, a
+    property of ``Mi`` and ``M`` as wholes, whichever cell the statement
+    computes. Its equations are tested at the tables' digits
+    (:func:`failing_point`).
     """
     from loopty.summands import _number_sort
     from loopty.unfolding import _read
@@ -877,7 +887,7 @@ def _condition_kind(claim: Any, term: Term) -> str:
             return "data"
         return "index"
     tables = {name for name, _ in term.tables}
-    if arrays <= tables:
+    if arrays <= tables or not over:
         return "table"
     return "data"
 
@@ -939,6 +949,10 @@ class Rewritten:
     #: what its statements store (:class:`loopty.unfolding.Unfolded`), and the
     #: facts that claim rests on; ``None`` for a rewrite inside a statement.
     proof: Any = None
+    #: Whether ``kept`` holds sums of tables, each computed once over the
+    #: indices it reads (:func:`keep_term`), rather than the passes of a
+    #: theorem's nested sums.
+    tables: bool = False
 
     @property
     def matches(self) -> tuple[Match, ...]:
@@ -1043,6 +1057,59 @@ def _listed(names: Sequence[str]) -> str:
     if len(names) <= 1:
         return "".join(names)
     return f"{', '.join(names[:-1])} and {names[-1]}"
+
+
+def _named(term: Term) -> set[str]:
+    """Every name ``term``'s statements mention: arrays, sizes, loops, in sums too.
+
+    The domains' parameters are named, and a reflected one, ``nl_cnt_r``,
+    names what it stands for, ``cnt[r]``.
+    """
+    out: set[str] = set()
+    reflected = dict(term.reflected)
+
+    def visit(node: Any) -> None:
+        if isinstance(node, Reduction):
+            out.update(node.domain.get_var_names(isl.dim_type.param))
+            visit(node.body)
+        elif isinstance(node, prim.Variable):
+            out.add(node.name)
+        elif isinstance(node, prim.ExpressionNode):
+            for arg in init_args(node):
+                visit(arg)
+        elif isinstance(node, tuple | list):
+            for item in node:
+                visit(item)
+
+    for stmt in term.stmts:
+        out.add(stmt.assignee.array)
+        visit(stmt.assignee.indices)
+        visit(stmt.expr)
+        visit(stmt.guard)
+        out.update(stmt.domain.get_var_names(isl.dim_type.param))
+    for name in list(out):
+        if name in reflected:
+            visit(reflected[name])
+    return out
+
+
+def set_aside(before: Term, after: Term) -> Term:
+    """``after`` with the arrays ``before`` reads and it does not set aside.
+
+    A math step can leave an argument unread: once the inverse mass has
+    cancelled the mass, ``M`` is read nowhere. The schedule still takes it,
+    as the kernel does, and the compiled code has no argument for it
+    (:attr:`loopty.term.Term.set_aside`).
+    """
+    named = _named(after)
+    unread = tuple(
+        name
+        for name, typ in after.params
+        if isinstance(typ, ArrType) and name in _named(before) and name not in named
+    )
+    if unread == after.set_aside:
+        return after
+    return dataclasses.replace(after, set_aside=unread)
 
 
 def _occurs(
@@ -1292,17 +1359,47 @@ def _quantified(condition: Condition, stmt: Stmt) -> Any:
 
 
 def _drawn_equal(
-    rewritten: Rewritten, step: Step, seed: int = 0
+    rewritten: Rewritten,
+    step: Step,
+    seed: int = 0,
+    arguments: Mapping[str, Any] | None = None,
 ) -> tuple[bool | None, str]:
     """``T == T'`` at drawn inputs, on the interpreter: agreed, differed or unknown."""
+    conditions = _data_conditions(match.conditions for match in step.matches)
     return _drawn_terms(
         step.before,
         step.after,
         rewritten.array,
         f"{step.identity.name}",
         seed,
-        _data_conditions(match.conditions for match in step.matches),
+        conditions,
+        _tables_at_hand(conditions, step.before, arguments),
     )
+
+
+def _tables_at_hand(
+    conditions: Sequence[Condition], term: Term, arguments: Mapping[str, Any] | None
+) -> dict[str, Any] | None:
+    """The arrays the conditions on tables read, as the example inputs give them.
+
+    A draw keeps these and draws the rest: tables drawn at random are never
+    the inverse of one another, so every draw would break ``M^-1 M`` is the
+    identity and none would be compared. ``None`` where no condition is on
+    an array the kernel takes.
+    """
+    from loopty.unfolding import _read
+
+    constant = {name for name, _ in term.tables}
+    names = {
+        name
+        for condition in conditions
+        if condition.kind == "table"
+        for name in _read(condition.claim)
+        if name not in constant
+    }
+    if not names or arguments is None:
+        return None
+    return {name: arguments[name] for name in sorted(names) if name in arguments}
 
 
 def _data_conditions(groups: Any) -> tuple[Condition, ...]:
@@ -1347,6 +1444,7 @@ def _drawn_terms(
     what: str,
     seed: int = 0,
     conditions: Sequence[Condition] = (),
+    tables: Mapping[str, Any] | None = None,
 ) -> tuple[bool | None, str]:
     """``before`` and ``after`` at drawn inputs agree in ``array``, on the interpreter.
 
@@ -1354,7 +1452,8 @@ def _drawn_terms(
     first cell that differs, and ``None`` with why when nothing could be
     compared. ``what`` names the step in the words. A draw that breaks one
     of ``conditions``, the theorems' conditions on data, is not compared:
-    the theorems say nothing there (Codex, #341).
+    the theorems say nothing there (Codex, #341). ``tables`` are arrays each
+    draw takes as they are, the tables at hand (:func:`_tables_at_hand`).
     """
     from loopty.faithful import _NoSample, sample_arguments
     from loopty.interpret import InterpretError, interpret
@@ -1367,7 +1466,9 @@ def _drawn_terms(
     outside = 0
     for draw in range(3):
         try:
-            arguments, _sizes = sample_arguments(before, seed=seed + draw)
+            arguments, _sizes = sample_arguments(
+                before, seed=seed + draw, fixed=tables
+            )
         except _NoSample as exc:
             return None, f"no input could be drawn: {exc}"
         if conditions and not _meets(conditions, before, arguments):
@@ -1424,11 +1525,13 @@ def equality_facts(
     identifier: Any,
     where: str,
     condition_ids: Sequence[str],
+    arguments: Mapping[str, Any] | None = None,
 ) -> list[Fact]:
     """One row per theorem: over ℝ or ℂ, what the array stores is unchanged.
 
     ``identifier(detail)`` names a row; ``condition_ids`` are the rows of the
     data conditions the claim rests on, as Lean proves it under them.
+    ``arguments`` are the example inputs, whose tables the draws keep.
     """
     from loopty.hypotheses import structural_key
 
@@ -1444,7 +1547,7 @@ def equality_facts(
             owner=owner,
             label=words,
         )
-        agreed, detail = _drawn_equal(rewritten, step)
+        agreed, detail = _drawn_equal(rewritten, step, arguments=arguments)
         status = (
             Status.TESTED
             if agreed
@@ -1520,7 +1623,11 @@ def _equality_words(rewritten: Rewritten, step: Step) -> str:
     count = len(step.matches)
     places = "in 1 place" if count == 1 else f"in {count} places"
     phrase = identity.name.replace("_", " ")
-    olds = [_shortened(render(match.stated), 48) for match in kinds.values()]
+    olds = []
+    for match in kinds.values():
+        stmt = step.before.stmt(match.stmt)
+        spelled = tuple(zip(stmt.inames, stmt.spelled or stmt.inames, strict=False))
+        olds.append(_shortened(render(_respelled(match.stated, spelled)), 48))
     if len(olds) == 1:
         new = render(first.replaced)
         becomes = f"becomes {new if len(new) <= 60 else f'its {phrase}'}"
@@ -1617,6 +1724,155 @@ def _statement_points(stmt: Stmt, sizes: Mapping[str, int]) -> list[dict[str, in
 #: The most points a condition is evaluated at, on one input.
 _MOST_POINTS = 2_000_000
 
+#: The decimal digits a table of each floating dtype carries: every number of
+#: that many significant digits is held exactly (C's ``DBL_DIG``, ``FLT_DIG``).
+_DIGITS = {
+    np.dtype(np.float64): 15,
+    np.dtype(np.complex128): 15,
+    np.dtype(np.float32): 6,
+    np.dtype(np.complex64): 6,
+}
+
+
+def table_digits(claim: Any, values: Mapping[str, Any]) -> int:
+    """The digits the tables ``claim`` reads carry: the fewest of their dtypes'."""
+    from loopty.unfolding import _read
+
+    found = []
+    for name in _read(claim):
+        value = values.get(name)
+        if value is None:
+            continue
+        found.append(_DIGITS.get(np.asarray(value).dtype, 15))
+    return min(found, default=15)
+
+
+def _magnitude(expr: Any) -> Any:
+    """``expr`` with every value it reads taken positive and every term added.
+
+    ``sum(Mi[p, c] * M[c, q] for c ...)`` becomes ``sum(|Mi[p, c]| * |M[c,
+    q]| for c ...)``: the size of the terms a sum of table values adds,
+    which its rounding is relative to.
+    """
+    if isinstance(expr, bool | np.bool_):
+        return expr
+    if isinstance(expr, int | float | complex | np.number):
+        return abs(expr)
+    if isinstance(expr, LankySum):
+        return LankySum(expr.binders, _magnitude(expr.body), expr.guard)
+    if isinstance(expr, prim.Sum):
+        return type(expr)(tuple(_magnitude(child) for child in expr.children))
+    if isinstance(expr, prim.Product):
+        return type(expr)(tuple(_magnitude(child) for child in expr.children))
+    if isinstance(expr, prim.Quotient):
+        from lanky.terms import Abs
+
+        return type(expr)(_magnitude(expr.numerator), Abs(expr.denominator))
+    if (
+        isinstance(expr, prim.Power)
+        and isinstance(expr.exponent, int | np.integer)
+        and not isinstance(expr.exponent, bool)
+        and expr.exponent >= 0
+    ):
+        return type(expr)(_magnitude(expr.base), expr.exponent)
+    from fractions import Fraction
+
+    if isinstance(expr, Fraction):
+        return abs(expr)
+    from lanky.terms import Abs
+
+    return Abs(expr)
+
+
+def _reads(expr: Any) -> int:
+    """How many cells of arrays ``expr`` writes it reads, counted as written."""
+    if isinstance(expr, prim.Subscript) and isinstance(expr.aggregate, prim.Variable):
+        return 1 + _reads(expr.index)
+    if isinstance(expr, LankySum):
+        return _reads(expr.body)
+    if isinstance(expr, prim.ExpressionNode):
+        return sum(_reads(arg) for arg in init_args(expr))
+    if isinstance(expr, tuple | list):
+        return sum(_reads(item) for item in expr)
+    return 0
+
+
+def _true(value: Any) -> bool:
+    return value is True or (isinstance(value, np.bool_) and bool(value))
+
+
+class _AtTheDigits:
+    """A condition on tables evaluated with its equations at the tables' digits.
+
+    Each table value is the exact number rounded to ``digits`` significant
+    digits, so a product of ``k`` of them is within ``k`` units of its
+    ``digits``-th digit, and so is a sum of such products of the sum of their
+    sizes. An equation ``a == b`` holds at the digits where ``|a - b| <=
+    k * 10**(1 - digits) * (|a| + |b|)``, the sizes those of :func:`_magnitude`
+    and ``k`` the cells it reads (at least one). Everything else is evaluated
+    as it is written. ``worst`` keeps the equation that came nearest its
+    allowance, as words.
+    """
+
+    def __init__(self, digits: int) -> None:
+        self.digits = digits
+        self.ratio = -1.0
+        self.worst = ""
+
+    def held(self, claim: Any, env: dict[str, Any]) -> bool:
+        from lanky.terms import evaluate
+
+        if isinstance(claim, bool | np.bool_):
+            return bool(claim)
+        if isinstance(claim, Forall) and all(
+            isinstance(sort, FinType) for _var, sort in claim.binders
+        ):
+            return self._every(claim, list(claim.binders), env)
+        if isinstance(claim, prim.LogicalAnd):
+            return all(self.held(child, env) for child in claim.children)
+        if isinstance(claim, prim.LogicalOr):
+            return any(self.held(child, env) for child in claim.children)
+        if isinstance(claim, prim.Comparison) and claim.operator == "==":
+            return self._equal(claim, env)
+        return _true(evaluate(claim, env))
+
+    def _every(self, claim: Forall, rest: list, env: dict[str, Any]) -> bool:
+        from lanky.terms import evaluate
+
+        if not rest:
+            if claim.guard is not None and not _true(evaluate(claim.guard, env)):
+                return True
+            return self.held(claim.body, env)
+        (var, sort), tail = rest[0], rest[1:]
+        extent = int(evaluate(sort.bound, env))
+        return all(
+            self._every(claim, tail, {**env, var.name: value})
+            for value in range(extent)
+        )
+
+    def _equal(self, claim: Any, env: dict[str, Any]) -> bool:
+        from lanky.terms import evaluate
+
+        left = evaluate(claim.left, env)
+        right = evaluate(claim.right, env)
+        exact = (int, np.integer)
+        if isinstance(left, exact) and isinstance(right, exact):
+            return int(left) == int(right)
+        gap = abs(complex(left) - complex(right))
+        size = abs(complex(evaluate(_magnitude(claim.left), env))) + abs(
+            complex(evaluate(_magnitude(claim.right), env))
+        )
+        allowed = max(1, _reads(claim)) * 10.0 ** (1 - self.digits) * size
+        ratio = gap / allowed if allowed else (0.0 if gap == 0 else float("inf"))
+        if ratio > self.ratio:
+            self.ratio = ratio
+            self.worst = (
+                f"{render(claim)} is off by {gap:.1e}, within {allowed:.1e}"
+                if gap <= allowed
+                else f"{render(claim)} is off by {gap:.1e}, beyond {allowed:.1e}"
+            )
+        return gap <= allowed
+
 
 def failing_point(
     condition: Condition,
@@ -1627,6 +1883,12 @@ def failing_point(
 
     ``(True, "4752 points")`` when it does, and ``(False, words)`` naming the
     first point where it does not, as the body writes the claim.
+
+    A condition on tables is read with its equations at the tables' digits
+    (:class:`_AtTheDigits`): ``sum(Mi[p, c] * M[c, p] for c ...) == 1``
+    holds of a table of 15 digits where it is off by a few units of the
+    15th. One over no loop and no sum, a property of the tables as wholes,
+    is evaluated once, where the statement runs at all.
     """
     from lanky.terms import evaluate
 
@@ -1637,6 +1899,16 @@ def failing_point(
     count = 0
     loops = set(stmt.inames)
     sums = [(name, bound) for name, bound in condition.over if name not in loops]
+    digits = (
+        _AtTheDigits(table_digits(condition.claim, values))
+        if condition.kind == "table"
+        else None
+    )
+
+    def holds(env: dict[str, Any]) -> bool:
+        if digits is not None:
+            return digits.held(condition.claim, env)
+        return _true(evaluate(condition.claim, env))
 
     def walk(env: dict[str, Any], rest: list) -> tuple[bool, str] | None:
         nonlocal count
@@ -1644,13 +1916,18 @@ def failing_point(
             count += 1
             if count > _MOST_POINTS:
                 raise ValueError(f"more than {_MOST_POINTS} points to test")
-            held = evaluate(condition.claim, env)
-            if not (held is True or (isinstance(held, np.bool_) and bool(held))):
+            if not holds(env):
                 names = dict(condition.spelled)
                 at = ", ".join(
                     f"{names.get(name, name)}={env[name]}" for name, _ in condition.over
                 )
-                return False, f"{condition.shown} fails at {at}"
+                where = f" at {at}" if at else ""
+                if digits is not None:
+                    return False, (
+                        f"{condition.shown} fails{where} at the tables' "
+                        f"{digits.digits} digits: {digits.worst}"
+                    )
+                return False, f"{condition.shown} fails{where}"
             return None
         (name, bound), tail = rest[0], rest[1:]
         extent = int(evaluate(bound, env))
@@ -1670,6 +1947,11 @@ def failing_point(
         found = walk(env, sums)
         if found is not None:
             return found
+        if not condition.over:
+            # the same claim at every point: once is enough
+            break
+    if digits is not None and digits.worst:
+        return True, f"{digits.worst}, at the tables' {digits.digits} digits"
     return True, f"{count} points"
 
 
@@ -1731,8 +2013,26 @@ def condition_fact(
         if arguments is None:
             return fact(Status.ASSUMED, None, statement, reason=why)
     if condition.kind == "table":
+        from loopty.unfolding import _read
+
+        constant = {name for name, _ in term.tables}
+        read = _read(condition.claim)
+        whose = "table's" if len(read) == 1 else "tables'"
+        statement = f"{statement}, at the {whose} digits"
+        if not read <= constant:
+            # tables the kernel takes as arguments: the example inputs' values
+            if arguments is None:
+                return fact(
+                    Status.ASSUMED,
+                    None,
+                    f"{statement}, on the example inputs",
+                    reason=(
+                        "no example inputs to test it on: give the schedule some "
+                        "with .example(...), or the file an example_inputs()"
+                    ),
+                )
+            statement = f"{statement}, on the example inputs"
         arguments = {**(arguments or {}), **dict(term.tables)}
-        statement = f"{statement}, at the table's digits"
     elif arguments is None:
         return fact(
             Status.ASSUMED,
@@ -1989,11 +2289,14 @@ def compared_fact(
     written = set(after.lowering.results)
     drawn = 0
     conditions = _data_conditions(match.conditions for match in rows.rewritten.matches)
+    tables = _tables_at_hand(conditions, rows.rewritten.before, arguments)
     for seed in range(DRAWS):
         try:
             from loopty.faithful import _NoSample, sample_arguments
 
-            arguments_d, _sizes = sample_arguments(rows.rewritten.before, seed=seed)
+            arguments_d, _sizes = sample_arguments(
+                rows.rewritten.before, seed=seed, fixed=tables
+            )
         except _NoSample:
             break
         if conditions and not _meets(conditions, rows.rewritten.before, arguments_d):
@@ -2160,16 +2463,29 @@ class Rows:
             for fact, condition in conditions
             if condition.kind != "index"
         ]
-        if rewritten.kept or rewritten.into is not None:
+        if rewritten.tables:
+            # sums of tables kept once: each theorem's step is a row, as with
+            # no keep=, and reading the kept tables where their sums were is
+            # one more (hoisted_facts)
+            equal = [
+                *equality_facts(
+                    rewritten, owner, self.identifier, self.where, data, arguments
+                ),
+                *hoisted_facts(rewritten, owner, self.identifier, self.where),
+            ]
+        elif rewritten.kept or rewritten.into is not None:
             equal = structural_facts(
                 rewritten,
                 owner,
                 self.identifier,
                 self.where,
                 [identifier_ for identifier_, _condition in data],
+                arguments,
             )
         else:
-            equal = equality_facts(rewritten, owner, self.identifier, self.where, data)
+            equal = equality_facts(
+                rewritten, owner, self.identifier, self.where, data, arguments
+            )
         exactness = Fact(
             id=self.identifier(f"exactness:{rewritten.array}"),
             kind="exactness",
@@ -2511,6 +2827,10 @@ def keep_term(rewritten: Rewritten, keep: Any, text: str, at: str) -> Rewritten:
     ((stmt_id, matches),) = by_stmt.items()
     stmt = term.stmt(stmt_id)
     original = rewritten.before.stmt(stmt_id)
+    if not _one_chain(stmt, matches, len(names)):
+        sums = _table_sums(rewritten, stmt_id)
+        if sums is not None and len(sums) >= len(names):
+            return _keep_sums(rewritten, stmt_id, names, sums, taken, text, at)
     theorem = matches[0].identity.name
     folded, generic = None, matches[0].replaced
     if len(matches) > 1:
@@ -2661,6 +2981,279 @@ def keep_term(rewritten: Rewritten, keep: Any, text: str, at: str) -> Rewritten:
         callsites=(*term.callsites, *callsites),
     )
     return dataclasses.replace(rewritten, after=after, kept=tuple(kept))
+
+
+def _one_chain(stmt: Stmt, matches: Sequence[Match], kept: int) -> bool:
+    """Whether the matches are one theorem's nest of sums, as ``keep=`` stores passes.
+
+    One match, or the matches one written-out sum gave, of one theorem, whose
+    right side nests at least ``kept + 1`` sums, each a factor of the one
+    outside it (:func:`_chain`).
+    """
+    if len({id(match.identity) for match in matches}) != 1:
+        return False
+    generic = matches[0].replaced
+    if len(matches) > 1:
+        generic = None
+        for binder, count in stmt.unrolled:
+            if count == len(matches):
+                generic = _fold([match.replaced for match in matches], binder)
+                if generic is not None:
+                    break
+    return generic is not None and _chain(generic, kept + 1) is not None
+
+
+@dataclass(frozen=True, eq=False)
+class _TableSum:
+    """The sums of tables of a rewritten statement that are one sum at other indices.
+
+    ``template`` is the sum's body with its binders ``_b0, ...`` and each
+    index that names none of them a parameter ``_p0, ...``; ``bounds`` the
+    binders' bounds; ``occurrences`` each place the sum is, with the indices
+    its parameters stand for there; ``axes`` the extent of each parameter,
+    the axis of the array it first indexes.
+    """
+
+    template: Any
+    binders: tuple[str, ...]
+    bounds: tuple[Any, ...]
+    exactness: str
+    occurrences: tuple[tuple[Reduction, tuple[Any, ...]], ...]
+    axes: tuple[Any, ...]
+
+
+def _table_sums(rewritten: Rewritten, stmt_id: str) -> list[_TableSum] | None:
+    """The sums the theorems' right sides add that read only tables, in order.
+
+    A sum of tables is innermost (it holds no other sum), reads only arrays
+    no statement writes, and reads them at its own binders and at indices
+    that name none of them, which become its parameters: ``sum(Mi[i, a] *
+    S[a, r] for a ...)`` is ``D[i, r]``, and ``sum(Mi[j, b] * S[b, s] for b
+    ...)`` the same sum at ``(j, s)``. The sums are grouped so, in the order
+    the statement first reads them. ``None`` where the rewrite added no such
+    sum.
+    """
+    from loopty.hypotheses import structural_key
+    from loopty.trace import reductions_in
+
+    after = rewritten.after
+    stmt = after.stmt(stmt_id)
+    old = {id(found) for found in reductions_in(rewritten.before.stmt(stmt_id).expr)}
+    written = {other.assignee.array for other in after.stmts}
+    written |= {name for name, _ in after.temporaries}
+    types = after.array_types
+    groups: dict[Any, dict[str, Any]] = {}
+    for found in reductions_in(stmt.expr):
+        if id(found) in old or found.op != "sum" or reductions_in(found.body):
+            continue
+        shape = _templated(found, written, types)
+        if shape is None:
+            continue
+        template, arguments, axes = shape
+        bounds = tuple(_bound_of(found, iname) for iname in found.inames)
+        if any(bound is None for bound in bounds):
+            continue
+        key = (
+            structural_key(template),
+            tuple(render(bound) for bound in bounds),
+            found.exactness,
+        )
+        group = groups.setdefault(
+            key,
+            {
+                "template": template,
+                "bounds": bounds,
+                "exactness": found.exactness,
+                "occurrences": [],
+                "axes": axes,
+            },
+        )
+        group["occurrences"].append((found, arguments))
+    if not groups:
+        return None
+    return [
+        _TableSum(
+            template=group["template"],
+            binders=tuple(f"_b{k}" for k in range(len(group["bounds"]))),
+            bounds=group["bounds"],
+            exactness=group["exactness"],
+            occurrences=tuple(group["occurrences"]),
+            axes=group["axes"],
+        )
+        for group in groups.values()
+    ]
+
+
+def _templated(
+    found: Reduction, written: set[str], types: Mapping[str, Any]
+) -> tuple[Any, tuple[Any, ...], tuple[Any, ...]] | None:
+    """A sum's body as a template: binders ``_b*``, the other indices ``_p*``.
+
+    Returns the template, the indices each parameter stands for here, and
+    the extent of the axis each first indexes; ``None`` where the sum reads
+    an array some statement writes, a variable outside an index, or an
+    array whose axes are not a box of extents.
+    """
+    from loopty.hypotheses import structural_key, substitute
+
+    binders = {iname: Var(f"_b{k}") for k, iname in enumerate(found.inames)}
+    parameters: dict[Any, int] = {}
+    arguments: list[Any] = []
+    axes: list[Any] = []
+    failed = False
+
+    def visit(node: Any) -> Any:
+        nonlocal failed
+        if isinstance(node, prim.Subscript) and isinstance(
+            node.aggregate, prim.Variable
+        ):
+            name = node.aggregate.name
+            typ = types.get(name)
+            if name in written or not isinstance(typ, ArrType) or typ.domain:
+                failed = True
+                return node
+            index = _index_tuple(node)
+            out = []
+            for position, item in enumerate(index):
+                if _names(item) & set(binders):
+                    out.append(substitute(item, binders))
+                    continue
+                key = structural_key(item)
+                if key not in parameters:
+                    parameters[key] = len(arguments)
+                    arguments.append(item)
+                    axes.append(typ.axes[position])
+                out.append(Var(f"_p{parameters[key]}"))
+            return Subscript(node.aggregate, tuple(out) if len(out) > 1 else out[0])
+        if isinstance(node, prim.Variable):
+            failed = True
+            return node
+        if isinstance(node, prim.ExpressionNode):
+            args = init_args(node)
+            return type(node)(*(visit(arg) for arg in args))
+        if isinstance(node, tuple):
+            return tuple(visit(item) for item in node)
+        return node
+
+    template = visit(found.body)
+    if failed or not arguments:
+        return None
+    return template, tuple(arguments), tuple(axes)
+
+
+def _keep_sums(
+    rewritten: Rewritten,
+    stmt_id: str,
+    names: Sequence[str],
+    sums: Sequence[_TableSum],
+    taken: set[str],
+    text: str,
+    at: str,
+) -> Rewritten:
+    """The rewrite with its first sums of tables each computed once, by name.
+
+    ``keep=("D", "L")`` stores the first sum of tables the statement reads
+    in ``D`` and the next in ``L``, each over its parameters (:func:`_table_sums`),
+    in a statement of its own that runs before the rewritten one and no
+    loop of it encloses; the statement then reads ``D[i, r]`` where the sum
+    was. Its cells are what the sum is at every index of the tables, so
+    each is computed once, however many elements the statement runs over.
+    """
+    from loopty.flow import domain_set
+    from loopty.hypotheses import substitute
+    from loopty.term import Access, Binder, Callsite
+
+    term = rewritten.after
+    stmt = term.stmt(stmt_id)
+    spelled = dict(zip(stmt.inames, stmt.spelled or stmt.inames, strict=False))
+    where = at or stmt.where
+    element = term.array_types[stmt.assignee.array].dtype
+    new_stmts: list[Stmt] = []
+    kept: list[Kept] = []
+    binders: list[Any] = []
+    callsites: list[Any] = []
+    temporaries: list[tuple[str, ArrType]] = []
+    expr = stmt.expr
+    for depth, (name, found) in enumerate(zip(names, sums, strict=False)):
+        occurrence, first = found.occurrences[0]
+        # each loop as the source names the index it stands for, at its first
+        # occurrence; an index that is a number there, the face's end of
+        # ends[0, c], by a letter of its own
+        stems = [
+            spelled.get(item.name, item.name)
+            if isinstance(item, prim.Variable)
+            else None
+            for item in first
+        ]
+        used = {*stems, *occurrence.inames}
+        spare = iter(letter for letter in "pqxyzuvw" if letter not in used)
+        stems = [stem if stem is not None else next(spare) for stem in stems]
+        loops = [_fresh_name(stem, taken) for stem in stems]
+        sums_spelled = [*occurrence.inames]
+        summed = [_fresh_name(stem, taken) for stem in sums_spelled]
+        renaming = {f"_p{k}": Var(loop) for k, loop in enumerate(loops)}
+        for binder, new in zip(found.binders, summed, strict=True):
+            renaming[binder] = Var(new)
+        body = substitute(found.template, renaming)
+        inames = tuple(loops)
+        stmt_new = Stmt(
+            id=_fresh_name(f"{stmt.id}_{name}", taken),
+            inames=inames,
+            domain=domain_set(inames, found.axes, reflections=term.reflections),
+            assignee=Access(name, tuple(Var(loop) for loop in loops)),
+            expr=0,
+            kind="assign",
+            guard=None,
+            where=where,
+            order=(-1 - depth, *([0] * len(inames))),
+            text=f"{name}[{', '.join(stems)}] = reduce_sum(...)",
+            spelled=tuple(stems),
+        )
+        domain = _sum_domain(
+            stmt_new, (), tuple(zip(summed, found.bounds, strict=True)), term
+        )
+        new_stmts.append(
+            dataclasses.replace(
+                stmt_new,
+                expr=Reduction("sum", tuple(summed), domain, body, found.exactness),
+            )
+        )
+        temporaries.append(
+            (
+                name,
+                ArrType(
+                    axes=tuple(found.axes),
+                    dtype=element,
+                    ragged=(False,) * len(found.axes),
+                ),
+            )
+        )
+        kept.append(Kept(name, stmt_new.id, inames, tuple(stems), tuple(found.axes)))
+        for loop, stem in zip(loops, stems, strict=True):
+            binders.append(Binder(loop, stem, where, scope=(name,)))
+        for new, stem in zip(summed, sums_spelled, strict=True):
+            binders.append(Binder(new, stem, where, sum=True, scope=(name,)))
+        callsites.append(Callsite((name,), name, where))
+        for occurrence, arguments in found.occurrences:
+            cell = Subscript(
+                Var(name), arguments if len(arguments) > 1 else arguments[0]
+            )
+            expr = _replaced_identity(expr, occurrence, cell)
+    ordered: list[Stmt] = []
+    for other in term.stmts:
+        if other.id == stmt_id:
+            ordered.extend(new_stmts)
+            ordered.append(dataclasses.replace(stmt, expr=expr))
+        else:
+            ordered.append(other)
+    after = dataclasses.replace(
+        term,
+        stmts=_renumbered(ordered),
+        temporaries=(*term.temporaries, *temporaries),
+        binders=(*_binders(term), *binders),
+        callsites=(*term.callsites, *callsites),
+    )
+    return dataclasses.replace(rewritten, after=after, kept=tuple(kept), tables=True)
 
 
 def _taken(term: Term) -> set[str]:
@@ -2942,6 +3535,7 @@ def structural_facts(
     identifier: Any,
     where: str,
     condition_ids: Sequence[str],
+    arguments: Mapping[str, Any] | None = None,
 ) -> list[Fact]:
     """The rows of a structural rewrite: what the passes leave, and their own facts.
 
@@ -2953,12 +3547,14 @@ def structural_facts(
     isl (:func:`kept_facts`).
     """
     proof, assignment, detail_words = structural_proof(rewritten, owner, identifier)
+    conditions = _data_conditions(match.conditions for match in rewritten.matches)
     agreed, detail = _drawn_terms(
         rewritten.before,
         rewritten.after,
         rewritten.array,
         _short_text(rewritten),
-        conditions=_data_conditions(match.conditions for match in rewritten.matches),
+        conditions=conditions,
+        tables=_tables_at_hand(conditions, rewritten.before, arguments),
     )
     status = (
         Status.TESTED
@@ -3003,6 +3599,123 @@ def structural_facts(
         rests_on=rests,
     )
     return [row, *assignment, *kept_facts(rewritten, owner, identifier)]
+
+
+def hoisted_facts(
+    rewritten: Rewritten, owner: str, identifier: Any, where: str
+) -> list[Fact]:
+    """The rows of sums of tables kept once: reading them changes nothing; their facts.
+
+    The claim that the statement, reading each kept table where its sum was,
+    stores what it stored with the sums in place: tested by draws of both
+    terms on the interpreter, and proved by Lean by unfolding each kept
+    table into the sum it stores (:func:`loopty.unfolding.unfolded`, with no
+    theorem). Then the kept tables' own facts (:func:`kept_facts`).
+    """
+    from loopty.dataflow import _stored
+    from loopty.unfolding import unfolded
+
+    before = rewritten.steps[-1].after if rewritten.steps else rewritten.before
+    after = rewritten.after
+    array = rewritten.array
+    listed = _listed([kept.name for kept in rewritten.kept])
+    several = len(rewritten.kept) > 1
+    counts = []
+    stmt_id = rewritten.matches[0].stmt
+    for kept in rewritten.kept:
+        reads = sum(
+            1
+            for node in _subscripts(after.stmt(stmt_id).expr)
+            if node.aggregate.name == kept.name
+        )
+        counts.append(f"{kept.name} in {reads} place{'s' if reads != 1 else ''}")
+    words = (
+        f"keep=({', '.join(kept.name for kept in rewritten.kept)}): {listed} "
+        f"{'are' if several else 'is'} computed once, before {array}, over the "
+        f"indices {'each reads' if several else 'it reads'}, and {array} reads "
+        f"{'them where their sums were' if several else 'it where its sum was'} "
+        f"({_listed(counts)}): what {array} stores is unchanged"
+    )
+    stored = _stored(after, owner)
+    post = _conjunction(statement_claims(before, (array,)))
+    found = unfolded(dataclasses.replace(after, post=post), stored.equations, [])
+    provenance: dict[str, Any] = {}
+    proof = None
+    assignment: tuple[Fact, ...] = ()
+    if isinstance(found, str):
+        provenance["lean"] = f"not stated for Lean: {found}"
+    else:
+        proof, used, provenance["proof"] = found
+        needed = {name for hypothesis in used for name in hypothesis.rests_on}
+        facts = sorted(
+            (fact for fact in stored.facts.values() if fact.id in needed),
+            key=lambda fact: fact.id,
+        )
+        renamed = {
+            fact.id: identifier(f"single-assignment:{fact.provenance.get('array', k)}")
+            for k, fact in enumerate(facts)
+        }
+        assignment = tuple(
+            dataclasses.replace(fact, id=renamed[fact.id], owner=owner)
+            for fact in facts
+        )
+        proof = dataclasses.replace(
+            proof, rests_on=tuple(renamed.get(fact, fact) for fact in proof.rests_on)
+        )
+    agreed, detail = _drawn_terms(
+        before, after, array, f"keep=({', '.join(k.name for k in rewritten.kept)})"
+    )
+    status = (
+        Status.TESTED
+        if agreed
+        else Status.REFUTED
+        if agreed is False
+        else Status.ASSUMED
+    )
+    provenance["detail"] = detail
+    if agreed is False:
+        provenance["reason"] = (
+            f"{rewritten.text}: reading the kept tables does not leave what the "
+            f"statement stored; {detail}"
+        )
+    elif agreed is None:
+        provenance["reason"] = detail
+    row = Fact(
+        id=identifier(f"{KIND}:kept"),
+        kind=KIND,
+        statement=words,
+        term=proof,
+        status=status,
+        decided_by=None if status is Status.ASSUMED else "interpreter",
+        provenance=provenance,
+        where=where,
+        owner=owner,
+        rests_on=tuple(getattr(proof, "rests_on", ()) or ()),
+    )
+    return [row, *assignment, *kept_facts(rewritten, owner, identifier)]
+
+
+def _subscripts(expr: Any) -> list[Any]:
+    """Every array read in ``expr``, in loopty's sums too."""
+    out: list[Any] = []
+
+    def visit(node: Any) -> None:
+        if isinstance(node, Reduction):
+            visit(node.body)
+        elif isinstance(node, prim.Subscript) and isinstance(
+            node.aggregate, prim.Variable
+        ):
+            out.append(node)
+            visit(node.index)
+        elif isinstance(node, prim.ExpressionNode):
+            for arg in init_args(node):
+                visit(arg)
+        elif isinstance(node, tuple | list):
+            for item in node:
+                visit(item)
+
+    visit(expr)
+    return out
 
 
 def kept_facts(rewritten: Rewritten, owner: str, identifier: Any) -> list[Fact]:

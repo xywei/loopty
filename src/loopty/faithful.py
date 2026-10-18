@@ -66,6 +66,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
+import pymbolic.primitives as prim
 from lanky.ledger import Fact, Status, fact_id
 from lanky.prelude import FinType, FnType, Refined
 from lanky.terms import evaluate, free_variables
@@ -1088,7 +1089,7 @@ def _record(arguments: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def sample_arguments(
-    term: Term, seed: Any = SEED
+    term: Term, seed: Any = SEED, fixed: Mapping[str, Any] | None = None
 ) -> tuple[dict[str, Any], dict[str, int]]:
     """Arguments for ``term`` drawn from its declared types, with their sizes.
 
@@ -1105,14 +1106,33 @@ def sample_arguments(
     size. Offsets the kernel declares beside a ragged array
     (:func:`loopty.term.declared_layout`) are that array's offsets rather than
     a draw, since a call has to pass them so (:mod:`loopty.contract`).
+
+    ``fixed`` gives arrays to take as they are rather than draw, the tables a
+    math step's conditions are about (:mod:`loopty.rewriting`): each size an
+    axis of one names is the extent it has, and the rest are drawn.
     """
     rng = np.random.default_rng(seed)
     types = dict(term.params)
     names = sorted((_size_names(term) - set(types)) | _integral_scalars(term))
-    sizes = {name: int(rng.integers(*SIZES)) for name in names}
+    held: dict[str, int] = {}
+    for name, value in (fixed or {}).items():
+        typ = types.get(name)
+        if not isinstance(typ, ArrType) or typ.domain is not None or any(typ.ragged):
+            continue
+        shape = np.asarray(getattr(value, "numpy", lambda: value)()).shape
+        for axis, extent in zip(typ.axes, shape, strict=False):
+            if isinstance(axis, prim.Variable):
+                held.setdefault(axis.name, int(extent))
+    sizes = {
+        name: held[name] if name in held else int(rng.integers(*SIZES))
+        for name in names
+    }
     arguments: dict[str, Any] = {}
     ragged: list[tuple[str, ArrType]] = []
     for name, typ in term.params:
+        if fixed is not None and name in fixed and isinstance(typ, ArrType):
+            arguments[name] = _copy(fixed[name])
+            continue
         if isinstance(typ, ArrType):
             if typ.domain is not None:
                 needed = typ.domain.size_names()
