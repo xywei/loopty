@@ -688,7 +688,8 @@ def integral_range(sort: Any) -> tuple[int, int]:
 def compiled_storage(sort: Any) -> np.dtype | None:
     """The dtype the compiled run stores ``sort`` in, or ``None`` for no sort.
 
-    ``Real`` is double precision, ``Nat`` and ``Int`` are
+    ``Real`` is double precision, and ``Complex`` a pair of them,
+    ``complex128``; ``Nat`` and ``Int`` are
     :data:`INTEGRAL_STORAGE`, 64 bits, an index type such as ``Fin[m]`` is
     :data:`INDEX_STORAGE`, 32 bits, ``Bool`` is a byte (OpenCL takes no
     ``bool`` argument), and a numpy dtype or scalar type is itself. Python's
@@ -715,6 +716,8 @@ def compiled_storage(sort: Any) -> np.dtype | None:
     name = getattr(sort, "name", None)
     if name == "Real":
         return np.dtype(np.float64)
+    if name == "Complex":
+        return np.dtype(np.complex128)
     if name in ("Nat", "Int"):
         return INTEGRAL_STORAGE
     if name == "Bool":
@@ -816,8 +819,8 @@ def native_storage(sort: Any) -> np.dtype | None:
 
     * a numpy dtype or scalar type names a storage and is itself:
       ``np.float32`` rounds, and ``np.complex128`` keeps an imaginary part;
-    * ``Real``, exact or not, and ``float`` are ``float64``, and ``complex``
-      is ``complex128``;
+    * ``Real``, exact or not, and ``float`` are ``float64``, and
+      ``Complex`` and ``complex`` are ``complex128``;
     * ``Bool`` and ``bool`` are ``bool``. The compiled temporary is a byte,
       which holds a truth value as a bool does; natively ``~``, ``&`` and
       ``|`` are logical only on a bool (bitwise on an integer, refused on a
@@ -842,7 +845,7 @@ def native_storage(sort: Any) -> np.dtype | None:
         return np.dtype(np.int64)
     if base is float or getattr(base, "name", None) == "Real":
         return np.dtype(np.float64)
-    if base is complex:
+    if base is complex or getattr(base, "name", None) == "Complex":
         return np.dtype(np.complex128)
     return None
 

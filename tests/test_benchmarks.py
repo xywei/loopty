@@ -242,3 +242,30 @@ def test_the_advection_reference_is_the_demos_program() -> None:
 
 
 # }}}
+
+
+# {{{ the QBX layer potential
+
+QBX = Path(__file__).resolve().parent.parent / "benchmarks" / "qbx_layer_potential.py"
+
+
+def test_the_qbx_kernels_are_timed_in_sumpys_arithmetic() -> None:
+    """Each layer under the math steps of the example's own schedules.
+
+    The driver imports the example afresh for each kernel it builds, so the
+    single layer is told from the double by its name: one told apart by
+    identity across two imports lost ``log_of_the_modulus`` (Codex, #341).
+    """
+    pytest.importorskip("lanky.known")
+    driver = runpy.run_path(str(QBX), run_name="qbx_driver")
+    names = {}
+    for layer in ("single", "double"):
+        (rewritten,) = driver["arithmetic"](driver["example"](), layer, "c").rewrites
+        names[layer] = [step.identity.name for step in rewritten.steps]
+    assert names == {
+        "single": ["conjugate_form", "log_of_the_modulus"],
+        "double": ["conjugate_form"],
+    }
+
+
+# }}}

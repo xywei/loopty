@@ -183,7 +183,7 @@ def test_the_hexahedra_operators_cite_sum_factorization_backwards() -> None:
     each direction is an instance of its own: ``Fr[3*x + 0]`` for ``Fr``,
     and ``w[3*x + 0, e]`` for the field ``u``.
     """
-    (post,) = facts(hexahedra.weak_grad, "postcondition")
+    (post,) = facts(hexahedra.passes, "postcondition")
     assert (post.status, post.decided_by) == (Status.TESTED, "native")
     found = steps(post)
     assert [name for name, _, _ in found[:3]] == [
@@ -220,7 +220,7 @@ def test_the_hexahedra_operators_cite_sum_factorization_backwards() -> None:
 
 def test_the_hexahedra_claims_read_a_literal_domain_as_a_binder() -> None:
     """``for x in Fin[3] for e in Fin[ne]``: one universal, ``x`` over ``Fin(3)``."""
-    post = hexahedra.weak_grad.term.post
+    post = hexahedra.passes.term.post
     assert isinstance(post, Forall)
     assert [(var.name, str(sort)) for var, sort in post.binders] == [
         ("x", "Fin(3)"),
@@ -359,9 +359,9 @@ def test_with_mathlib_an_unfolded_claim_is_proved_resting_on_what_it_used(
 
 @pytest.mark.lean
 def test_with_mathlib_the_hexahedra_operators_are_proved(lean: Any) -> None:
-    """``weak_grad`` and ``weak_div``: the dense operators, by ``sum_factorization``."""
+    """``passes`` and ``weak_div``: the dense operators, by ``sum_factorization``."""
     _mathlib(lean)
-    for program in (hexahedra.weak_grad, hexahedra.weak_div):
+    for program in (hexahedra.passes, hexahedra.weak_div):
         (post,) = facts(program, "postcondition")
         proved = lean.establish(post)
         assert proved.status is Status.PROVED, proved.provenance.get("lean_reason")

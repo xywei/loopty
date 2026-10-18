@@ -26,8 +26,9 @@ environments (grudge #418 needs loopy's main branch):
     kernels written in plain loopy, each checked against numpy first.
 ``python benchmarks/hexahedra.py c --elements 16 --csv c.csv``
     What fusing and contracting the passes buys on a CPU: the weak gradient
-    as the demo's programs on the C target, one thread, the passes one after
-    another, ``fused`` and ``contracted``, built with the same flags.
+    as the demo's hand-written passes on the C target, one thread, one after
+    another, ``passes_fused`` and ``passes_contracted``, built with the same
+    flags.
 ``python benchmarks/hexahedra.py grudge --elements 48 --csv grudge.csv``
     grudge's own operators, eager and lazy (needs grudge).
 ``python benchmarks/hexahedra.py fields --elements 4 --order 3 --npz fields.npz``
@@ -1016,8 +1017,9 @@ def c_programs(demo: dict[str, Any]) -> dict[str, Any]:
     """The weak gradient as the demo's programs, by name, each a checked schedule.
 
     The passes one after another, each storing its field whole before the
-    next reads it; the passes fused as deep as each pair allows, ``fused``,
-    which still stores ``w`` and ``v`` whole; and ``contracted``, which keeps
+    next reads it; the passes fused as deep as each pair allows,
+    ``passes_fused``, which still stores ``w`` and ``v`` whole; and
+    ``passes_contracted``, which keeps
     ``w`` a row at a time and ``v`` a slab at a time. So the first two differ
     by the order the passes run in, and the last two by the memory ``w`` and
     ``v`` take, and the zeroing a program gives each array it makes.
@@ -1025,9 +1027,9 @@ def c_programs(demo: dict[str, Any]) -> dict[str, Any]:
     from loopty import Schedule
 
     return {
-        "passes one after another": Schedule(demo["weak_grad"]),
-        "fused": demo["fused"],
-        "fused and contracted": demo["contracted"],
+        "passes one after another": Schedule(demo["passes"]),
+        "fused": demo["passes_fused"],
+        "fused and contracted": demo["passes_contracted"],
     }
 
 
@@ -1480,7 +1482,7 @@ def mode_agree(options: argparse.Namespace) -> None:
             f"{np.abs(div - expected['weak_div']).max() / scale['weak_div']:.1e}"
         )
     for name, program in (
-        ("weak_grad", demo["weak_grad"]),
+        ("weak_grad", demo["passes"]),
         ("weak_div", demo["weak_div"]),
     ):
         out = "grad" if name == "weak_grad" else "div"
@@ -1495,9 +1497,9 @@ def mode_agree(options: argparse.Namespace) -> None:
             f"{name}: loopty's program against grudge #418: native {native:.1e}, "
             f"compiled on C {on_c:.1e}"
         )
-    if demo.get("contracted") is not None:
+    if demo.get("passes_contracted") is not None:
         kept = LoopyExecutor().run(
-            demo["contracted"],
+            demo["passes_contracted"],
             **{k: Arr.from_numpy(np.array(v)) for k, v in inputs["weak_grad"].items()},
         )
         gap = (

@@ -1192,28 +1192,40 @@ line from the center through the target. Read the points as complex numbers,
 with `alpha = c - y` and `beta = z - c`, and its terms are
 
 ```text
-log|alpha| + Re( c(1) + ... + c(5) ),   c(k) = -(-beta / alpha)**k / k
+log|alpha| + Re( a(1) + ... + a(5) ),   a(k) = -(-beta / alpha)**k / k
 ```
 
 - `line_taylor` is the theorem behind these terms, for every order: lanky's
-  `examples/line_taylor.py`, here in the same file. A table that satisfies
-  what `(alpha + tau * beta) f'(tau) == beta` says about its coefficients is
-  `c(k)`; that the Taylor coefficients of `log(alpha + tau * beta)` satisfy
-  that equation is cited, not proved. With Mathlib, Lean proves it; without,
-  it is `assumed`, since the property tester draws no table over `Nat`. The
-  kernels add `coefficient(ratio(alpha, beta), k)`, the same function the
-  theorem's conclusion is written with, at the ratio computed by the
-  conjugate, `-beta * conj(alpha) / |alpha|**2`. `by_the_conjugate` says
-  that is `-beta / alpha`, and `single_layer` cites both: its row
-  `single_layer adds line_taylor's c(n) for n in 1..5, for every c with
-  away, first and ode, read over the complex numbers` ties the theorem to the
-  terms the kernel evaluates, `decided` by `theorem` and, with Mathlib,
-  proved by Lean, the identity rewritten and the theorem applied a term at a
-  time. It is about the term read over the complex numbers, not about the
-  floats the kernel produces.
+  `examples/line_taylor.py`, here in the same file. A table `a` that
+  satisfies what `(alpha + tau * beta) f'(tau) == beta` says about its
+  coefficients is `a(k)`; that the Taylor coefficients of `log(alpha + tau *
+  beta)` satisfy that equation is cited, not proved. With Mathlib, Lean
+  proves it; without, it is `assumed`, since the property tester draws no
+  table over `Nat`. Its body is its proof, as a reader says it: the claim at
+  `n` is `first_term` where `n` is 1, and otherwise the recurrence `a[n] ==
+  (n - 1) / n * ratio * a[n - 1]`, by the ODE, with the claim at `n - 1`.
+  The kernels say the math as written: they add
+  `coefficient(-beta / alpha, k)`, the same function the theorem's
+  conclusion is written with, so `single_layer` cites the theorem directly:
+  its row `single_layer adds line_taylor's a(n) for n in 1..5, for every a
+  with nonzero, first_term and ode, read over the complex numbers` ties the
+  theorem to the terms the kernel evaluates, `decided` by `theorem` and,
+  with Mathlib, proved by Lean, the theorem applied a term at a time. It is
+  about the term read over the complex numbers, not about the floats the
+  kernel produces.
 - `single_layer` and `double_layer` are pytential's `S` and `D` on the
-  five-armed starfish, as sumpy computes them, over complex points.
-  `sumpy_tile()` is sumpy's CPU schedule, `get_optimized_kernel(is_cpu=True)`:
+  five-armed starfish, over complex points, lanky's `Complex`.
+  `as_sumpy_computes` is the single layer in sumpy's arithmetic, two math
+  steps of its schedule: each division by `alpha` through its conjugate,
+  `conjugate_form`, one real division where a complex one takes three, and
+  `log|alpha|` with no square root, `log_of_the_modulus`. Each step is a
+  row, over the complex numbers, wherever `c[t] - y[s] != 0`, proved by Lean
+  with Mathlib and tested on drawn inputs without it; the condition is a row
+  tested on the example inputs; and the compiled schedule's agreement with
+  the native kernel is a row, with a note where `alpha * conj(alpha)`
+  underflows or overflows at inputs of extreme magnitude and `log|alpha|`
+  does not, as sumpy's arithmetic does.
+  `sumpy_tile()` is sumpy's CPU schedule on that arithmetic, `get_optimized_kernel(is_cpu=True)`:
   16 targets to a work group, the sources 256 at a time, the sources' loop
   outside the targets'. Its casts are decided, and on the C target it does not
   build, since C has no hardware axes; `tiled` is the same tile on C, with an
@@ -1249,7 +1261,14 @@ pytential's starfish, QBX order 5, at 4 panels: 36 targets, 132 sources
   double_layer: compiled on C agrees with native to the approx tolerance: True -> tested
   single_layer: agrees with sumpy's own kernel, as pytential calls it, within 1e-12 of the largest value -> tested
   double_layer: agrees with sumpy's own kernel, as pytential calls it, within 1e-12 of the largest value -> tested
-  single_layer adds line_taylor's c(n) for n in 1..5, for every c with away, first and ode, read over the complex numbers -> decided
+  single_layer adds line_taylor's a(n) for n in 1..5, for every a with nonzero, first_term and ode, read over the complex numbers -> decided
+
+as sumpy computes it: rewrite(single_layer.out, by=(conjugate_form, log_of_the_modulus))
+  tested   interpreter rewrite(out, by=conjugate_form): over the complex numbers, what out stores is unchanged wherever c[t] - y[s] != 0: -(z[t] - c[t]) / (c[t] - y[s]) becomes its conjugate form, in 5 places
+  tested   interpreter rewrite(out, by=log_of_the_modulus): over the complex numbers, what out stores is unchanged wherever c[t] - y[s] != 0: log(abs(c[t] - y[s])) becomes log(real((c[t] - y[s])*conj(c[t] - y[s]))) / 2, in 1 place
+  tested   run         c[t] - y[s] != 0 for every t and every s, which conjugate_form and log_of_the_modulus need, on the example inputs
+  decided  type        after rewrite(out, ...), out is compared at approx (it was approx)
+...
 
 sumpy's tile, get_optimized_kernel(is_cpu=True): split(single_layer.t, 16).tag({single_layer.t.outer: 'g.0', single_layer.t.inner: 'l.0'}).split(single_layer.s, 256).prioritize(single_layer.s.outer, single_layer.t.inner)
   decided  isl  split(single_layer.t, 16) renames the instances of single_layer one for one
@@ -1260,8 +1279,8 @@ sumpy's tile, get_optimized_kernel(is_cpu=True): split(single_layer.t, 16).tag({
   decided  isl  the order after split(single_layer.s, 256) runs every dependence of single_layer forward, within one work item
   decided  isl  prioritize(single_layer.s.outer, single_layer.t.inner) renames the instances of single_layer one for one
   decided  isl  the order after prioritize(single_layer.s.outer, single_layer.t.inner) runs every dependence of single_layer forward, within one work item
-  decided  isl  distinct instances of out[t] = SCALE * reduce_sum(...) (layer_potential.py:237) write distinct cells of out
-  on C, an ilp loop for the work items: split(single_layer.t, 16).tag(single_layer.t.inner, 'ilp').split(single_layer.s, 256).prioritize(single_layer.s.outer, single_layer.t.inner)
+  decided  isl  distinct instances of out[t] = SCALE * reduce_sum(...) (layer_potential.py:258) write distinct cells of out
+  on C, an ilp loop for the work items: rewrite(single_layer.out, by=(conjugate_form, log_of_the_modulus)).split(single_layer.t, 16).tag(single_layer.t.inner, 'ilp').split(single_layer.s, 256).prioritize(single_layer.s.outer, single_layer.t.inner)
 
 accuracy at 30, 50, 70, 90 panels:
   green_identity  errors 1.4e-04, 3.5e-05, 9.1e-06, 2.8e-06: order 3.51 -> tested
@@ -1273,84 +1292,126 @@ accuracy at 30, 50, 70, 90 panels:
 
 ```console
 $ uv run lanky check examples/layer_potential.py
-STATUS                     EFFECTIVE  BY             WHERE                   OWNER             STATEMENT
--------------------------  ---------  -------------  ----------------------  ----------------  ---------------------------------------------------------------------------------------------------
-assumed                    assumed    -              layer_potential.py:145  line_taylor       alpha : Complex, beta : Complex, c : Fn[Nat, Complex]
-                                                                                               | away: alpha != 0
-                                                                                               | first: alpha*c(1) == beta
-                                                                                               | ode: forall n in Nat where n >= 1. (n + 1)*alpha*c(n + 1) + n*beta*c(n) == 0
-                                                                                               |- forall n in Nat where n >= 1. c(n) == -(-beta / alpha)**n / n
-tested                     tested     python         layer_potential.py:145  line_taylor       the term computes what the annotations compute
-tested                     tested     property-test  layer_potential.py:175  by_the_conjugate  alpha : Complex, beta : Complex
-                                                                                               | away: alpha != 0
-                                                                                               |- -beta*conj(alpha)*(1 / real(alpha*conj(alpha))) == -beta / alpha
-tested                     tested     python         layer_potential.py:175  by_the_conjugate  the term computes what the annotations compute
-decided                    decided    isl            layer_potential.py:237  single_layer      out[t] is in bounds for every instance of out[t] = SCALE * reduce_sum(...) (layer_potential.py:237)
-decided                    decided    isl            layer_potential.py:237  single_layer      w[s] is in bounds for every instance of out[t] = SCALE * reduce_sum(...) (layer_potential.py:237)
-decided                    decided    isl            layer_potential.py:237  single_layer      c[t] is in bounds for every instance of out[t] = SCALE * reduce_sum(...) (layer_potential.py:237)
-decided                    decided    isl            layer_potential.py:237  single_layer      y[s] is in bounds for every instance of out[t] = SCALE * reduce_sum(...) (layer_potential.py:237)
-decided                    decided    isl            layer_potential.py:237  single_layer      z[t] is in bounds for every instance of out[t] = SCALE * reduce_sum(...) (layer_potential.py:237)
-decided                    decided    isl            layer_potential.py:237  single_layer      distinct instances of out[t] = SCALE * reduce_sum(...) (layer_potential.py:237) write
-                                                                                                 distinct cells of out
-decided                    decided    isl            layer_potential.py:221  single_layer      the source order runs every dependence forward in time
-decided                    decided    type           layer_potential.py:237  single_layer      the accumulation into out[t] over s is approx
-decided under line_taylor  assumed    theorem        layer_potential.py:237  single_layer      single_layer adds line_taylor's c(n) for n in 1..5, for every c with away, first
-                                                                                                 and ode, read over the complex numbers
-tested                     tested     interpreter    layer_potential.py:221  single_layer      the traced term computes what the body computes
-decided                    decided    isl            layer_potential.py:389  single_layer      split(single_layer.t, 16) renames the instances of single_layer one for one
-decided                    decided    isl            layer_potential.py:389  single_layer      the order after split(single_layer.t, 16) runs every dependence of single_layer forward
-decided                    decided    isl            layer_potential.py:390  single_layer      tag(single_layer.t.inner, 'ilp') renames the instances of single_layer one for one
-decided                    decided    isl            layer_potential.py:390  single_layer      the order after tag(single_layer.t.inner, 'ilp') runs every dependence of single_layer forward
-decided                    decided    isl            layer_potential.py:391  single_layer      split(single_layer.s, 256) renames the instances of single_layer one for one
-decided                    decided    isl            layer_potential.py:391  single_layer      the order after split(single_layer.s, 256) runs every dependence of single_layer forward
-decided                    decided    isl            layer_potential.py:392  single_layer      prioritize(single_layer.s.outer, single_layer.t.inner) renames the instances of
-                                                                                                 single_layer one for one
-decided                    decided    isl            layer_potential.py:392  single_layer      the order after prioritize(single_layer.s.outer, single_layer.t.inner) runs every dependence of
-                                                                                                 single_layer forward
-decided                    decided    isl            layer_potential.py:253  double_layer      out[t] is in bounds for every instance of out[t] = SCALE * reduce_sum(...) (layer_potential.py:253)
-decided                    decided    isl            layer_potential.py:253  double_layer      w[s] is in bounds for every instance of out[t] = SCALE * reduce_sum(...) (layer_potential.py:253)
-decided                    decided    isl            layer_potential.py:253  double_layer      n[s] is in bounds for every instance of out[t] = SCALE * reduce_sum(...) (layer_potential.py:253)
-decided                    decided    isl            layer_potential.py:253  double_layer      c[t] is in bounds for every instance of out[t] = SCALE * reduce_sum(...) (layer_potential.py:253)
-decided                    decided    isl            layer_potential.py:253  double_layer      y[s] is in bounds for every instance of out[t] = SCALE * reduce_sum(...) (layer_potential.py:253)
-decided                    decided    isl            layer_potential.py:253  double_layer      z[t] is in bounds for every instance of out[t] = SCALE * reduce_sum(...) (layer_potential.py:253)
-decided                    decided    isl            layer_potential.py:253  double_layer      distinct instances of out[t] = SCALE * reduce_sum(...) (layer_potential.py:253) write
-                                                                                                 distinct cells of out
-decided                    decided    isl            layer_potential.py:242  double_layer      the source order runs every dependence forward in time
-decided                    decided    type           layer_potential.py:253  double_layer      the accumulation into out[t] over s is approx
-tested                     tested     interpreter    layer_potential.py:242  double_layer      the traced term computes what the body computes
-decided                    decided    isl            layer_potential.py:399  double_layer      split(double_layer.t, 16) renames the instances of double_layer one for one
-decided                    decided    isl            layer_potential.py:399  double_layer      the order after split(double_layer.t, 16) runs every dependence of double_layer forward
-decided                    decided    isl            layer_potential.py:400  double_layer      tag(double_layer.t.inner, 'ilp') renames the instances of double_layer one for one
-decided                    decided    isl            layer_potential.py:400  double_layer      the order after tag(double_layer.t.inner, 'ilp') runs every dependence of double_layer forward
-decided                    decided    isl            layer_potential.py:401  double_layer      split(double_layer.s, 256) renames the instances of double_layer one for one
-decided                    decided    isl            layer_potential.py:401  double_layer      the order after split(double_layer.s, 256) runs every dependence of double_layer forward
-decided                    decided    isl            layer_potential.py:402  double_layer      prioritize(double_layer.s.outer, double_layer.t.inner) renames the instances of
-                                                                                                 double_layer one for one
-decided                    decided    isl            layer_potential.py:402  double_layer      the order after prioritize(double_layer.s.outer, double_layer.t.inner) runs every dependence of
-                                                                                                 double_layer forward
-tested                     tested     upstream       layer_potential.py:422  single_layer      the native run of single_layer agrees with sumpy_single_layer in out within 1e-12 of the largest
-                                                                                                 value, on its example inputs
-tested                     tested     upstream       layer_potential.py:428  double_layer      the native run of double_layer agrees with sumpy_double_layer in out within 1e-12 of the largest
-                                                                                                 value, on its example inputs
-tested                     tested     run            layer_potential.py:511  green_identity    S(du/dn) - D(u) = u/2, Green's identity, at order 5 - 1.6 or faster
-tested                     tested     run            layer_potential.py:517  jump_S            S(+) - S(-) = 0: S is continuous, at order 5 - 1.6 or faster
-tested                     tested     run            layer_potential.py:523  jump_D            D(+) - D(-) = sigma: D jumps by the density, at order 5 - 1.6 or faster
+STATUS                     EFFECTIVE  BY             WHERE                   OWNER               STATEMENT
+-------------------------  ---------  -------------  ----------------------  ------------------  ---------------------------------------------------------------------------------------------------
+assumed                    assumed    -              layer_potential.py:165  line_taylor         alpha : Complex, beta : Complex, a : Fn[Nat, Complex]
+                                                                                                 | nonzero: alpha != 0
+                                                                                                 | first_term: alpha*a[1] == beta
+                                                                                                 | ode: forall n in Nat where n >= 1. (n + 1)*alpha*a[n + 1] + n*beta*a[n] == 0
+                                                                                                 |- forall n in Nat where n >= 1. a[n] == -(-beta / alpha)**n / n
+tested                     tested     python         layer_potential.py:165  line_taylor         the term computes what the annotations compute
+tested                     tested     property-test  layer_potential.py:193  conjugate_form      x : Complex, alpha : Complex
+                                                                                                 | nonzero: alpha != 0
+                                                                                                 |- x / alpha == x*conj(alpha)*(1 / real(alpha*conj(alpha)))
+tested                     tested     python         layer_potential.py:193  conjugate_form      the term computes what the annotations compute
+tested                     tested     property-test  layer_potential.py:205  log_of_the_modulus  alpha : Complex | alpha != 0 |- log(abs(alpha)) == log(real(alpha*conj(alpha))) / 2
+tested                     tested     python         layer_potential.py:205  log_of_the_modulus  the term computes what the annotations compute
+decided                    decided    isl            layer_potential.py:258  single_layer        out[t] is in bounds for every instance of out[t] = SCALE * reduce_sum(...) (layer_potential.py:258)
+decided                    decided    isl            layer_potential.py:258  single_layer        w[s] is in bounds for every instance of out[t] = SCALE * reduce_sum(...) (layer_potential.py:258)
+decided                    decided    isl            layer_potential.py:258  single_layer        c[t] is in bounds for every instance of out[t] = SCALE * reduce_sum(...) (layer_potential.py:258)
+decided                    decided    isl            layer_potential.py:258  single_layer        y[s] is in bounds for every instance of out[t] = SCALE * reduce_sum(...) (layer_potential.py:258)
+decided                    decided    isl            layer_potential.py:258  single_layer        z[t] is in bounds for every instance of out[t] = SCALE * reduce_sum(...) (layer_potential.py:258)
+decided                    decided    isl            layer_potential.py:258  single_layer        distinct instances of out[t] = SCALE * reduce_sum(...) (layer_potential.py:258) write
+                                                                                                   distinct cells of out
+decided                    decided    isl            layer_potential.py:243  single_layer        the source order runs every dependence forward in time
+decided                    decided    type           layer_potential.py:258  single_layer        the accumulation into out[t] over s is approx
+decided under line_taylor  assumed    theorem        layer_potential.py:258  single_layer        single_layer adds line_taylor's a(n) for n in 1..5, for every a with nonzero, first_term
+                                                                                                   and ode, read over the complex numbers
+tested                     tested     interpreter    layer_potential.py:243  single_layer        the traced term computes what the body computes
+tested                     tested     interpreter    layer_potential.py:388  single_layer        rewrite(out, by=conjugate_form): over the complex numbers,
+                                                                                                   what out stores is unchanged wherever c[t] - y[s] != 0:
+                                                                                                   -(z[t] - c[t]) / (c[t] - y[s]) becomes its conjugate form, in 5 places
+tested                     tested     interpreter    layer_potential.py:388  single_layer        rewrite(out, by=log_of_the_modulus):
+                                                                                                   over the complex numbers, what out stores is unchanged wherever c[t] - y[s] != 0:
+                                                                                                   log(abs(c[t] - y[s])) becomes log(real((c[t] - y[s])*conj(c[t] - y[s]))) / 2, in 1 place
+tested                     tested     run            layer_potential.py:388  single_layer        c[t] - y[s] != 0 for every t and every s, which conjugate_form
+                                                                                                   and log_of_the_modulus need, on the example inputs
+decided                    decided    type           layer_potential.py:388  single_layer        after rewrite(out, ...), out is compared at approx (it was approx)
+tested                     tested     run            layer_potential.py:388  single_layer        the compiled as_sumpy_computes agrees with the native single_layer in out at approx,
+...
+                                                                                                   and 3 drawn ones; note: with the inputs scaled by 1e-170 (|c[t] - y[s]| about 1e-170),
+                                                                                                   out[0] is nan where the native run gives 5.29e-168; with the inputs scaled by 1e+170
+                                                                                                   (|c[t] - y[s]| about 1e+170), out[0] is nan where the native run gives 5.29e+172
+decided                    decided    isl            layer_potential.py:419  single_layer        split(single_layer.t, 16) renames the instances of single_layer one for one
+decided                    decided    isl            layer_potential.py:419  single_layer        the order after split(single_layer.t, 16) runs every dependence of single_layer forward
+decided                    decided    isl            layer_potential.py:420  single_layer        tag(single_layer.t.inner, 'ilp') renames the instances of single_layer one for one
+decided                    decided    isl            layer_potential.py:420  single_layer        the order after tag(single_layer.t.inner, 'ilp') runs every dependence of single_layer forward
+decided                    decided    isl            layer_potential.py:421  single_layer        split(single_layer.s, 256) renames the instances of single_layer one for one
+decided                    decided    isl            layer_potential.py:421  single_layer        the order after split(single_layer.s, 256) runs every dependence of single_layer forward
+decided                    decided    isl            layer_potential.py:422  single_layer        prioritize(single_layer.s.outer, single_layer.t.inner) renames the instances of
+                                                                                                   single_layer one for one
+decided                    decided    isl            layer_potential.py:422  single_layer        the order after prioritize(single_layer.s.outer, single_layer.t.inner) runs every dependence of
+                                                                                                   single_layer forward
+decided                    decided    isl            layer_potential.py:274  double_layer        out[t] is in bounds for every instance of out[t] = SCALE * reduce_sum(...) (layer_potential.py:274)
+decided                    decided    isl            layer_potential.py:274  double_layer        w[s] is in bounds for every instance of out[t] = SCALE * reduce_sum(...) (layer_potential.py:274)
+decided                    decided    isl            layer_potential.py:274  double_layer        n[s] is in bounds for every instance of out[t] = SCALE * reduce_sum(...) (layer_potential.py:274)
+decided                    decided    isl            layer_potential.py:274  double_layer        c[t] is in bounds for every instance of out[t] = SCALE * reduce_sum(...) (layer_potential.py:274)
+decided                    decided    isl            layer_potential.py:274  double_layer        y[s] is in bounds for every instance of out[t] = SCALE * reduce_sum(...) (layer_potential.py:274)
+decided                    decided    isl            layer_potential.py:274  double_layer        z[t] is in bounds for every instance of out[t] = SCALE * reduce_sum(...) (layer_potential.py:274)
+decided                    decided    isl            layer_potential.py:274  double_layer        distinct instances of out[t] = SCALE * reduce_sum(...) (layer_potential.py:274) write
+                                                                                                   distinct cells of out
+decided                    decided    isl            layer_potential.py:263  double_layer        the source order runs every dependence forward in time
+decided                    decided    type           layer_potential.py:274  double_layer        the accumulation into out[t] over s is approx
+tested                     tested     interpreter    layer_potential.py:263  double_layer        the traced term computes what the body computes
+tested                     tested     interpreter    layer_potential.py:429  double_layer        rewrite(out, by=conjugate_form): over the complex numbers,
+                                                                                                   what out stores is unchanged wherever c[t] - y[s] != 0: n[s] / (c[t] - y[s])
+                                                                                                   and -(z[t] - c[t]) / (c[t] - y[s]) become their conjugate forms, in 7 places
+tested                     tested     run            layer_potential.py:429  double_layer        c[t] - y[s] != 0 for every t and every s, which conjugate_form needs, on the example inputs
+decided                    decided    type           layer_potential.py:429  double_layer        after rewrite(out, ...), out is compared at approx (it was approx)
+tested                     tested     run            layer_potential.py:429  double_layer        the compiled double_layer after rewrite(out, ...) agrees with the native double_layer in out at
+                                                                                                   approx, within 1e-06 of each value (measured 1e-15 of the largest), on its example inputs
+                                                                                                   and 3 drawn ones; note: with the inputs scaled by 1e-170 (|c[t] - y[s]| about 1e-170),
+                                                                                                   out[0] is nan where the native run gives -3.45e-166; with the inputs scaled by 1e+170
+                                                                                                   (|c[t] - y[s]| about 1e+170), out[0] is nan where the native run gives -3.45e+174
+decided                    decided    isl            layer_potential.py:430  double_layer        split(double_layer.t, 16) renames the instances of double_layer one for one
+decided                    decided    isl            layer_potential.py:430  double_layer        the order after split(double_layer.t, 16) runs every dependence of double_layer forward
+decided                    decided    isl            layer_potential.py:431  double_layer        tag(double_layer.t.inner, 'ilp') renames the instances of double_layer one for one
+decided                    decided    isl            layer_potential.py:431  double_layer        the order after tag(double_layer.t.inner, 'ilp') runs every dependence of double_layer forward
+decided                    decided    isl            layer_potential.py:432  double_layer        split(double_layer.s, 256) renames the instances of double_layer one for one
+decided                    decided    isl            layer_potential.py:432  double_layer        the order after split(double_layer.s, 256) runs every dependence of double_layer forward
+decided                    decided    isl            layer_potential.py:433  double_layer        prioritize(double_layer.s.outer, double_layer.t.inner) renames the instances of
+                                                                                                   double_layer one for one
+decided                    decided    isl            layer_potential.py:433  double_layer        the order after prioritize(double_layer.s.outer, double_layer.t.inner) runs every dependence of
+                                                                                                   double_layer forward
+tested                     tested     upstream       layer_potential.py:453  single_layer        the native run of single_layer agrees with sumpy_single_layer in out within 1e-12 of the largest
+                                                                                                   value, on its example inputs
+tested                     tested     upstream       layer_potential.py:459  double_layer        the native run of double_layer agrees with sumpy_double_layer in out within 1e-12 of the largest
+                                                                                                   value, on its example inputs
+tested                     tested     run            layer_potential.py:542  green_identity      S(du/dn) - D(u) = u/2, Green's identity, at order 5 - 1.6 or faster
+tested                     tested     run            layer_potential.py:548  jump_S              S(+) - S(-) = 0: S is continuous, at order 5 - 1.6 or faster
+tested                     tested     run            layer_potential.py:554  jump_D              D(+) - D(-) = sigma: D jumps by the density, at order 5 - 1.6 or faster
+tested                     tested     property-test  lanky.known             log_of_a_power      x : Real, n : Nat |- log(x**n) == n*log(x)
+tested                     tested     python         lanky.known             log_of_a_power      the term computes what the annotations compute
+decided (heuristic)        tested     cas            lanky.known             modulus_squared     z : Complex |- real(z*conj(z)) == abs(z)**2
+tested                     tested     python         lanky.known             modulus_squared     the term computes what the annotations compute
 
-45 facts: 1 assumed, 34 decided, 10 tested
+60 facts: 1 assumed, 37 decided, 22 tested
 
-WITHOUT LEAN: line_taylor, by_the_conjugate and 32 more rows are not proved. To have Lean prove what it can: pip install "lanky[lean]", and Lean v4.29.1 from elan (elan default leanprover/lean4:v4.29.1).
-WITHOUT MATHLIB: line_taylor, by_the_conjugate and 1 more row are not proved, since only Lean with Mathlib can state them. To have Lean prove them: python -m lanky.mathlib ~/mathlib (about 7 GB), then export LANKY_LEAN_MATHLIB=~/mathlib.
+WITHOUT LEAN: line_taylor, conjugate_form, log_of_the_modulus and 37 more rows are not proved. To have Lean prove what it can: pip install "lanky[lean]", and Lean v4.29.1 from elan (elan default leanprover/lean4:v4.29.1).
+WITHOUT MATHLIB: line_taylor, conjugate_form, log_of_the_modulus and 6 more rows are not proved, since only Lean with Mathlib can state them. To have Lean prove them: python -m lanky.mathlib ~/mathlib (about 7 GB), then export LANKY_LEAN_MATHLIB=~/mathlib.
+
+NOT CHECKED line_taylor at layer_potential.py:165: its proof, layer_potential.py:182-190, was not checked: Lean is not available here (disabled by LANKY_LEAN_DISABLE); its steps could not be drawn: no draw could be completed: cannot tabulate a family over Nat
+
+NOT CHECKED log_of_the_modulus at layer_potential.py:205: its proof, layer_potential.py:210-214, was not checked: Lean is not available here (disabled by LANKY_LEAN_DISABLE); the proof of log_of_the_modulus was tested step by step at drawn points (layer_potential.py:212, 213), not checked by Lean
 ```
 
-With Lean, the 31 facts isl decided read `proved` by `lean`, the write fact
-sumpy silences and the tile's casts among them (`45 facts: 1 assumed, 3
-decided, 31 proved, 10 tested`); the row that ties `line_taylor` to
-`single_layer` is about complex numbers, and waits for Mathlib. With Mathlib
-too, `line_taylor` reads `proved` by `lean`, by induction two orders at a time
-with the linear combinations Python found, and is worth `tested`: what the
-theorem rests on includes the reading of its annotations, which lanky checks
-by running them (the second row). `by_the_conjugate` reads `proved`, and so
-does the row, which rests on the two theorems.
+With Lean, the facts isl decided read `proved` by `lean`, the write fact
+sumpy silences and the tile's casts among them; the rows about complex
+numbers wait for Mathlib. With Mathlib too (`60 facts: 4 decided, 40 proved,
+16 tested`), `line_taylor` and `log_of_the_modulus` read `proved` by `lean`,
+each with a line that says its own proof checked too, `by its proof,
+layer_potential.py:210-214: 2 steps, using log_of_a_power and
+modulus_squared from lanky.known`, and each is worth `tested`: what a theorem
+rests on includes the reading of its annotations, which lanky checks by
+running them (the second row of each). `conjugate_form` reads `proved`, by
+lanky alone, and so do the row that ties `line_taylor` to `single_layer` and
+the rows of the two math steps, each of which restates its theorem from the
+text the theorem's own command proved. The two facts `log_of_the_modulus`
+cites are rows of this ledger, from `lanky.known`, proved by the library's
+own Lean proofs. `lanky check --steps log_of_the_modulus` prints its proof's
+outline, a row per link of the chain at its line, with the point at which
+each fact applies: `log_of_a_power` at `(abs(alpha), 2)`, `modulus_squared`
+at `alpha`.
 
 ### loopty run examples/layer_potential.py
 
@@ -1571,7 +1632,7 @@ terms `J dr_d/dx_x`, then a pass per reference axis with the factors
 `make_stiffness_t_operator` builds, `S^T` on the derivative's axis and the
 mass `M` on the others, then the three directions summed: the kernels
 `metric` (or `contravariant`, for the divergence), `along_r`, `along_s` and
-`gradient_along_t` (`divergence_along_t`), and the programs `weak_grad` and
+`gradient_along_t` (`divergence_along_t`), and the programs `passes` and
 `weak_div` that chain them. A node `(i, j, k)` of element `e`, `i` along `r`,
 is `u[e, k, j, i]`: grudge's DOFArray is row-major with modepy's reshape of
 each element in F order, which is #418's `dim_tags` `N3,N0,N1,N2`, and both
@@ -1579,7 +1640,7 @@ are the kernels' row-major arrays, three layouts that are one, each a fact.
 The theorem `sum_factorization` is the reason the passes compute the dense
 operator: `Ft (x) Fs (x) Fr` at a node is three sums of `n` terms, proved for
 every `n` by Lean with Mathlib, and tested without it. The programs say so:
-`weak_grad` claims that `grad` is the dense operator of each direction
+`passes` claims that `grad` is the dense operator of each direction
 applied to `u` times the direction's metric term, the three directions
 summed, and `weak_div` the same of the flux. isl does not decide such a
 claim, so Lean is asked: with Mathlib it proves each from what the four
@@ -1589,12 +1650,28 @@ its `u`), and both rows read `proved lean`. Without Mathlib the claims are
 `tested` on the programs' runs, compared at the class of `grad` and `div`,
 `approx`, since the passes sum in another order than the dense operator.
 
-The passes fuse as deep as each pair allows. `along_s` reads a whole column
+`weak_grad` is the math those passes compute, one kernel as grudge's
+`weak_local_grad` says it: the metric product `w[x, d] = G[x, d] * u`, then
+for each direction `d` the Kronecker product of `Ft[d]`, `Fs[d]` and
+`Fr[d]` applied to `w[x, d]`, the three directions summed. Its schedule
+`factored` derives the passes from it: `rewrite(weak_grad.grad,
+by=sum_factorization, keep=("r_pass", "s_pass"))` stores the pass along `r`
+and the pass along `s` in arrays of their own, folded over the three
+directions into one nest each, and the ledger says, proved by Lean with
+Mathlib, that the passes leave in `grad` what `weak_grad`'s statement says;
+the kept arrays' accesses are in bounds, their writes distinct and each
+cell stored before it is read, decided by isl; and the compiled `factored`
+agrees with the native dense kernel. `fused` runs the two passes a slab of
+`c` at a time, `fuse(factored.r_pass.c, factored.s_pass.c)`, and
+`contracted` keeps the `r` pass one slab at a time.
+
+The passes written by hand fuse as deep as each pair allows. `along_s` reads a whole column
 of a `k`-slab `along_r` stored, so the two fuse on `(q, e, k)`, and fused on
 every loop they are refused with the pair, the `j` that reads before the
 store; the metric product fuses with `along_r` on every loop but the row's.
 Fused so, `w` is read a row at a time and `v` a slab at a time, and
-`contract` keeps them in `n` and `n * n` cells. On a device, a program is one
+`contract` keeps them in `n` and `n * n` cells (`passes_fused`,
+`passes_contracted`). On a device, a program is one
 kernel and nothing orders two work items of it, so the passes are three
 launches of their own, the element a work group and its nodes the work
 items, each a schedule loopty checks, that no dependence joins two work
@@ -1607,22 +1684,50 @@ the passes one after another on the C target, with the same flags.
 
 ```console
 $ uv run python examples/hexahedra.py
-order 3, 2 hexahedra: the passes are the dense Kronecker operators: True (largest difference 5e-16 of the largest)
+order 3, 2 hexahedra: the dense kernel and the passes are the dense Kronecker operators: True (largest difference 5e-16 of the largest)
 
-refused: fuse(weak_grad.along_r.i, weak_grad.along_s.i) illegal: v[q, e, k, j, i] = reduce_sum(...) (hexahedra.py:212) at q=8, e=0, k=1, j=1, i=1 writes v[8, 0, 1, 1, 1], read by vs[q, e, k, j, i] = reduce_sum(...) (hexahedra.py:225) at q=8, e=0, k=1, j=0, i=1, scheduled earlier (at n=2, ne=1, isl's choice); fuse(weak_grad.along_r.k, weak_grad.along_s.k) runs every dependence between them forward
+derived from the math: Schedule(weak_grad, target='c').rewrite(weak_grad.grad, by=sum_factorization, keep=('r_pass', 's_pass')).fuse(weak_grad.r_pass.c, weak_grad.s_pass.c).contract(weak_grad.r_pass, lambda x, d, e, c, b, i: (b, i))
+  r_pass kept in lambda x, d, e, c, b, i: (b, i)
+  tested   interpreter rewrite(grad, by=sum_factorization, keep=(r_pass, s_pass)): over the reals, the passes leave in grad what weak_grad's statement says, unfolded through r_pass and s_pass; sum_factorization at Fr := Fr[d], Fs := Fs[d], Ft := Ft[d], u := w[x, d, e], for d = 0, 1 and 2
+  decided  isl         no cell of grad is stored twice, or read before its store
+  decided  isl         no cell of r_pass is stored twice, or read before its store
+  decided  isl         no cell of s_pass is stored twice, or read before its store
+  decided  isl         no cell of w is stored twice, or read before its store
+  decided  isl         r_pass[x_1, d_1, e_1, c_0, b_0, i_1] is in bounds for every instance of r_pass[x, d, e, c, b, i] = reduce_sum(...) (hexahedra.py:394)
+  decided  isl         Fr[d_1, i_1, a_0] is in bounds for every instance of r_pass[x, d, e, c, b, i] = reduce_sum(...) (hexahedra.py:394)
+  decided  isl         w[x_1, d_1, e_1, c_0, b_0, a_0] is in bounds for every instance of r_pass[x, d, e, c, b, i] = reduce_sum(...) (hexahedra.py:394)
+  decided  isl         s_pass[x_2, d_2, e_2, c_1, j_1, i_2] is in bounds for every instance of s_pass[x, d, e, c, j, i] = reduce_sum(...) (hexahedra.py:394)
+  decided  isl         Fs[d_2, j_1, b_1] is in bounds for every instance of s_pass[x, d, e, c, j, i] = reduce_sum(...) (hexahedra.py:394)
+  decided  isl         r_pass[x_2, d_2, e_2, c_1, b_1, i_2] is in bounds for every instance of s_pass[x, d, e, c, j, i] = reduce_sum(...) (hexahedra.py:394)
+  decided  isl         s_pass[x_0, d, e_0, c, j_0, i_0] is in bounds for every d in Fin(3) and every instance of grad[x, e, k, j, i] = reduce_sum(...) (hexahedra.py:377)
+  decided  isl         distinct instances of r_pass[x, d, e, c, b, i] = reduce_sum(...) (hexahedra.py:394) write distinct cells of r_pass
+  decided  isl         distinct instances of s_pass[x, d, e, c, j, i] = reduce_sum(...) (hexahedra.py:394) write distinct cells of s_pass
+  decided  isl         every cell of r_pass that s_pass[x, d, e, c, j, i] = reduce_sum(...) (hexahedra.py:394) reads was written before the read, by r_pass[x, d, e, c, b, i] = reduce_sum(...) (hexahedra.py:394)
+  decided  isl         every cell of s_pass that grad[x, e, k, j, i] = reduce_sum(...) (hexahedra.py:377) reads was written before the read, by s_pass[x, d, e, c, j, i] = reduce_sum(...) (hexahedra.py:394)
+  decided  isl         n >= 0 and (k >= 0 and k < n) and (j >= 0 and j < n) and (i >= 0 and i < n) for every k and every j and every i, which sum_factorization needs
+  decided  type        after rewrite(grad, ...), grad is compared at approx (it was approx)
+  tested   run         the compiled factored agrees with the native weak_grad in grad at approx, within 1e-06 of each value (measured 4e-16 of the largest), on its example inputs and 3 drawn ones
+  decided  isl         fuse(weak_grad.r_pass.c, weak_grad.s_pass.c) renames the instances of weak_grad one for one
+  decided  isl         the order after fuse(weak_grad.r_pass.c, weak_grad.s_pass.c) runs every dependence of weak_grad forward
+  decided  isl         for contract(weak_grad.r_pass), every cell of weak_grad.arrays.r_pass that weak_grad reads, r_pass[x, d, e, c, b, i] = reduce_sum(...) (hexahedra.py:394) has stored by the time it is read
+  decided  isl         no read of weak_grad.arrays.r_pass sees its slot overwritten after contract(weak_grad.r_pass, lambda x, d, e, c, b, i: (b, i)): weak_grad.arrays.r_pass kept in n*n cells, r_pass[x, d, e, c, b, i] in slot (b, i)
+  w: difference 0 within 1e-06 (approx) -> tested
+...
 
-accepted: Schedule(weak_grad, target='c').fuse(weak_grad.metric.j, weak_grad.along_r.j).fuse(weak_grad.along_r.k, weak_grad.along_s.k).contract(weak_grad.w, lambda q, e, k, j, i: i).contract(weak_grad.v, lambda q, e, k, j, i: (j, i))
+refused: fuse(passes.along_r.i, passes.along_s.i) illegal: v[q, e, k, j, i] = reduce_sum(...) (hexahedra.py:231) at q=8, e=0, k=1, j=1, i=1 writes v[8, 0, 1, 1, 1], read by vs[q, e, k, j, i] = reduce_sum(...) (hexahedra.py:244) at q=8, e=0, k=1, j=0, i=1, scheduled earlier (at n=2, ne=1, isl's choice); fuse(passes.along_r.k, passes.along_s.k) runs every dependence between them forward
+
+accepted, by hand: Schedule(passes, target='c').fuse(passes.metric.j, passes.along_r.j).fuse(passes.along_r.k, passes.along_s.k).contract(passes.w, lambda q, e, k, j, i: i).contract(passes.v, lambda q, e, k, j, i: (j, i))
   w kept in lambda q, e, k, j, i: i
   v kept in lambda q, e, k, j, i: (j, i)
-  decided  isl  every cell of weak_grad.w that weak_grad reads, weak_grad.metric has stored by the time it is read, so weak_grad runs without the zeros weak_grad.w is made with
-  decided  isl  every cell of weak_grad.v that weak_grad reads, weak_grad.along_r has stored by the time it is read, so weak_grad runs without the zeros weak_grad.v is made with
-  decided  isl  every cell of weak_grad.vs that weak_grad reads, weak_grad.along_s has stored by the time it is read, so weak_grad runs without the zeros weak_grad.vs is made with
-  decided  isl  fuse(weak_grad.metric.j, weak_grad.along_r.j) renames the instances of weak_grad one for one
-  decided  isl  the order after fuse(weak_grad.metric.j, weak_grad.along_r.j) runs every dependence of weak_grad forward
-  decided  isl  fuse(weak_grad.along_r.k, weak_grad.along_s.k) renames the instances of weak_grad one for one
-  decided  isl  the order after fuse(weak_grad.along_r.k, weak_grad.along_s.k) runs every dependence of weak_grad forward
-  decided  isl  no read of weak_grad.w sees its slot overwritten after contract(weak_grad.w, lambda q, e, k, j, i: i): weak_grad.w kept in n cells, w[q, e, k, j, i] in slot i
-  decided  isl  no read of weak_grad.v sees its slot overwritten after contract(weak_grad.v, lambda q, e, k, j, i: (j, i)): weak_grad.v kept in n*n cells, v[q, e, k, j, i] in slot (j, i)
+  decided  isl  every cell of passes.w that passes reads, passes.metric has stored by the time it is read, so passes runs without the zeros passes.w is made with
+  decided  isl  every cell of passes.v that passes reads, passes.along_r has stored by the time it is read, so passes runs without the zeros passes.v is made with
+  decided  isl  every cell of passes.vs that passes reads, passes.along_s has stored by the time it is read, so passes runs without the zeros passes.vs is made with
+  decided  isl  fuse(passes.metric.j, passes.along_r.j) renames the instances of passes one for one
+  decided  isl  the order after fuse(passes.metric.j, passes.along_r.j) runs every dependence of passes forward
+  decided  isl  fuse(passes.along_r.k, passes.along_s.k) renames the instances of passes one for one
+  decided  isl  the order after fuse(passes.along_r.k, passes.along_s.k) runs every dependence of passes forward
+  decided  isl  no read of passes.w sees its slot overwritten after contract(passes.w, lambda q, e, k, j, i: i): passes.w kept in n cells, w[q, e, k, j, i] in slot i
+  decided  isl  no read of passes.v sees its slot overwritten after contract(passes.v, lambda q, e, k, j, i: (j, i)): passes.v kept in n*n cells, v[q, e, k, j, i] in slot (j, i)
   grad: difference 0 within 1e-06 (approx) -> tested
 
 on a device, the weak gradient as three launches, every node on a work item:
@@ -1637,145 +1742,218 @@ on a device, the weak gradient as three launches, every node on a work item:
 $ uv run lanky check examples/hexahedra.py
 STATUS   BY             WHERE             OWNER                  STATEMENT
 -------  -------------  ----------------  ---------------------  ----------------------------------------------------------------------------------------------------
-tested   property-test  hexahedra.py:119  sum_factorization      n : Nat, Fr : Fn[Fin(n), Fin(n), Real], Fs : Fn[Fin(n), Fin(n), Real],
+tested   property-test  hexahedra.py:138  sum_factorization      n : Nat, Fr : Fn[Fin(n), Fin(n), Real], Fs : Fn[Fin(n), Fin(n), Real],
                                                                    Ft : Fn[Fin(n), Fin(n), Real], u : Fn[Fin(n), Fin(n), Fin(n), Real], k : Fin(n),
                                                                    j : Fin(n), i : Fin(n)
                                                                  |- sum(Ft[k, c]*Fs[j, b]*Fr[i, a]*u[c, b, a] for c in Fin(n), b in Fin(n), a in Fin(n))
                                                                      == sum(Ft[k, c]*sum(Fs[j, b]*sum(Fr[i, a]*u[c, b, a] for a in Fin(n)) for b in Fin(n))
                                                                        for c in Fin(n))
-tested   python         hexahedra.py:119  sum_factorization      the term computes what the annotations compute
-tested   isl            hexahedra.py:154  dof_array              dof_array stores every cell at an address of Fin(ne*n**3)
-tested   isl            hexahedra.py:154  dof_array              dof_array stores no two cells at one address
-tested   isl            hexahedra.py:154  dof_array              dof_array stores a cell at every address of Fin(ne*n**3)
-tested   isl            hexahedra.py:161  as_dim_tags            dof_array stores every cell where dim_tags N3,N0,N1,N2 does
-tested   isl            hexahedra.py:164  row_major              row_major stores every cell at an address of Fin(ne*n**3)
-tested   isl            hexahedra.py:164  row_major              row_major stores no two cells at one address
-tested   isl            hexahedra.py:164  row_major              row_major stores a cell at every address of Fin(ne*n**3)
-tested   isl            hexahedra.py:171  as_row_major           dof_array stores every cell where row_major does
-decided  isl            hexahedra.py:188  metric                 w[q, e, k, j, i] is in bounds for every instance of w[q, e, k, j, i] = G[q, e, k, j, i] *
-                                                                   u[e, k, j, i] (hexahedra.py:188)
-decided  isl            hexahedra.py:188  metric                 G[q, e, k, j, i] is in bounds for every instance of w[q, e, k, j, i] = G[q, e, k, j, i] *
-                                                                   u[e, k, j, i] (hexahedra.py:188)
-decided  isl            hexahedra.py:188  metric                 u[e, k, j, i] is in bounds for every instance of w[q, e, k, j, i] = G[q, e, k, j, i] * u[e, k, j, i]
-                                                                   (hexahedra.py:188)
-decided  isl            hexahedra.py:188  metric                 distinct instances of w[q, e, k, j, i] = G[q, e, k, j, i] * u[e, k, j, i] (hexahedra.py:188) write
+tested   python         hexahedra.py:138  sum_factorization      the term computes what the annotations compute
+tested   isl            hexahedra.py:173  dof_array              dof_array stores every cell at an address of Fin(ne*n**3)
+tested   isl            hexahedra.py:173  dof_array              dof_array stores no two cells at one address
+tested   isl            hexahedra.py:173  dof_array              dof_array stores a cell at every address of Fin(ne*n**3)
+tested   isl            hexahedra.py:180  as_dim_tags            dof_array stores every cell where dim_tags N3,N0,N1,N2 does
+tested   isl            hexahedra.py:183  row_major              row_major stores every cell at an address of Fin(ne*n**3)
+tested   isl            hexahedra.py:183  row_major              row_major stores no two cells at one address
+tested   isl            hexahedra.py:183  row_major              row_major stores a cell at every address of Fin(ne*n**3)
+tested   isl            hexahedra.py:190  as_row_major           dof_array stores every cell where row_major does
+decided  isl            hexahedra.py:207  metric                 w[q, e, k, j, i] is in bounds for every instance of w[q, e, k, j, i] = G[q, e, k, j, i] *
+                                                                   u[e, k, j, i] (hexahedra.py:207)
+decided  isl            hexahedra.py:207  metric                 G[q, e, k, j, i] is in bounds for every instance of w[q, e, k, j, i] = G[q, e, k, j, i] *
+                                                                   u[e, k, j, i] (hexahedra.py:207)
+decided  isl            hexahedra.py:207  metric                 u[e, k, j, i] is in bounds for every instance of w[q, e, k, j, i] = G[q, e, k, j, i] * u[e, k, j, i]
+                                                                   (hexahedra.py:207)
+decided  isl            hexahedra.py:207  metric                 distinct instances of w[q, e, k, j, i] = G[q, e, k, j, i] * u[e, k, j, i] (hexahedra.py:207) write
                                                                    distinct cells of w
-decided  isl            hexahedra.py:180  metric                 the source order runs every dependence forward in time
-tested   interpreter    hexahedra.py:180  metric                 the traced term computes what the body computes
-decided  isl            hexahedra.py:199  contravariant          w[d, e, k, j, i] is in bounds for every instance of w[d, e, k, j, i] = reduce_sum(...)
-                                                                   (hexahedra.py:199)
-decided  isl            hexahedra.py:199  contravariant          G[3*x + d, e, k, j, i] is in bounds for every x in Fin(3)
-                                                                   and every instance of w[d, e, k, j, i] = reduce_sum(...) (hexahedra.py:199)
-decided  isl            hexahedra.py:199  contravariant          f[x, e, k, j, i] is in bounds for every x in Fin(3)
-                                                                   and every instance of w[d, e, k, j, i] = reduce_sum(...) (hexahedra.py:199)
-decided  isl            hexahedra.py:199  contravariant          distinct instances of w[d, e, k, j, i] = reduce_sum(...) (hexahedra.py:199) write
+decided  isl            hexahedra.py:199  metric                 the source order runs every dependence forward in time
+tested   interpreter    hexahedra.py:199  metric                 the traced term computes what the body computes
+decided  isl            hexahedra.py:218  contravariant          w[d, e, k, j, i] is in bounds for every instance of w[d, e, k, j, i] = reduce_sum(...)
+                                                                   (hexahedra.py:218)
+decided  isl            hexahedra.py:218  contravariant          G[3*x + d, e, k, j, i] is in bounds for every x in Fin(3)
+                                                                   and every instance of w[d, e, k, j, i] = reduce_sum(...) (hexahedra.py:218)
+decided  isl            hexahedra.py:218  contravariant          f[x, e, k, j, i] is in bounds for every x in Fin(3)
+                                                                   and every instance of w[d, e, k, j, i] = reduce_sum(...) (hexahedra.py:218)
+decided  isl            hexahedra.py:218  contravariant          distinct instances of w[d, e, k, j, i] = reduce_sum(...) (hexahedra.py:218) write
                                                                    distinct cells of w
-decided  isl            hexahedra.py:191  contravariant          the source order runs every dependence forward in time
-tested   interpreter    hexahedra.py:191  contravariant          the traced term computes what the body computes
-decided  isl            hexahedra.py:212  along_r                v[q, e, k, j, i] is in bounds for every instance of v[q, e, k, j, i] = reduce_sum(...)
-                                                                   (hexahedra.py:212)
-decided  isl            hexahedra.py:212  along_r                Fr[q, i, a] is in bounds for every instance of v[q, e, k, j, i] = reduce_sum(...) (hexahedra.py:212)
-decided  isl            hexahedra.py:212  along_r                w[q, e, k, j, a] is in bounds for every instance of v[q, e, k, j, i] = reduce_sum(...)
-                                                                   (hexahedra.py:212)
-decided  isl            hexahedra.py:212  along_r                distinct instances of v[q, e, k, j, i] = reduce_sum(...) (hexahedra.py:212) write
+decided  isl            hexahedra.py:210  contravariant          the source order runs every dependence forward in time
+tested   interpreter    hexahedra.py:210  contravariant          the traced term computes what the body computes
+decided  isl            hexahedra.py:231  along_r                v[q, e, k, j, i] is in bounds for every instance of v[q, e, k, j, i] = reduce_sum(...)
+                                                                   (hexahedra.py:231)
+decided  isl            hexahedra.py:231  along_r                Fr[q, i, a] is in bounds for every instance of v[q, e, k, j, i] = reduce_sum(...) (hexahedra.py:231)
+decided  isl            hexahedra.py:231  along_r                w[q, e, k, j, a] is in bounds for every instance of v[q, e, k, j, i] = reduce_sum(...)
+                                                                   (hexahedra.py:231)
+decided  isl            hexahedra.py:231  along_r                distinct instances of v[q, e, k, j, i] = reduce_sum(...) (hexahedra.py:231) write
                                                                    distinct cells of v
-decided  isl            hexahedra.py:204  along_r                the source order runs every dependence forward in time
-decided  type           hexahedra.py:212  along_r                the accumulation into v[q, e, k, j, i] over a is approx
-tested   interpreter    hexahedra.py:204  along_r                the traced term computes what the body computes
-decided  isl            hexahedra.py:225  along_s                vs[q, e, k, j, i] is in bounds for every instance of vs[q, e, k, j, i] = reduce_sum(...)
-                                                                   (hexahedra.py:225)
-decided  isl            hexahedra.py:225  along_s                Fs[q, j, b] is in bounds for every instance of vs[q, e, k, j, i] = reduce_sum(...)
-                                                                   (hexahedra.py:225)
-decided  isl            hexahedra.py:225  along_s                v[q, e, k, b, i] is in bounds for every instance of vs[q, e, k, j, i] = reduce_sum(...)
-                                                                   (hexahedra.py:225)
-decided  isl            hexahedra.py:225  along_s                distinct instances of vs[q, e, k, j, i] = reduce_sum(...) (hexahedra.py:225) write
+decided  isl            hexahedra.py:223  along_r                the source order runs every dependence forward in time
+decided  type           hexahedra.py:231  along_r                the accumulation into v[q, e, k, j, i] over a is approx
+tested   interpreter    hexahedra.py:223  along_r                the traced term computes what the body computes
+decided  isl            hexahedra.py:244  along_s                vs[q, e, k, j, i] is in bounds for every instance of vs[q, e, k, j, i] = reduce_sum(...)
+                                                                   (hexahedra.py:244)
+decided  isl            hexahedra.py:244  along_s                Fs[q, j, b] is in bounds for every instance of vs[q, e, k, j, i] = reduce_sum(...)
+                                                                   (hexahedra.py:244)
+decided  isl            hexahedra.py:244  along_s                v[q, e, k, b, i] is in bounds for every instance of vs[q, e, k, j, i] = reduce_sum(...)
+                                                                   (hexahedra.py:244)
+decided  isl            hexahedra.py:244  along_s                distinct instances of vs[q, e, k, j, i] = reduce_sum(...) (hexahedra.py:244) write
                                                                    distinct cells of vs
-decided  isl            hexahedra.py:217  along_s                the source order runs every dependence forward in time
-decided  type           hexahedra.py:225  along_s                the accumulation into vs[q, e, k, j, i] over b is approx
-tested   interpreter    hexahedra.py:217  along_s                the traced term computes what the body computes
-decided  isl            hexahedra.py:238  gradient_along_t       grad[x, e, k, j, i] is in bounds for every instance of grad[x, e, k, j, i] = reduce_sum(...)
-                                                                   (hexahedra.py:238)
-decided  isl            hexahedra.py:238  gradient_along_t       Ft[3*x + d, k, c] is in bounds for every d in Fin(3)
-                                                                   and every instance of grad[x, e, k, j, i] = reduce_sum(...) (hexahedra.py:238)
-decided  isl            hexahedra.py:238  gradient_along_t       vs[3*x + d, e, c, j, i] is in bounds for every d in Fin(3)
-                                                                   and every instance of grad[x, e, k, j, i] = reduce_sum(...) (hexahedra.py:238)
-decided  isl            hexahedra.py:238  gradient_along_t       distinct instances of grad[x, e, k, j, i] = reduce_sum(...) (hexahedra.py:238) write
+decided  isl            hexahedra.py:236  along_s                the source order runs every dependence forward in time
+decided  type           hexahedra.py:244  along_s                the accumulation into vs[q, e, k, j, i] over b is approx
+tested   interpreter    hexahedra.py:236  along_s                the traced term computes what the body computes
+decided  isl            hexahedra.py:257  gradient_along_t       grad[x, e, k, j, i] is in bounds for every instance of grad[x, e, k, j, i] = reduce_sum(...)
+                                                                   (hexahedra.py:257)
+decided  isl            hexahedra.py:257  gradient_along_t       Ft[3*x + d, k, c] is in bounds for every d in Fin(3)
+                                                                   and every instance of grad[x, e, k, j, i] = reduce_sum(...) (hexahedra.py:257)
+decided  isl            hexahedra.py:257  gradient_along_t       vs[3*x + d, e, c, j, i] is in bounds for every d in Fin(3)
+                                                                   and every instance of grad[x, e, k, j, i] = reduce_sum(...) (hexahedra.py:257)
+decided  isl            hexahedra.py:257  gradient_along_t       distinct instances of grad[x, e, k, j, i] = reduce_sum(...) (hexahedra.py:257) write
                                                                    distinct cells of grad
-decided  isl            hexahedra.py:230  gradient_along_t       the source order runs every dependence forward in time
-decided  type           hexahedra.py:238  gradient_along_t       the accumulation into grad[x, e, k, j, i] over c is approx for every d in Fin(3)
-tested   interpreter    hexahedra.py:230  gradient_along_t       the traced term computes what the body computes
-decided  isl            hexahedra.py:255  divergence_along_t     div[e, k, j, i] is in bounds for every instance of div[e, k, j, i] = reduce_sum(...)
-                                                                   (hexahedra.py:255)
-decided  isl            hexahedra.py:255  divergence_along_t     Ft[d, k, c] is in bounds for every d in Fin(3)
-                                                                   and every instance of div[e, k, j, i] = reduce_sum(...) (hexahedra.py:255)
-decided  isl            hexahedra.py:255  divergence_along_t     vs[d, e, c, j, i] is in bounds for every d in Fin(3)
-                                                                   and every instance of div[e, k, j, i] = reduce_sum(...) (hexahedra.py:255)
-decided  isl            hexahedra.py:255  divergence_along_t     distinct instances of div[e, k, j, i] = reduce_sum(...) (hexahedra.py:255) write
+decided  isl            hexahedra.py:249  gradient_along_t       the source order runs every dependence forward in time
+decided  type           hexahedra.py:257  gradient_along_t       the accumulation into grad[x, e, k, j, i] over c is approx for every d in Fin(3)
+tested   interpreter    hexahedra.py:249  gradient_along_t       the traced term computes what the body computes
+decided  isl            hexahedra.py:274  divergence_along_t     div[e, k, j, i] is in bounds for every instance of div[e, k, j, i] = reduce_sum(...)
+                                                                   (hexahedra.py:274)
+decided  isl            hexahedra.py:274  divergence_along_t     Ft[d, k, c] is in bounds for every d in Fin(3)
+                                                                   and every instance of div[e, k, j, i] = reduce_sum(...) (hexahedra.py:274)
+decided  isl            hexahedra.py:274  divergence_along_t     vs[d, e, c, j, i] is in bounds for every d in Fin(3)
+                                                                   and every instance of div[e, k, j, i] = reduce_sum(...) (hexahedra.py:274)
+decided  isl            hexahedra.py:274  divergence_along_t     distinct instances of div[e, k, j, i] = reduce_sum(...) (hexahedra.py:274) write
                                                                    distinct cells of div
-decided  isl            hexahedra.py:247  divergence_along_t     the source order runs every dependence forward in time
-decided  type           hexahedra.py:255  divergence_along_t     the accumulation into div[e, k, j, i] over c is approx for every d in Fin(3)
-tested   interpreter    hexahedra.py:247  divergence_along_t     the traced term computes what the body computes
-decided  isl            hexahedra.py:294  weak_grad              every cell of w that along_r reads, metric stored before it
-decided  isl            hexahedra.py:295  weak_grad              every cell of v that along_s reads, along_r stored before it
-decided  isl            hexahedra.py:296  weak_grad              every cell of vs that gradient_along_t reads, along_s stored before it
-decided  isl            hexahedra.py:188  weak_grad              metric stores no cell of w twice, and reads none before its store
-decided  isl            hexahedra.py:212  weak_grad              along_r stores no cell of v twice, and reads none before its store
-decided  isl            hexahedra.py:225  weak_grad              along_s stores no cell of vs twice, and reads none before its store
-decided  isl            hexahedra.py:238  weak_grad              gradient_along_t stores no cell of grad twice, and reads none before its store
-tested   native         hexahedra.py:263  weak_grad              forall x in Fin(3), e in Fin(ne), k in Fin(n), j in Fin(n), i in Fin(n).
+decided  isl            hexahedra.py:266  divergence_along_t     the source order runs every dependence forward in time
+decided  type           hexahedra.py:274  divergence_along_t     the accumulation into div[e, k, j, i] over c is approx for every d in Fin(3)
+tested   interpreter    hexahedra.py:266  divergence_along_t     the traced term computes what the body computes
+decided  isl            hexahedra.py:313  passes                 every cell of w that along_r reads, metric stored before it
+decided  isl            hexahedra.py:314  passes                 every cell of v that along_s reads, along_r stored before it
+decided  isl            hexahedra.py:315  passes                 every cell of vs that gradient_along_t reads, along_s stored before it
+decided  isl            hexahedra.py:207  passes                 metric stores no cell of w twice, and reads none before its store
+decided  isl            hexahedra.py:231  passes                 along_r stores no cell of v twice, and reads none before its store
+decided  isl            hexahedra.py:244  passes                 along_s stores no cell of vs twice, and reads none before its store
+decided  isl            hexahedra.py:257  passes                 gradient_along_t stores no cell of grad twice, and reads none before its store
+tested   native         hexahedra.py:282  passes                 forall x in Fin(3), e in Fin(ne), k in Fin(n), j in Fin(n), i in Fin(n).
                                                                    grad[x, e, k, j, i]
                                                                    == sum(Ft[3*x + d, k, c]*Fs[3*x + d, j, b]*Fr[3*x + d, i, a]*G[3*x + d, e, c, b, a]*u[e, c, b, a]
                                                                      for d in Fin(3), c in Fin(n), b in Fin(n), a in Fin(n))
-tested   interpreter    hexahedra.py:263  weak_grad              the traced term computes what the body computes
-decided  isl            hexahedra.py:290  weak_grad              every cell of weak_grad.w that weak_grad reads, weak_grad.metric has stored by the time it is read,
-                                                                   so weak_grad runs without the zeros weak_grad.w is made with
-decided  isl            hexahedra.py:291  weak_grad              every cell of weak_grad.v that weak_grad reads, weak_grad.along_r has stored by the time it is read,
-                                                                   so weak_grad runs without the zeros weak_grad.v is made with
-decided  isl            hexahedra.py:292  weak_grad              every cell of weak_grad.vs that weak_grad reads,
-                                                                   weak_grad.along_s has stored by the time it is read,
-                                                                   so weak_grad runs without the zeros weak_grad.vs is made with
-decided  isl            hexahedra.py:341  weak_grad              fuse(weak_grad.metric.j, weak_grad.along_r.j) renames the instances of weak_grad one for one
-decided  isl            hexahedra.py:341  weak_grad              the order after fuse(weak_grad.metric.j, weak_grad.along_r.j) runs every dependence of
-                                                                   weak_grad forward
-decided  isl            hexahedra.py:342  weak_grad              fuse(weak_grad.along_r.k, weak_grad.along_s.k) renames the instances of weak_grad one for one
-decided  isl            hexahedra.py:342  weak_grad              the order after fuse(weak_grad.along_r.k, weak_grad.along_s.k) runs every dependence of
-                                                                   weak_grad forward
-decided  isl            hexahedra.py:346  weak_grad              no read of weak_grad.w sees its slot overwritten after
-                                                                   contract(weak_grad.w, lambda q, e, k, j, i: i):
-                                                                   weak_grad.w kept in n cells, w[q, e, k, j, i] in slot i
-decided  isl            hexahedra.py:346  weak_grad              no read of weak_grad.v sees its slot overwritten after
-                                                                   contract(weak_grad.v, lambda q, e, k, j, i: (j, i)):
-                                                                   weak_grad.v kept in n*n cells, v[q, e, k, j, i] in slot (j, i)
-decided  isl            hexahedra.py:327  weak_div               every cell of w that along_r reads, contravariant stored before it
-decided  isl            hexahedra.py:328  weak_div               every cell of v that along_s reads, along_r stored before it
-decided  isl            hexahedra.py:329  weak_div               every cell of vs that divergence_along_t reads, along_s stored before it
-decided  isl            hexahedra.py:199  weak_div               contravariant stores no cell of w twice, and reads none before its store
-decided  isl            hexahedra.py:212  weak_div               along_r stores no cell of v twice, and reads none before its store
-decided  isl            hexahedra.py:225  weak_div               along_s stores no cell of vs twice, and reads none before its store
-decided  isl            hexahedra.py:255  weak_div               divergence_along_t stores no cell of div twice, and reads none before its store
-tested   native         hexahedra.py:299  weak_div               forall e in Fin(ne), k in Fin(n), j in Fin(n), i in Fin(n).
+tested   interpreter    hexahedra.py:282  passes                 the traced term computes what the body computes
+decided  isl            hexahedra.py:309  passes                 every cell of passes.w that passes reads, passes.metric has stored by the time it is read,
+                                                                   so passes runs without the zeros passes.w is made with
+decided  isl            hexahedra.py:310  passes                 every cell of passes.v that passes reads, passes.along_r has stored by the time it is read,
+                                                                   so passes runs without the zeros passes.v is made with
+decided  isl            hexahedra.py:311  passes                 every cell of passes.vs that passes reads, passes.along_s has stored by the time it is read,
+                                                                   so passes runs without the zeros passes.vs is made with
+decided  isl            hexahedra.py:408  passes                 fuse(passes.metric.j, passes.along_r.j) renames the instances of passes one for one
+decided  isl            hexahedra.py:408  passes                 the order after fuse(passes.metric.j, passes.along_r.j) runs every dependence of passes forward
+decided  isl            hexahedra.py:409  passes                 fuse(passes.along_r.k, passes.along_s.k) renames the instances of passes one for one
+decided  isl            hexahedra.py:409  passes                 the order after fuse(passes.along_r.k, passes.along_s.k) runs every dependence of passes forward
+decided  isl            hexahedra.py:413  passes                 no read of passes.w sees its slot overwritten after contract(passes.w, lambda q, e, k, j, i: i):
+                                                                   passes.w kept in n cells, w[q, e, k, j, i] in slot i
+decided  isl            hexahedra.py:413  passes                 no read of passes.v sees its slot overwritten after
+                                                                   contract(passes.v, lambda q, e, k, j, i: (j, i)):
+                                                                   passes.v kept in n*n cells, v[q, e, k, j, i] in slot (j, i)
+decided  isl            hexahedra.py:346  weak_div               every cell of w that along_r reads, contravariant stored before it
+decided  isl            hexahedra.py:347  weak_div               every cell of v that along_s reads, along_r stored before it
+decided  isl            hexahedra.py:348  weak_div               every cell of vs that divergence_along_t reads, along_s stored before it
+decided  isl            hexahedra.py:218  weak_div               contravariant stores no cell of w twice, and reads none before its store
+decided  isl            hexahedra.py:231  weak_div               along_r stores no cell of v twice, and reads none before its store
+decided  isl            hexahedra.py:244  weak_div               along_s stores no cell of vs twice, and reads none before its store
+decided  isl            hexahedra.py:274  weak_div               divergence_along_t stores no cell of div twice, and reads none before its store
+tested   native         hexahedra.py:318  weak_div               forall e in Fin(ne), k in Fin(n), j in Fin(n), i in Fin(n).
                                                                    div[e, k, j, i] ==
                                                                    sum(Ft[d, k, c]*Fs[d, j, b]*Fr[d, i, a]*sum(G[3*x + d, e, c, b, a]*f[x, e, c, b, a]
                                                                        for x in Fin(3)) for d in Fin(3), c in Fin(n), b in Fin(n), a in Fin(n))
-tested   interpreter    hexahedra.py:299  weak_div               the traced term computes what the body computes
-decided  isl            hexahedra.py:354  metric_along_r         every cell of w that along_r reads, metric stored before it
-tested   interpreter    hexahedra.py:349  metric_along_r         the traced term computes what the body computes
-decided  isl            hexahedra.py:362  contravariant_along_r  every cell of w that along_r reads, contravariant stored before it
-tested   interpreter    hexahedra.py:357  contravariant_along_r  the traced term computes what the body computes
+tested   interpreter    hexahedra.py:318  weak_div               the traced term computes what the body computes
+decided  isl            hexahedra.py:375  weak_grad              w[x, d, e, k, j, i] is in bounds for every instance of w[x, d, e, k, j, i] = G[x, d, e, k, j, i] *
+                                                                   u[e, k, j, i] (hexahedra.py:375)
+decided  isl            hexahedra.py:375  weak_grad              G[x, d, e, k, j, i] is in bounds for every instance of w[x, d, e, k, j, i] = G[x, d, e, k, j, i] *
+                                                                   u[e, k, j, i] (hexahedra.py:375)
+decided  isl            hexahedra.py:375  weak_grad              u[e, k, j, i] is in bounds for every instance of w[x, d, e, k, j, i] = G[x, d, e, k, j, i] *
+                                                                   u[e, k, j, i] (hexahedra.py:375)
+decided  isl            hexahedra.py:377  weak_grad              grad[x_0, e_0, k_0, j_0, i_0] is in bounds
+                                                                   for every instance of grad[x, e, k, j, i] = reduce_sum(...) (hexahedra.py:377)
+decided  isl            hexahedra.py:377  weak_grad              Ft[d, k_0, c] is in bounds for every d in Fin(3)
+                                                                   and every instance of grad[x, e, k, j, i] = reduce_sum(...) (hexahedra.py:377)
+decided  isl            hexahedra.py:377  weak_grad              Fs[d, j_0, b] is in bounds for every d in Fin(3)
+                                                                   and every instance of grad[x, e, k, j, i] = reduce_sum(...) (hexahedra.py:377)
+decided  isl            hexahedra.py:377  weak_grad              Fr[d, i_0, a] is in bounds for every d in Fin(3)
+                                                                   and every instance of grad[x, e, k, j, i] = reduce_sum(...) (hexahedra.py:377)
+decided  isl            hexahedra.py:377  weak_grad              w[x_0, d, e_0, c, b, a] is in bounds for every d in Fin(3)
+                                                                   and every instance of grad[x, e, k, j, i] = reduce_sum(...) (hexahedra.py:377)
+decided  isl            hexahedra.py:375  weak_grad              distinct instances of w[x, d, e, k, j, i] = G[x, d, e, k, j, i] * u[e, k, j, i] (hexahedra.py:375)
+                                                                   write distinct cells of w
+decided  isl            hexahedra.py:377  weak_grad              distinct instances of grad[x, e, k, j, i] = reduce_sum(...) (hexahedra.py:377) write
+                                                                   distinct cells of grad
+decided  isl            hexahedra.py:377  weak_grad              every cell of w that grad[x, e, k, j, i] = reduce_sum(...) (hexahedra.py:377) reads was written
+                                                                   before the read, by w[x, d, e, k, j, i] = G[x, d, e, k, j, i] * u[e, k, j, i] (hexahedra.py:375)
+decided  isl            hexahedra.py:357  weak_grad              the source order runs every dependence forward in time
+decided  type           hexahedra.py:377  weak_grad              the accumulation into grad[x_0, e_0, k_0, j_0, i_0] over c, b, a is approx for every d in Fin(3)
+tested   interpreter    hexahedra.py:357  weak_grad              the traced term computes what the body computes
+tested   interpreter    hexahedra.py:394  weak_grad              rewrite(grad, by=sum_factorization, keep=(r_pass, s_pass)):
+                                                                   over the reals, the passes leave in grad what weak_grad's statement says, unfolded through r_pass
+                                                                   and s_pass; sum_factorization at Fr := Fr[d], Fs := Fs[d], Ft := Ft[d], u := w[x, d, e],
+                                                                   for d = 0, 1 and 2
+decided  isl            hexahedra.py:377  weak_grad              no cell of grad is stored twice, or read before its store
+decided  isl            hexahedra.py:394  weak_grad              no cell of r_pass is stored twice, or read before its store
+decided  isl            hexahedra.py:394  weak_grad              no cell of s_pass is stored twice, or read before its store
+decided  isl            hexahedra.py:375  weak_grad              no cell of w is stored twice, or read before its store
+decided  isl            hexahedra.py:394  weak_grad              r_pass[x_1, d_1, e_1, c_0, b_0, i_1] is in bounds
+                                                                   for every instance of r_pass[x, d, e, c, b, i] = reduce_sum(...) (hexahedra.py:394)
+decided  isl            hexahedra.py:394  weak_grad              Fr[d_1, i_1, a_0] is in bounds for every instance of r_pass[x, d, e, c, b, i] = reduce_sum(...)
+                                                                   (hexahedra.py:394)
+decided  isl            hexahedra.py:394  weak_grad              w[x_1, d_1, e_1, c_0, b_0, a_0] is in bounds
+                                                                   for every instance of r_pass[x, d, e, c, b, i] = reduce_sum(...) (hexahedra.py:394)
+decided  isl            hexahedra.py:394  weak_grad              s_pass[x_2, d_2, e_2, c_1, j_1, i_2] is in bounds
+                                                                   for every instance of s_pass[x, d, e, c, j, i] = reduce_sum(...) (hexahedra.py:394)
+decided  isl            hexahedra.py:394  weak_grad              Fs[d_2, j_1, b_1] is in bounds for every instance of s_pass[x, d, e, c, j, i] = reduce_sum(...)
+                                                                   (hexahedra.py:394)
+decided  isl            hexahedra.py:394  weak_grad              r_pass[x_2, d_2, e_2, c_1, b_1, i_2] is in bounds
+                                                                   for every instance of s_pass[x, d, e, c, j, i] = reduce_sum(...) (hexahedra.py:394)
+decided  isl            hexahedra.py:377  weak_grad              s_pass[x_0, d, e_0, c, j_0, i_0] is in bounds for every d in Fin(3)
+                                                                   and every instance of grad[x, e, k, j, i] = reduce_sum(...) (hexahedra.py:377)
+decided  isl            hexahedra.py:394  weak_grad              distinct instances of r_pass[x, d, e, c, b, i] = reduce_sum(...) (hexahedra.py:394) write
+                                                                   distinct cells of r_pass
+decided  isl            hexahedra.py:394  weak_grad              distinct instances of s_pass[x, d, e, c, j, i] = reduce_sum(...) (hexahedra.py:394) write
+                                                                   distinct cells of s_pass
+decided  isl            hexahedra.py:394  weak_grad              every cell of r_pass that s_pass[x, d, e, c, j, i] = reduce_sum(...) (hexahedra.py:394) reads was
+                                                                   written before the read, by r_pass[x, d, e, c, b, i] = reduce_sum(...) (hexahedra.py:394)
+decided  isl            hexahedra.py:377  weak_grad              every cell of s_pass that grad[x, e, k, j, i] = reduce_sum(...) (hexahedra.py:377) reads was written
+                                                                   before the read, by s_pass[x, d, e, c, j, i] = reduce_sum(...) (hexahedra.py:394)
+decided  isl            hexahedra.py:394  weak_grad              n >= 0 and (k >= 0 and k < n) and (j >= 0 and j < n) and (i >= 0 and i < n) for every k and every j
+                                                                   and every i, which sum_factorization needs
+decided  type           hexahedra.py:394  weak_grad              after rewrite(grad, ...), grad is compared at approx (it was approx)
+tested   run            hexahedra.py:394  weak_grad              the compiled factored agrees with the native weak_grad in grad at approx,
+                                                                   within 1e-06 of each value (measured 4e-16 of the largest), on its example inputs and 3 drawn ones
+decided  isl            hexahedra.py:399  weak_grad              fuse(weak_grad.r_pass.c, weak_grad.s_pass.c) renames the instances of weak_grad one for one
+decided  isl            hexahedra.py:399  weak_grad              the order after fuse(weak_grad.r_pass.c, weak_grad.s_pass.c) runs every dependence of
+                                                                   weak_grad forward
+decided  isl            hexahedra.py:402  weak_grad              for contract(weak_grad.r_pass), every cell of weak_grad.arrays.r_pass that weak_grad reads,
+                                                                   r_pass[x, d, e, c, b, i] = reduce_sum(...) (hexahedra.py:394) has stored by the time it is read
+decided  isl            hexahedra.py:402  weak_grad              no read of weak_grad.arrays.r_pass sees its slot overwritten after
+                                                                   contract(weak_grad.r_pass, lambda x, d, e, c, b, i: (b, i)):
+                                                                   weak_grad.arrays.r_pass kept in n*n cells, r_pass[x, d, e, c, b, i] in slot (b, i)
+decided  isl            hexahedra.py:421  metric_along_r         every cell of w that along_r reads, metric stored before it
+tested   interpreter    hexahedra.py:416  metric_along_r         the traced term computes what the body computes
+decided  isl            hexahedra.py:429  contravariant_along_r  every cell of w that along_r reads, contravariant stored before it
+tested   interpreter    hexahedra.py:424  contravariant_along_r  the traced term computes what the body computes
 
-81 facts: 59 decided, 22 tested
+118 facts: 93 decided, 25 tested
 
-WITHOUT LEAN: sum_factorization and 65 more rows are not proved. To have Lean prove what it can: pip install "lanky[lean]", and Lean v4.29.1 from elan (elan default leanprover/lean4:v4.29.1).
-WITHOUT MATHLIB: sum_factorization and 2 more rows are not proved, since only Lean with Mathlib can state them. To have Lean prove them: python -m lanky.mathlib ~/mathlib (about 7 GB), then export LANKY_LEAN_MATHLIB=~/mathlib.
+WITHOUT LEAN: sum_factorization and 97 more rows are not proved. To have Lean prove what it can: pip install "lanky[lean]", and Lean v4.29.1 from elan (elan default leanprover/lean4:v4.29.1).
+WITHOUT MATHLIB: sum_factorization and 3 more rows are not proved, since only Lean with Mathlib can state them. To have Lean prove them: python -m lanky.mathlib ~/mathlib (about 7 GB), then export LANKY_LEAN_MATHLIB=~/mathlib.
 ```
 
 ### loopty run examples/hexahedra.py
 
 ```console
 $ uv run loopty run examples/hexahedra.py
-weak_grad: Schedule(weak_grad, target='c').fuse(weak_grad.metric.j, weak_grad.along_r.j).fuse(weak_grad.along_r.k, weak_grad.along_s.k)
+weak_grad: Schedule(weak_grad, target='c').rewrite(weak_grad.grad, by=sum_factorization, keep=('r_pass', 's_pass'))
+  w: difference 0 within 1e-06 (approx) -> tested
+...
+weak_grad: Schedule(weak_grad, target='c').rewrite(weak_grad.grad, by=sum_factorization, keep=('r_pass', 's_pass')).fuse(weak_grad.r_pass.c, weak_grad.s_pass.c)
+  w: difference 0 within 1e-06 (approx) -> tested
+...
+weak_grad: Schedule(weak_grad, target='c').rewrite(weak_grad.grad, by=sum_factorization, keep=('r_pass', 's_pass')).fuse(weak_grad.r_pass.c, weak_grad.s_pass.c).contract(weak_grad.r_pass, lambda x, d, e, c, b, i: (b, i))
+  w: difference 0 within 1e-06 (approx) -> tested
+...
+passes: Schedule(passes, target='c').fuse(passes.metric.j, passes.along_r.j).fuse(passes.along_r.k, passes.along_s.k)
   grad: difference 0 within 1e-06 (approx) -> tested
-weak_grad: Schedule(weak_grad, target='c').fuse(weak_grad.metric.j, weak_grad.along_r.j).fuse(weak_grad.along_r.k, weak_grad.along_s.k).contract(weak_grad.w, lambda q, e, k, j, i: i).contract(weak_grad.v, lambda q, e, k, j, i: (j, i))
+passes: Schedule(passes, target='c').fuse(passes.metric.j, passes.along_r.j).fuse(passes.along_r.k, passes.along_s.k).contract(passes.w, lambda q, e, k, j, i: i).contract(passes.v, lambda q, e, k, j, i: (j, i))
   grad: difference 0 within 1e-06 (approx) -> tested
 metric: Schedule(metric, target='c')
   w: difference 0 within 1e-06 (approx) -> tested
@@ -1796,56 +1974,99 @@ metric_along_r: Schedule(metric_along_r, target='c')
 contravariant_along_r: Schedule(contravariant_along_r, target='c')
   v: difference 0 within 1e-06 (approx) -> tested
 
-STATUS   BY     WHERE             OWNER                  STATEMENT
--------  -----  ----------------  ---------------------  ----------------------------------------------------------------------------------------------------
-decided  isl    hexahedra.py:290  weak_grad              every cell of weak_grad.w that weak_grad reads, weak_grad.metric has stored by the time it is read,
-                                                           so weak_grad runs without the zeros weak_grad.w is made with
-decided  isl    hexahedra.py:291  weak_grad              every cell of weak_grad.v that weak_grad reads, weak_grad.along_r has stored by the time it is read,
-                                                           so weak_grad runs without the zeros weak_grad.v is made with
-decided  isl    hexahedra.py:292  weak_grad              every cell of weak_grad.vs that weak_grad reads,
-                                                           weak_grad.along_s has stored by the time it is read,
-                                                           so weak_grad runs without the zeros weak_grad.vs is made with
-decided  isl    hexahedra.py:341  weak_grad              fuse(weak_grad.metric.j, weak_grad.along_r.j) renames the instances of weak_grad one for one
-decided  isl    hexahedra.py:341  weak_grad              the order after fuse(weak_grad.metric.j, weak_grad.along_r.j) runs every dependence of
-                                                           weak_grad forward
-decided  isl    hexahedra.py:342  weak_grad              fuse(weak_grad.along_r.k, weak_grad.along_s.k) renames the instances of weak_grad one for one
-decided  isl    hexahedra.py:342  weak_grad              the order after fuse(weak_grad.along_r.k, weak_grad.along_s.k) runs every dependence of
-                                                           weak_grad forward
-tested   loopy  hexahedra.py:342  weak_grad              the scheduled run of weak_grad agrees with the native run to the accuracy its types state
-decided  isl    hexahedra.py:346  weak_grad              no read of weak_grad.w sees its slot overwritten after
-                                                           contract(weak_grad.w, lambda q, e, k, j, i: i):
-                                                           weak_grad.w kept in n cells, w[q, e, k, j, i] in slot i
-decided  isl    hexahedra.py:346  weak_grad              no read of weak_grad.v sees its slot overwritten after
-                                                           contract(weak_grad.v, lambda q, e, k, j, i: (j, i)):
-                                                           weak_grad.v kept in n*n cells, v[q, e, k, j, i] in slot (j, i)
-tested   loopy  hexahedra.py:346  weak_grad              the scheduled run of weak_grad agrees with the native run to the accuracy its types state
-tested   loopy  hexahedra.py:180  metric                 the scheduled run of metric agrees with the native run to the accuracy its types state
-tested   loopy  hexahedra.py:191  contravariant          the scheduled run of contravariant agrees with the native run to the accuracy its types state
-tested   loopy  hexahedra.py:204  along_r                the scheduled run of along_r agrees with the native run to the accuracy its types state
-tested   loopy  hexahedra.py:217  along_s                the scheduled run of along_s agrees with the native run to the accuracy its types state
-tested   loopy  hexahedra.py:230  gradient_along_t       the scheduled run of gradient_along_t agrees with the native run to the accuracy its types state
-tested   loopy  hexahedra.py:247  divergence_along_t     the scheduled run of divergence_along_t agrees with the native run to the accuracy its types state
-decided  isl    hexahedra.py:323  weak_div               every cell of weak_div.w that weak_div reads,
-                                                           weak_div.contravariant has stored by the time it is read,
-                                                           so weak_div runs without the zeros weak_div.w is made with
-decided  isl    hexahedra.py:324  weak_div               every cell of weak_div.v that weak_div reads, weak_div.along_r has stored by the time it is read,
-                                                           so weak_div runs without the zeros weak_div.v is made with
-decided  isl    hexahedra.py:325  weak_div               every cell of weak_div.vs that weak_div reads, weak_div.along_s has stored by the time it is read,
-                                                           so weak_div runs without the zeros weak_div.vs is made with
-tested   loopy  hexahedra.py:299  weak_div               the scheduled run of weak_div agrees with the native run to the accuracy its types state
-decided  isl    hexahedra.py:352  metric_along_r         every cell of metric_along_r.w that metric_along_r reads,
-                                                           metric_along_r.metric has stored by the time it is read,
-                                                           so metric_along_r runs without the zeros metric_along_r.w is made with
-tested   loopy  hexahedra.py:349  metric_along_r         the scheduled run of metric_along_r agrees with the native run to the accuracy its types state
-decided  isl    hexahedra.py:360  contravariant_along_r  every cell of contravariant_along_r.w that contravariant_along_r reads,
-                                                           contravariant_along_r.contravariant has stored by the time it is read,
-                                                           so contravariant_along_r runs without the zeros contravariant_along_r.w is made with
-tested   loopy  hexahedra.py:357  contravariant_along_r  the scheduled run of contravariant_along_r agrees with the native run to the
-                                                           accuracy its types state
+STATUS                                                EFFECTIVE  BY           WHERE             OWNER                  STATEMENT
+----------------------------------------------------  ---------  -----------  ----------------  ---------------------  ----------------------------------------------------------------------------------------------------
+tested under theorem:hexahedra.sum_factorization@138  assumed    interpreter  hexahedra.py:394  weak_grad              rewrite(grad, by=sum_factorization, keep=(r_pass, s_pass)):
+                                                                                                                         over the reals, the passes leave in grad what weak_grad's statement says, unfolded through r_pass
+                                                                                                                         and s_pass; sum_factorization at Fr := Fr[d], Fs := Fs[d], Ft := Ft[d], u := w[x, d, e],
+                                                                                                                         for d = 0, 1 and 2
+decided                                               decided    isl          hexahedra.py:377  weak_grad              no cell of grad is stored twice, or read before its store
+decided                                               decided    isl          hexahedra.py:394  weak_grad              no cell of r_pass is stored twice, or read before its store
+decided                                               decided    isl          hexahedra.py:394  weak_grad              no cell of s_pass is stored twice, or read before its store
+decided                                               decided    isl          hexahedra.py:375  weak_grad              no cell of w is stored twice, or read before its store
+decided                                               decided    isl          hexahedra.py:394  weak_grad              r_pass[x_1, d_1, e_1, c_0, b_0, i_1] is in bounds
+                                                                                                                         for every instance of r_pass[x, d, e, c, b, i] = reduce_sum(...) (hexahedra.py:394)
+decided                                               decided    isl          hexahedra.py:394  weak_grad              Fr[d_1, i_1, a_0] is in bounds for every instance of r_pass[x, d, e, c, b, i] = reduce_sum(...)
+                                                                                                                         (hexahedra.py:394)
+decided                                               decided    isl          hexahedra.py:394  weak_grad              w[x_1, d_1, e_1, c_0, b_0, a_0] is in bounds
+                                                                                                                         for every instance of r_pass[x, d, e, c, b, i] = reduce_sum(...) (hexahedra.py:394)
+decided                                               decided    isl          hexahedra.py:394  weak_grad              s_pass[x_2, d_2, e_2, c_1, j_1, i_2] is in bounds
+                                                                                                                         for every instance of s_pass[x, d, e, c, j, i] = reduce_sum(...) (hexahedra.py:394)
+decided                                               decided    isl          hexahedra.py:394  weak_grad              Fs[d_2, j_1, b_1] is in bounds for every instance of s_pass[x, d, e, c, j, i] = reduce_sum(...)
+                                                                                                                         (hexahedra.py:394)
+decided                                               decided    isl          hexahedra.py:394  weak_grad              r_pass[x_2, d_2, e_2, c_1, b_1, i_2] is in bounds
+                                                                                                                         for every instance of s_pass[x, d, e, c, j, i] = reduce_sum(...) (hexahedra.py:394)
+decided                                               decided    isl          hexahedra.py:377  weak_grad              s_pass[x_0, d, e_0, c, j_0, i_0] is in bounds for every d in Fin(3)
+                                                                                                                         and every instance of grad[x, e, k, j, i] = reduce_sum(...) (hexahedra.py:377)
+decided                                               decided    isl          hexahedra.py:394  weak_grad              distinct instances of r_pass[x, d, e, c, b, i] = reduce_sum(...) (hexahedra.py:394) write
+                                                                                                                         distinct cells of r_pass
+decided                                               decided    isl          hexahedra.py:394  weak_grad              distinct instances of s_pass[x, d, e, c, j, i] = reduce_sum(...) (hexahedra.py:394) write
+                                                                                                                         distinct cells of s_pass
+decided                                               decided    isl          hexahedra.py:394  weak_grad              every cell of r_pass that s_pass[x, d, e, c, j, i] = reduce_sum(...) (hexahedra.py:394) reads was
+                                                                                                                         written before the read, by r_pass[x, d, e, c, b, i] = reduce_sum(...) (hexahedra.py:394)
+decided                                               decided    isl          hexahedra.py:377  weak_grad              every cell of s_pass that grad[x, e, k, j, i] = reduce_sum(...) (hexahedra.py:377) reads was written
+                                                                                                                         before the read, by s_pass[x, d, e, c, j, i] = reduce_sum(...) (hexahedra.py:394)
+decided                                               decided    isl          hexahedra.py:394  weak_grad              n >= 0 and (k >= 0 and k < n) and (j >= 0 and j < n) and (i >= 0 and i < n) for every k and every j
+                                                                                                                         and every i, which sum_factorization needs
+decided                                               decided    type         hexahedra.py:394  weak_grad              after rewrite(grad, ...), grad is compared at approx (it was approx)
+tested                                                tested     run          hexahedra.py:394  weak_grad              the compiled factored agrees with the native weak_grad in grad at approx,
+                                                                                                                         within 1e-06 of each value (measured 4e-16 of the largest), on its example inputs and 3 drawn ones
+tested                                                tested     loopy        hexahedra.py:394  weak_grad              the scheduled run of weak_grad agrees with the native run to the accuracy its types state
+decided                                               decided    isl          hexahedra.py:399  weak_grad              fuse(weak_grad.r_pass.c, weak_grad.s_pass.c) renames the instances of weak_grad one for one
+decided                                               decided    isl          hexahedra.py:399  weak_grad              the order after fuse(weak_grad.r_pass.c, weak_grad.s_pass.c) runs every dependence of
+                                                                                                                         weak_grad forward
+tested                                                tested     loopy        hexahedra.py:399  weak_grad              the scheduled run of weak_grad agrees with the native run to the accuracy its types state
+decided                                               decided    isl          hexahedra.py:402  weak_grad              for contract(weak_grad.r_pass), every cell of weak_grad.arrays.r_pass that weak_grad reads,
+                                                                                                                         r_pass[x, d, e, c, b, i] = reduce_sum(...) (hexahedra.py:394) has stored by the time it is read
+decided                                               decided    isl          hexahedra.py:402  weak_grad              no read of weak_grad.arrays.r_pass sees its slot overwritten after
+                                                                                                                         contract(weak_grad.r_pass, lambda x, d, e, c, b, i: (b, i)):
+                                                                                                                         weak_grad.arrays.r_pass kept in n*n cells, r_pass[x, d, e, c, b, i] in slot (b, i)
+tested                                                tested     loopy        hexahedra.py:402  weak_grad              the scheduled run of weak_grad agrees with the native run to the accuracy its types state
+decided                                               decided    isl          hexahedra.py:309  passes                 every cell of passes.w that passes reads, passes.metric has stored by the time it is read,
+                                                                                                                         so passes runs without the zeros passes.w is made with
+decided                                               decided    isl          hexahedra.py:310  passes                 every cell of passes.v that passes reads, passes.along_r has stored by the time it is read,
+                                                                                                                         so passes runs without the zeros passes.v is made with
+decided                                               decided    isl          hexahedra.py:311  passes                 every cell of passes.vs that passes reads, passes.along_s has stored by the time it is read,
+                                                                                                                         so passes runs without the zeros passes.vs is made with
+decided                                               decided    isl          hexahedra.py:408  passes                 fuse(passes.metric.j, passes.along_r.j) renames the instances of passes one for one
+decided                                               decided    isl          hexahedra.py:408  passes                 the order after fuse(passes.metric.j, passes.along_r.j) runs every dependence of passes forward
+decided                                               decided    isl          hexahedra.py:409  passes                 fuse(passes.along_r.k, passes.along_s.k) renames the instances of passes one for one
+decided                                               decided    isl          hexahedra.py:409  passes                 the order after fuse(passes.along_r.k, passes.along_s.k) runs every dependence of passes forward
+tested                                                tested     loopy        hexahedra.py:409  passes                 the scheduled run of passes agrees with the native run to the accuracy its types state
+decided                                               decided    isl          hexahedra.py:413  passes                 no read of passes.w sees its slot overwritten after contract(passes.w, lambda q, e, k, j, i: i):
+                                                                                                                         passes.w kept in n cells, w[q, e, k, j, i] in slot i
+decided                                               decided    isl          hexahedra.py:413  passes                 no read of passes.v sees its slot overwritten after
+                                                                                                                         contract(passes.v, lambda q, e, k, j, i: (j, i)):
+                                                                                                                         passes.v kept in n*n cells, v[q, e, k, j, i] in slot (j, i)
+tested                                                tested     loopy        hexahedra.py:413  passes                 the scheduled run of passes agrees with the native run to the accuracy its types state
+tested                                                tested     loopy        hexahedra.py:199  metric                 the scheduled run of metric agrees with the native run to the accuracy its types state
+tested                                                tested     loopy        hexahedra.py:210  contravariant          the scheduled run of contravariant agrees with the native run to the accuracy its types state
+tested                                                tested     loopy        hexahedra.py:223  along_r                the scheduled run of along_r agrees with the native run to the accuracy its types state
+tested                                                tested     loopy        hexahedra.py:236  along_s                the scheduled run of along_s agrees with the native run to the accuracy its types state
+tested                                                tested     loopy        hexahedra.py:249  gradient_along_t       the scheduled run of gradient_along_t agrees with the native run to the accuracy its types state
+tested                                                tested     loopy        hexahedra.py:266  divergence_along_t     the scheduled run of divergence_along_t agrees with the native run to the accuracy its types state
+decided                                               decided    isl          hexahedra.py:342  weak_div               every cell of weak_div.w that weak_div reads,
+                                                                                                                         weak_div.contravariant has stored by the time it is read,
+                                                                                                                         so weak_div runs without the zeros weak_div.w is made with
+decided                                               decided    isl          hexahedra.py:343  weak_div               every cell of weak_div.v that weak_div reads, weak_div.along_r has stored by the time it is read,
+                                                                                                                         so weak_div runs without the zeros weak_div.v is made with
+decided                                               decided    isl          hexahedra.py:344  weak_div               every cell of weak_div.vs that weak_div reads, weak_div.along_s has stored by the time it is read,
+                                                                                                                         so weak_div runs without the zeros weak_div.vs is made with
+tested                                                tested     loopy        hexahedra.py:318  weak_div               the scheduled run of weak_div agrees with the native run to the accuracy its types state
+decided                                               decided    isl          hexahedra.py:419  metric_along_r         every cell of metric_along_r.w that metric_along_r reads,
+                                                                                                                         metric_along_r.metric has stored by the time it is read,
+                                                                                                                         so metric_along_r runs without the zeros metric_along_r.w is made with
+tested                                                tested     loopy        hexahedra.py:416  metric_along_r         the scheduled run of metric_along_r agrees with the native run to the accuracy its types state
+decided                                               decided    isl          hexahedra.py:427  contravariant_along_r  every cell of contravariant_along_r.w that contravariant_along_r reads,
+                                                                                                                         contravariant_along_r.contravariant has stored by the time it is read,
+                                                                                                                         so contravariant_along_r runs without the zeros contravariant_along_r.w is made with
+tested                                                tested     loopy        hexahedra.py:424  contravariant_along_r  the scheduled run of contravariant_along_r agrees with the native run to the
+                                                                                                                         accuracy its types state
 
-25 facts: 14 decided, 11 tested
+51 facts: 35 decided, 16 tested
 
-WITHOUT LEAN: 14 rows are not proved. To have Lean prove what it can: pip install "lanky[lean]", and Lean v4.29.1 from elan (elan default leanprover/lean4:v4.29.1).
+WITHOUT LEAN: 34 rows are not proved. To have Lean prove what it can: pip install "lanky[lean]", and Lean v4.29.1 from elan (elan default leanprover/lean4:v4.29.1).
+WITHOUT MATHLIB: one row is not proved, since only Lean with Mathlib can state it. To have Lean prove it: python -m lanky.mathlib ~/mathlib (about 7 GB), then export LANKY_LEAN_MATHLIB=~/mathlib.
 ```
 
 
@@ -2641,7 +2862,11 @@ mirrors.
   the table of derivatives, for any table that satisfies Laplace's equation.
   `on_every_triangle` is its form box by box on the triangle `a + b <= p`,
   which a kernel of order `p` cites. Lean proves both for every order, with
-  Mathlib; without it, the rows are `assumed`.
+  Mathlib; without it, the rows are `assumed`. `compressed_taylor`'s body is
+  its proof, as a textbook writes it: the claim at `(a, b)` is what is
+  stored where `a < 2`, and otherwise a chain, `R[a, b]` equals `-R[a - 2, b
+  + 2]` by the recurrence, `-D[a - 2, b + 2]` by the claim at `(a - 2, b +
+  2)`, and `D[a, b]` by the PDE, a link to a line.
 - `storage_index` is sumpy's `get_storage_index`, a layout of two pieces whose
   three facts say it stores the `2p + 1` derivatives one for one onto their
   addresses. `unpack` reads each box's coefficients through it into the
@@ -2693,9 +2918,9 @@ $ uv run python examples/l2p.py
 order 10: 16 boxes, 97 targets, 21 coefficients stored per box, 66 on its triangle
 largest error against the charges' potential: 4.1e-13
 
-refused: interchange(reconstruct.b, reconstruct.a) illegal: R[box, a, b] = C[box, a, b] (l2p.py:271) at box=0, a=1, b=9 writes R[0, 1, 9], read by R[box, a, b] = -R[box, a - 2, b + 2] (l2p.py:273) at box=0, a=3, b=7, scheduled earlier (at nb=1, isl's choice)
+refused: interchange(reconstruct.b, reconstruct.a) illegal: R[box, a, b] = C[box, a, b] (l2p.py:288) at box=0, a=1, b=9 writes R[0, 1, 9], read by R[box, a, b] = -R[box, a - 2, b + 2] (l2p.py:290) at box=0, a=3, b=7, scheduled earlier (at nb=1, isl's choice)
 
-refused: contract(l2p.R, lambda box, a, b: b) illegal: R[box, a, b] = -R[box, a - 2, b + 2] (l2p.py:273) at box=0, a=9, b=0 reads R[0, 7, 2], which the same statement at box=0, a=7, b=2 stored in slot 2, after the same statement at box=0, a=8, b=2 stored R[0, 8, 2] there (at nb=1, isl's choice); contract(l2p.R) finds the smallest window that keeps every read, lambda box, a, b: (a, b)
+refused: contract(l2p.R, lambda box, a, b: b) illegal: R[box, a, b] = -R[box, a - 2, b + 2] (l2p.py:290) at box=0, a=9, b=0 reads R[0, 7, 2], which the same statement at box=0, a=7, b=2 stored in slot 2, after the same statement at box=0, a=8, b=2 stored R[0, 8, 2] there (at nb=1, isl's choice); contract(l2p.R) finds the smallest window that keeps every read, lambda box, a, b: (a, b)
 
 schedule: Schedule(l2p, target='c').fuse(l2p.unpack.box, l2p.reconstruct.box, l2p.evaluate.box).contract(l2p.R, lambda box, a, b: (a, b)).contract(l2p.C, lambda box, a, b: (a, b))
   decided  isl  every cell of l2p.C that l2p reads, l2p.unpack has stored by the time it is read, so l2p runs without the zeros l2p.C is made with
@@ -2726,22 +2951,28 @@ takes Lean about two minutes from an empty proof cache. `lanky check
 examples/l2p.py --show-lean compressed_taylor` prints the induction Lean
 checked: on `a`, two at a time, each step a `linear_combination` of the
 recurrence, the PDE and the hypothesis at `(a, b + 2)`, whose multipliers
-Python found. Each statement is printed whole, the theorems a part to a
-line, with each hypothesis under its name. Under the table, the `WITHOUT`
-lines say what this machine lacks for Lean to prove the rows it did not,
-and the command that installs it.
+Python found. lanky's search proves `compressed_taylor` alone, and its
+body is checked as well: its row says `by its proof, l2p.py:151-161:
+induction on a, 2 cases, 4 steps`, and `lanky check examples/l2p.py --steps
+compressed_taylor` prints its outline, each link of the chain at its line
+with the point lanky matched its fact at, `by recurrence, at (a - 2, b)`.
+Without Lean the proof is not checked, and a `NOT CHECKED` line says why.
+Each statement is printed whole, the theorems a part to a line, with each
+hypothesis under its name. Under the table, the `WITHOUT` lines say what
+this machine lacks for Lean to prove the rows it did not, and the command
+that installs it.
 
 ```console
 $ uv run lanky check examples/l2p.py
 STATUS                           EFFECTIVE  BY           WHERE       OWNER              STATEMENT
 -------------------------------  ---------  -----------  ----------  -----------------  ----------------------------------------------------------------------------------------------------
-assumed                          assumed    -            l2p.py:129  compressed_taylor  D : Fn[Nat, Nat, Real], R : Fn[Nat, Nat, Real]
+assumed                          assumed    -            l2p.py:135  compressed_taylor  D : Fn[Nat, Nat, Real], R : Fn[Nat, Nat, Real]
                                                                                         | pde: forall a in Nat, b in Nat. D[a + 2, b] + D[a, b + 2] == 0
                                                                                         | stored: forall a in Nat, b in Nat where a < 2. R[a, b] == D[a, b]
                                                                                         | recurrence: forall a in Nat, b in Nat. R[a + 2, b] == -R[a, b + 2]
                                                                                         |- forall a in Nat, b in Nat. R[a, b] == D[a, b]
-tested                           tested     python       l2p.py:129  compressed_taylor  the term computes what the annotations compute
-assumed                          assumed    -            l2p.py:147  on_every_triangle  n : Nat, p : Nat, c : Fn[Nat, Nat, Nat, Real], D : Fn[Nat, Nat, Nat, Real],
+tested                           tested     python       l2p.py:135  compressed_taylor  the term computes what the annotations compute
+assumed                          assumed    -            l2p.py:164  on_every_triangle  n : Nat, p : Nat, c : Fn[Nat, Nat, Nat, Real], D : Fn[Nat, Nat, Nat, Real],
                                                                                           R : Fn[Nat, Nat, Nat, Real]
                                                                                         | pde: forall i in Fin(n), a in Nat, b in Nat. D[i, a + 2, b] + D[i, a, b + 2] == 0
                                                                                         | stored: forall i in Fin(n), a in Nat, b in Nat where a < 2 and a + b <= p.
@@ -2751,96 +2982,98 @@ assumed                          assumed    -            l2p.py:147  on_every_tr
                                                                                         | recurrence: forall i in Fin(n), a in Nat, b in Nat where a + b + 2 <= p.
                                                                                             R[i, a + 2, b] == -R[i, a, b + 2]
                                                                                         |- forall i in Fin(n), a in Nat, b in Nat where a + b <= p. R[i, a, b] == D[i, a, b]
-tested                           tested     python       l2p.py:147  on_every_triangle  the term computes what the annotations compute
-decided                          decided    isl          l2p.py:198  storage_index      storage_index stores every cell at an address of Fin(21)
-decided                          decided    isl          l2p.py:198  storage_index      storage_index stores no two cells at one address
-decided                          decided    isl          l2p.py:198  storage_index      storage_index stores a cell at every address of Fin(21)
-decided                          decided    isl          l2p.py:241  unpack             C[box, a, b] is in bounds for every instance of C[box, a, b] =
-                                                                                          coeffs[box, centre(a, b)] (l2p.py:241)
-decided                          decided    isl          l2p.py:241  unpack             coeffs[box, 0] is in bounds for every instance of C[box, a, b] =
-                                                                                          coeffs[box, centre(a, b)] (l2p.py:241)
-decided                          decided    isl          l2p.py:243  unpack             C[box, a, b] is in bounds for every instance of C[box, a, b] =
-                                                                                          coeffs[box, derivatives((a, b))] (l2p.py:243)
-decided                          decided    isl          l2p.py:243  unpack             coeffs[box, 2*(a + b) - 1 + a] is in bounds
-                                                                                          for every instance of C[box, a, b] = coeffs[box, derivatives((a, b))] (l2p.py:243)
-decided                          decided    isl          l2p.py:241  unpack             distinct instances of C[box, a, b] = coeffs[box, centre(a, b)] (l2p.py:241) write
+tested                           tested     python       l2p.py:164  on_every_triangle  the term computes what the annotations compute
+decided                          decided    isl          l2p.py:215  storage_index      storage_index stores every cell at an address of Fin(21)
+decided                          decided    isl          l2p.py:215  storage_index      storage_index stores no two cells at one address
+decided                          decided    isl          l2p.py:215  storage_index      storage_index stores a cell at every address of Fin(21)
+decided                          decided    isl          l2p.py:258  unpack             C[box, a, b] is in bounds for every instance of C[box, a, b] =
+                                                                                          coeffs[box, centre(a, b)] (l2p.py:258)
+decided                          decided    isl          l2p.py:258  unpack             coeffs[box, 0] is in bounds for every instance of C[box, a, b] =
+                                                                                          coeffs[box, centre(a, b)] (l2p.py:258)
+decided                          decided    isl          l2p.py:260  unpack             C[box, a, b] is in bounds for every instance of C[box, a, b] =
+                                                                                          coeffs[box, derivatives((a, b))] (l2p.py:260)
+decided                          decided    isl          l2p.py:260  unpack             coeffs[box, 2*(a + b) - 1 + a] is in bounds
+                                                                                          for every instance of C[box, a, b] = coeffs[box, derivatives((a, b))] (l2p.py:260)
+decided                          decided    isl          l2p.py:258  unpack             distinct instances of C[box, a, b] = coeffs[box, centre(a, b)] (l2p.py:258) write
                                                                                           distinct cells of C
-decided                          decided    isl          l2p.py:243  unpack             distinct instances of C[box, a, b] = coeffs[box, derivatives((a, b))] (l2p.py:243) write
+decided                          decided    isl          l2p.py:260  unpack             distinct instances of C[box, a, b] = coeffs[box, derivatives((a, b))] (l2p.py:260) write
                                                                                           distinct cells of C
-decided                          decided    isl          l2p.py:221  unpack             the source order runs every dependence forward in time
-decided                          decided    isl          l2p.py:241  unpack             no cell of C is stored twice, or read before its store
-decided                          decided    isl          l2p.py:221  unpack             (forall i in Fin(nb). C[i, 0, 0] == coeffs[i, 0])
+decided                          decided    isl          l2p.py:238  unpack             the source order runs every dependence forward in time
+decided                          decided    isl          l2p.py:258  unpack             no cell of C is stored twice, or read before its store
+decided                          decided    isl          l2p.py:238  unpack             (forall i in Fin(nb). C[i, 0, 0] == coeffs[i, 0])
                                                                                           and (forall i in Fin(nb), a in Nat, b in Nat where a < 2 and a + b >= 1 and a + b <= 10.
                                                                                             C[i, a, b] == coeffs[i, 2*(a + b) - 1 + a])
-tested                           tested     interpreter  l2p.py:221  unpack             the traced term computes what the body computes
-decided                          decided    isl          l2p.py:271  reconstruct        R[box, a, b] is in bounds for every instance of R[box, a, b] = C[box, a, b] (l2p.py:271)
-decided                          decided    isl          l2p.py:271  reconstruct        C[box, a, b] is in bounds for every instance of R[box, a, b] = C[box, a, b] (l2p.py:271)
-decided                          decided    isl          l2p.py:273  reconstruct        R[box, a, b] is in bounds for every instance of R[box, a, b] = -R[box, a - 2, b + 2] (l2p.py:273)
-decided                          decided    isl          l2p.py:273  reconstruct        R[box, a - 2, b + 2] is in bounds
-                                                                                          for every instance of R[box, a, b] = -R[box, a - 2, b + 2] (l2p.py:273)
-decided                          decided    isl          l2p.py:271  reconstruct        distinct instances of R[box, a, b] = C[box, a, b] (l2p.py:271) write distinct cells of R
-decided                          decided    isl          l2p.py:273  reconstruct        distinct instances of R[box, a, b] = -R[box, a - 2, b + 2] (l2p.py:273) write distinct cells of R
-decided                          decided    isl          l2p.py:273  reconstruct        every cell of R that R[box, a, b] = -R[box, a - 2, b + 2] (l2p.py:273) reads was written before the
-                                                                                          read, by R[box, a, b] = C[box, a, b] (l2p.py:271) or itself
-decided                          decided    isl          l2p.py:246  reconstruct        the source order runs every dependence forward in time
-decided                          decided    isl          l2p.py:271  reconstruct        no cell of R is stored twice, or read before its store
-decided                          decided    isl          l2p.py:246  reconstruct        (forall i in Fin(nb), a in Nat, b in Nat where a < 2 and a + b <= 10. R[i, a, b] == C[i, a, b])
+tested                           tested     interpreter  l2p.py:238  unpack             the traced term computes what the body computes
+decided                          decided    isl          l2p.py:288  reconstruct        R[box, a, b] is in bounds for every instance of R[box, a, b] = C[box, a, b] (l2p.py:288)
+decided                          decided    isl          l2p.py:288  reconstruct        C[box, a, b] is in bounds for every instance of R[box, a, b] = C[box, a, b] (l2p.py:288)
+decided                          decided    isl          l2p.py:290  reconstruct        R[box, a, b] is in bounds for every instance of R[box, a, b] = -R[box, a - 2, b + 2] (l2p.py:290)
+decided                          decided    isl          l2p.py:290  reconstruct        R[box, a - 2, b + 2] is in bounds
+                                                                                          for every instance of R[box, a, b] = -R[box, a - 2, b + 2] (l2p.py:290)
+decided                          decided    isl          l2p.py:288  reconstruct        distinct instances of R[box, a, b] = C[box, a, b] (l2p.py:288) write distinct cells of R
+decided                          decided    isl          l2p.py:290  reconstruct        distinct instances of R[box, a, b] = -R[box, a - 2, b + 2] (l2p.py:290) write distinct cells of R
+decided                          decided    isl          l2p.py:290  reconstruct        every cell of R that R[box, a, b] = -R[box, a - 2, b + 2] (l2p.py:290) reads was written before the
+                                                                                          read, by R[box, a, b] = C[box, a, b] (l2p.py:288) or itself
+decided                          decided    isl          l2p.py:263  reconstruct        the source order runs every dependence forward in time
+decided                          decided    isl          l2p.py:288  reconstruct        no cell of R is stored twice, or read before its store
+decided                          decided    isl          l2p.py:263  reconstruct        (forall i in Fin(nb), a in Nat, b in Nat where a < 2 and a + b <= 10. R[i, a, b] == C[i, a, b])
                                                                                           and (forall i in Fin(nb), a in Nat, b in Nat where a + b + 2 <= 10.
                                                                                             R[i, a + 2, b] == -R[i, a, b + 2])
-decided under on_every_triangle  assumed    theorem      l2p.py:246  reconstruct        by on_every_triangle, for every D with pde and stored:
+decided under on_every_triangle  assumed    theorem      l2p.py:263  reconstruct        by on_every_triangle, for every D with pde and stored:
                                                                                           forall i in Fin(nb), a in Nat, b in Nat where a + b <= 10. R[i, a, b] == D[i, a, b]
-tested                           tested     interpreter  l2p.py:246  reconstruct        the traced term computes what the body computes
-decided                          decided    isl          l2p.py:303  evaluate           pot[box, target] is in bounds for every instance of pot[box, target] = SCALING *
-                                                                                          reduce_sum(...) (l2p.py:303)
-decided                          decided    isl          l2p.py:303  evaluate           R[box, a, b] is in bounds for every instance of pot[box, target] = SCALING *
-                                                                                          reduce_sum(...) (l2p.py:303)
-decided                          decided    isl          l2p.py:303  evaluate           tx[box, target] is in bounds for every instance of pot[box, target] = SCALING *
-                                                                                          reduce_sum(...) (l2p.py:303)
-decided                          decided    isl          l2p.py:303  evaluate           cx[box] is in bounds for every instance of pot[box, target] = SCALING * reduce_sum(...) (l2p.py:303)
-decided                          decided    isl          l2p.py:303  evaluate           ty[box, target] is in bounds for every instance of pot[box, target] = SCALING *
-                                                                                          reduce_sum(...) (l2p.py:303)
-decided                          decided    isl          l2p.py:303  evaluate           cy[box] is in bounds for every instance of pot[box, target] = SCALING * reduce_sum(...) (l2p.py:303)
-decided                          decided    isl          l2p.py:303  evaluate           INV_FACT[a] is in bounds for every instance of pot[box, target] = SCALING *
-                                                                                          reduce_sum(...) (l2p.py:303)
-decided                          decided    isl          l2p.py:303  evaluate           INV_FACT[b] is in bounds for every instance of pot[box, target] = SCALING *
-                                                                                          reduce_sum(...) (l2p.py:303)
-decided                          decided    isl          l2p.py:303  evaluate           cnt[box], the length of row box that bounds the loop over target, is in bounds
-                                                                                          for every instance of pot[box, target] = SCALING * reduce_sum(...) (l2p.py:303)
-decided                          decided    isl          l2p.py:303  evaluate           distinct instances of pot[box, target] = SCALING * reduce_sum(...) (l2p.py:303) write
+tested                           tested     interpreter  l2p.py:263  reconstruct        the traced term computes what the body computes
+decided                          decided    isl          l2p.py:320  evaluate           pot[box, target] is in bounds for every instance of pot[box, target] = SCALING *
+                                                                                          reduce_sum(...) (l2p.py:320)
+decided                          decided    isl          l2p.py:320  evaluate           R[box, a, b] is in bounds for every instance of pot[box, target] = SCALING *
+                                                                                          reduce_sum(...) (l2p.py:320)
+decided                          decided    isl          l2p.py:320  evaluate           tx[box, target] is in bounds for every instance of pot[box, target] = SCALING *
+                                                                                          reduce_sum(...) (l2p.py:320)
+decided                          decided    isl          l2p.py:320  evaluate           cx[box] is in bounds for every instance of pot[box, target] = SCALING * reduce_sum(...) (l2p.py:320)
+decided                          decided    isl          l2p.py:320  evaluate           ty[box, target] is in bounds for every instance of pot[box, target] = SCALING *
+                                                                                          reduce_sum(...) (l2p.py:320)
+decided                          decided    isl          l2p.py:320  evaluate           cy[box] is in bounds for every instance of pot[box, target] = SCALING * reduce_sum(...) (l2p.py:320)
+decided                          decided    isl          l2p.py:320  evaluate           INV_FACT[a] is in bounds for every instance of pot[box, target] = SCALING *
+                                                                                          reduce_sum(...) (l2p.py:320)
+decided                          decided    isl          l2p.py:320  evaluate           INV_FACT[b] is in bounds for every instance of pot[box, target] = SCALING *
+                                                                                          reduce_sum(...) (l2p.py:320)
+decided                          decided    isl          l2p.py:320  evaluate           cnt[box], the length of row box that bounds the loop over target, is in bounds
+                                                                                          for every instance of pot[box, target] = SCALING * reduce_sum(...) (l2p.py:320)
+decided                          decided    isl          l2p.py:320  evaluate           distinct instances of pot[box, target] = SCALING * reduce_sum(...) (l2p.py:320) write
                                                                                           distinct cells of pot
-decided                          decided    isl          l2p.py:283  evaluate           the source order runs every dependence forward in time
-decided                          decided    type         l2p.py:303  evaluate           the accumulation into pot[box, target] over a, b is approx
-tested                           tested     interpreter  l2p.py:283  evaluate           the traced term computes what the body computes
-decided                          decided    call         l2p.py:310  l2p                after unpack(...) in l2p: (forall i in Fin(nb). C[i, 0, 0] == coeffs[i, 0])
+decided                          decided    isl          l2p.py:300  evaluate           the source order runs every dependence forward in time
+decided                          decided    type         l2p.py:320  evaluate           the accumulation into pot[box, target] over a, b is approx
+tested                           tested     interpreter  l2p.py:300  evaluate           the traced term computes what the body computes
+decided                          decided    call         l2p.py:327  l2p                after unpack(...) in l2p: (forall i in Fin(nb). C[i, 0, 0] == coeffs[i, 0])
                                                                                           and (forall i in Fin(nb), a in Nat, b in Nat where a < 2 and a + b >= 1 and a + b <= 10.
                                                                                             C[i, a, b] == coeffs[i, 2*(a + b) - 1 + a])
-decided                          decided    call         l2p.py:310  l2p                after reconstruct(...) in l2p:
+decided                          decided    call         l2p.py:327  l2p                after reconstruct(...) in l2p:
                                                                                           (forall i in Fin(nb), a in Nat, b in Nat where a < 2 and a + b <= 10. R[i, a, b] == C[i, a, b])
                                                                                           and (forall i in Fin(nb), a in Nat, b in Nat where a + b + 2 <= 10.
                                                                                             R[i, a + 2, b] == -R[i, a, b + 2])
-decided                          decided    isl          l2p.py:316  l2p                every cell of C that reconstruct reads, unpack stored before it
-decided                          decided    isl          l2p.py:317  l2p                every cell of R that evaluate reads, reconstruct stored before it
-tested                           tested     interpreter  l2p.py:310  l2p                the traced term computes what the body computes
-decided                          decided    isl          l2p.py:313  l2p                every cell of l2p.C that l2p reads, l2p.unpack has stored by the time it is read,
+decided                          decided    isl          l2p.py:333  l2p                every cell of C that reconstruct reads, unpack stored before it
+decided                          decided    isl          l2p.py:334  l2p                every cell of R that evaluate reads, reconstruct stored before it
+tested                           tested     interpreter  l2p.py:327  l2p                the traced term computes what the body computes
+decided                          decided    isl          l2p.py:330  l2p                every cell of l2p.C that l2p reads, l2p.unpack has stored by the time it is read,
                                                                                           so l2p runs without the zeros l2p.C is made with
-decided                          decided    isl          l2p.py:314  l2p                every cell of l2p.R that l2p reads, l2p.reconstruct has stored by the time it is read,
+decided                          decided    isl          l2p.py:331  l2p                every cell of l2p.R that l2p reads, l2p.reconstruct has stored by the time it is read,
                                                                                           so l2p runs without the zeros l2p.R is made with
-decided                          decided    isl          l2p.py:328  l2p                fuse(l2p.unpack.box, l2p.reconstruct.box, l2p.evaluate.box) renames the instances of l2p one for one
-decided                          decided    isl          l2p.py:328  l2p                the order after fuse(l2p.unpack.box, l2p.reconstruct.box, l2p.evaluate.box) runs every
+decided                          decided    isl          l2p.py:345  l2p                fuse(l2p.unpack.box, l2p.reconstruct.box, l2p.evaluate.box) renames the instances of l2p one for one
+decided                          decided    isl          l2p.py:345  l2p                the order after fuse(l2p.unpack.box, l2p.reconstruct.box, l2p.evaluate.box) runs every
                                                                                           dependence of l2p forward
-decided                          decided    isl          l2p.py:334  l2p                no read of l2p.R sees its slot overwritten after contract(l2p.R, lambda box, a, b: (a, b)):
+decided                          decided    isl          l2p.py:351  l2p                no read of l2p.R sees its slot overwritten after contract(l2p.R, lambda box, a, b: (a, b)):
                                                                                           l2p.R kept in 121 cells, R[box, a, b] in slot (a, b)
-decided                          decided    isl          l2p.py:334  l2p                no read of l2p.C sees its slot overwritten after contract(l2p.C, lambda box, a, b: (a, b)):
+decided                          decided    isl          l2p.py:351  l2p                no read of l2p.C sees its slot overwritten after contract(l2p.C, lambda box, a, b: (a, b)):
                                                                                           l2p.C kept in 22 cells, C[box, a, b] in slot (a, b)
-decided                          decided    isl          l2p.py:342  l2p                on_groups(l2p.unpack.box) renames the instances of l2p one for one
-decided                          decided    isl          l2p.py:342  l2p                the order after on_groups(l2p.unpack.box) runs every dependence of l2p forward, within one work item
-tested                           tested     upstream     l2p.py:464  l2p                the native run of l2p agrees with sumpy_l2p in pot within 1e-14 of the largest value,
+decided                          decided    isl          l2p.py:359  l2p                on_groups(l2p.unpack.box) renames the instances of l2p one for one
+decided                          decided    isl          l2p.py:359  l2p                the order after on_groups(l2p.unpack.box) runs every dependence of l2p forward, within one work item
+tested                           tested     upstream     l2p.py:481  l2p                the native run of l2p agrees with sumpy_l2p in pot within 1e-14 of the largest value,
                                                                                           on its example inputs
 
 56 facts: 2 assumed, 47 decided, 7 tested
 
 WITHOUT LEAN: compressed_taylor, on_every_triangle and 44 more rows are not proved. To have Lean prove what it can: pip install "lanky[lean]", and Lean v4.29.1 from elan (elan default leanprover/lean4:v4.29.1).
 WITHOUT MATHLIB: compressed_taylor, on_every_triangle and 3 more rows are not proved, since only Lean with Mathlib can state them. To have Lean prove them: python -m lanky.mathlib ~/mathlib (about 7 GB), then export LANKY_LEAN_MATHLIB=~/mathlib.
+
+NOT CHECKED compressed_taylor at l2p.py:135: its proof, l2p.py:151-161, was not checked: Lean is not available here (disabled by LANKY_LEAN_DISABLE); its steps could not be drawn: no draw could be completed: cannot tabulate a family over Nat
 ```
 
 ### loopty run examples/l2p.py
@@ -2862,24 +3095,24 @@ evaluate: Schedule(evaluate, target='c')
 
 STATUS   BY     WHERE       OWNER        STATEMENT
 -------  -----  ----------  -----------  ----------------------------------------------------------------------------------------------------
-decided  isl    l2p.py:313  l2p          every cell of l2p.C that l2p reads, l2p.unpack has stored by the time it is read,
+decided  isl    l2p.py:330  l2p          every cell of l2p.C that l2p reads, l2p.unpack has stored by the time it is read,
                                            so l2p runs without the zeros l2p.C is made with
-decided  isl    l2p.py:314  l2p          every cell of l2p.R that l2p reads, l2p.reconstruct has stored by the time it is read,
+decided  isl    l2p.py:331  l2p          every cell of l2p.R that l2p reads, l2p.reconstruct has stored by the time it is read,
                                            so l2p runs without the zeros l2p.R is made with
-decided  isl    l2p.py:328  l2p          fuse(l2p.unpack.box, l2p.reconstruct.box, l2p.evaluate.box) renames the instances of l2p one for one
-decided  isl    l2p.py:328  l2p          the order after fuse(l2p.unpack.box, l2p.reconstruct.box, l2p.evaluate.box) runs every
+decided  isl    l2p.py:345  l2p          fuse(l2p.unpack.box, l2p.reconstruct.box, l2p.evaluate.box) renames the instances of l2p one for one
+decided  isl    l2p.py:345  l2p          the order after fuse(l2p.unpack.box, l2p.reconstruct.box, l2p.evaluate.box) runs every
                                            dependence of l2p forward
-tested   loopy  l2p.py:328  l2p          the scheduled run of l2p agrees with the native run to the accuracy its types state
-decided  isl    l2p.py:334  l2p          no read of l2p.R sees its slot overwritten after contract(l2p.R, lambda box, a, b: (a, b)):
+tested   loopy  l2p.py:345  l2p          the scheduled run of l2p agrees with the native run to the accuracy its types state
+decided  isl    l2p.py:351  l2p          no read of l2p.R sees its slot overwritten after contract(l2p.R, lambda box, a, b: (a, b)):
                                            l2p.R kept in 121 cells, R[box, a, b] in slot (a, b)
-decided  isl    l2p.py:334  l2p          no read of l2p.C sees its slot overwritten after contract(l2p.C, lambda box, a, b: (a, b)):
+decided  isl    l2p.py:351  l2p          no read of l2p.C sees its slot overwritten after contract(l2p.C, lambda box, a, b: (a, b)):
                                            l2p.C kept in 22 cells, C[box, a, b] in slot (a, b)
-tested   loopy  l2p.py:334  l2p          the scheduled run of l2p agrees with the native run to the accuracy its types state
-decided  isl    l2p.py:342  l2p          on_groups(l2p.unpack.box) renames the instances of l2p one for one
-decided  isl    l2p.py:342  l2p          the order after on_groups(l2p.unpack.box) runs every dependence of l2p forward, within one work item
-tested   loopy  l2p.py:221  unpack       the scheduled run of unpack agrees with the native run to the accuracy its types state
-tested   loopy  l2p.py:246  reconstruct  the scheduled run of reconstruct agrees with the native run to the accuracy its types state
-tested   loopy  l2p.py:283  evaluate     the scheduled run of evaluate agrees with the native run to the accuracy its types state
+tested   loopy  l2p.py:351  l2p          the scheduled run of l2p agrees with the native run to the accuracy its types state
+decided  isl    l2p.py:359  l2p          on_groups(l2p.unpack.box) renames the instances of l2p one for one
+decided  isl    l2p.py:359  l2p          the order after on_groups(l2p.unpack.box) runs every dependence of l2p forward, within one work item
+tested   loopy  l2p.py:238  unpack       the scheduled run of unpack agrees with the native run to the accuracy its types state
+tested   loopy  l2p.py:263  reconstruct  the scheduled run of reconstruct agrees with the native run to the accuracy its types state
+tested   loopy  l2p.py:300  evaluate     the scheduled run of evaluate agrees with the native run to the accuracy its types state
 
 13 facts: 8 decided, 5 tested
 

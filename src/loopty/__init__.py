@@ -53,6 +53,7 @@ _EXPORTS = {
     "ArrType": "loopty.term",
     "Fin": "loopty.idx",
     "IllegalCast": "loopty.schedule",
+    "IllegalRewrite": "loopty.rewriting",
     "IslOracle": "loopty.oracle",
     "Kernel": "loopty.kernel",
     "Program": "loopty.kernel",
@@ -93,6 +94,7 @@ __all__ = [
     "Arr",
     "Fin",
     "IllegalCast",
+    "IllegalRewrite",
     "IslOracle",
     "Kernel",
     "Program",
@@ -168,6 +170,7 @@ if TYPE_CHECKING:
     from loopty.layout import layout
     from loopty.oracle import IslOracle
     from loopty.reduction import reduce_sum
+    from loopty.rewriting import IllegalRewrite
     from loopty.schedule import IllegalCast, Schedule, UnbuildableSchedule
     from loopty.table import Table, table
     from loopty.term import Access, ArrType, Reduction, Stmt, Term
