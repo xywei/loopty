@@ -1390,9 +1390,9 @@ tested                     tested     python         lanky.known             mod
 WITHOUT LEAN: line_taylor, conjugate_form, log_of_the_modulus and 37 more rows are not proved. To have Lean prove what it can: pip install "lanky[lean]", and Lean v4.29.1 from elan (elan default leanprover/lean4:v4.29.1).
 WITHOUT MATHLIB: line_taylor, conjugate_form, log_of_the_modulus and 6 more rows are not proved, since only Lean with Mathlib can state them. To have Lean prove them: python -m lanky.mathlib ~/mathlib (about 7 GB), then export LANKY_LEAN_MATHLIB=~/mathlib.
 
-NOT CHECKED line_taylor at layer_potential.py:165: its proof, layer_potential.py:182-190, was not checked: Lean is not available here (disabled by LANKY_LEAN_DISABLE); its steps could not be drawn: no draw could be completed: cannot tabulate a family over Nat
+NOT CHECKED line_taylor at layer_potential.py:165: without Lean, its proof was not checked, and its steps cannot be drawn (cannot tabulate a family over Nat).
 
-NOT CHECKED log_of_the_modulus at layer_potential.py:205: its proof, layer_potential.py:210-214, was not checked: Lean is not available here (disabled by LANKY_LEAN_DISABLE); the proof of log_of_the_modulus was tested step by step at drawn points (layer_potential.py:212, 213), not checked by Lean
+NOT CHECKED log_of_the_modulus at layer_potential.py:205: without Lean, each step of its proof was tested at drawn points instead (lines 212 and 213).
 ```
 
 With Lean, the facts isl decided read `proved` by `lean`, the write fact
@@ -3073,7 +3073,7 @@ tested                           tested     upstream     l2p.py:481  l2p        
 WITHOUT LEAN: compressed_taylor, on_every_triangle and 44 more rows are not proved. To have Lean prove what it can: pip install "lanky[lean]", and Lean v4.29.1 from elan (elan default leanprover/lean4:v4.29.1).
 WITHOUT MATHLIB: compressed_taylor, on_every_triangle and 3 more rows are not proved, since only Lean with Mathlib can state them. To have Lean prove them: python -m lanky.mathlib ~/mathlib (about 7 GB), then export LANKY_LEAN_MATHLIB=~/mathlib.
 
-NOT CHECKED compressed_taylor at l2p.py:135: its proof, l2p.py:151-161, was not checked: Lean is not available here (disabled by LANKY_LEAN_DISABLE); its steps could not be drawn: no draw could be completed: cannot tabulate a family over Nat
+NOT CHECKED compressed_taylor at l2p.py:135: without Lean, its proof was not checked, and its steps cannot be drawn (cannot tabulate a family over Nat).
 ```
 
 ### loopty run examples/l2p.py
