@@ -1348,8 +1348,9 @@ tested                           tested     run            layer_potential.py:42
                                                                                                          and log_of_the_modulus need, on the example inputs
 decided                          decided    type           layer_potential.py:427  single_layer        after rewrite(out, ...), out is compared at approx (it was approx)
 tested                           tested     run            layer_potential.py:427  single_layer        the compiled as_sumpy_computes agrees with the native single_layer in out at approx,
-                                                                                                         and 3 drawn ones; note: with the inputs scaled by 1e-170 (|c[t] - y[s]| about 1e-170),
-                                                                                                         out[0] is nan where the native run gives 5.29e-168; with the inputs scaled by 1e+170
+                                                                                                         within 1e-06 of each value (measured at roundoff), on its example inputs and 3 drawn ones; note:
+                                                                                                         with the inputs scaled by 1e-170 (|c[t] - y[s]| about 1e-170), out[0] is nan
+                                                                                                         where the native run gives 5.29e-168; with the inputs scaled by 1e+170
                                                                                                          (|c[t] - y[s]| about 1e+170), out[0] is nan where the native run gives 5.29e+172
 decided                          decided    isl            layer_potential.py:458  single_layer        split(single_layer.t, 16) renames the instances of single_layer one for one
 decided                          decided    isl            layer_potential.py:458  single_layer        the order after split(single_layer.t, 16) runs every dependence of single_layer forward
@@ -1380,7 +1381,7 @@ tested                           tested     interpreter    layer_potential.py:46
 tested                           tested     run            layer_potential.py:468  double_layer        c[t] - y[s] != 0 for every t and every s, which conjugate_form needs, on the example inputs
 decided                          decided    type           layer_potential.py:468  double_layer        after rewrite(out, ...), out is compared at approx (it was approx)
 tested                           tested     run            layer_potential.py:468  double_layer        the compiled double_layer after rewrite(out, ...) agrees with the native double_layer in out at
-                                                                                                         approx, within 1e-06 of each value (measured 1e-15 of the largest), on its example inputs
+                                                                                                         approx, within 1e-06 of each value (measured at roundoff), on its example inputs
                                                                                                          and 3 drawn ones; note: with the inputs scaled by 1e-170 (|c[t] - y[s]| about 1e-170),
                                                                                                          out[0] is nan where the native run gives -3.45e-166; with the inputs scaled by 1e+170
                                                                                                          (|c[t] - y[s]| about 1e+170), out[0] is nan where the native run gives -3.45e+174
@@ -1411,11 +1412,11 @@ tested                           tested     python         lanky.known          
 WITHOUT LEAN: line_taylor, reciprocal_taylor, conjugate_form and 39 more rows are not proved. To have Lean prove what it can: pip install "lanky[lean]", and Lean v4.29.1 from elan (elan default leanprover/lean4:v4.29.1).
 WITHOUT MATHLIB: line_taylor, reciprocal_taylor, conjugate_form and 8 more rows are not proved, since only Lean with Mathlib can state them. To have Lean prove them: python -m lanky.mathlib ~/mathlib (about 7 GB), then export LANKY_LEAN_MATHLIB=~/mathlib.
 
-NOT CHECKED line_taylor at layer_potential.py:171: its proof, layer_potential.py:188-196, was not checked: Lean is not available here (disabled by LANKY_LEAN_DISABLE); its steps could not be drawn: no draw could be completed: cannot tabulate a family over Nat
+NOT CHECKED line_taylor at layer_potential.py:171: without Lean, its proof was not checked, and its steps cannot be drawn (cannot tabulate a family over Nat).
 
-NOT CHECKED reciprocal_taylor at layer_potential.py:199: its proof, layer_potential.py:217-225, was not checked: Lean is not available here (disabled by LANKY_LEAN_DISABLE); its steps could not be drawn: no draw could be completed: cannot tabulate a family over Nat
+NOT CHECKED reciprocal_taylor at layer_potential.py:199: without Lean, its proof was not checked, and its steps cannot be drawn (cannot tabulate a family over Nat).
 
-NOT CHECKED log_of_the_modulus at layer_potential.py:240: its proof, layer_potential.py:245-249, was not checked: Lean is not available here (disabled by LANKY_LEAN_DISABLE); the proof of log_of_the_modulus was tested step by step at drawn points (layer_potential.py:247, 248), not checked by Lean
+NOT CHECKED log_of_the_modulus at layer_potential.py:240: without Lean, each step of its proof was tested at drawn points instead (lines 247 and 248).
 ```
 
 With Lean, the facts isl decided read `proved` by `lean`, the write fact
@@ -1718,7 +1719,7 @@ the passes one after another on the C target, with the same flags.
 
 ```console
 $ uv run python examples/hexahedra.py
-order 3, 2 hexahedra: the dense kernels and the passes are the dense Kronecker operators: True (largest difference 5e-16 of the largest)
+order 3, 2 hexahedra: the dense kernels and the passes are the dense Kronecker operators, to 1e-13 of the largest value: True
 
 derived from the math: Schedule(weak_grad, target='c').rewrite(weak_grad.grad, by=sum_factorization, keep=('r_pass', 's_pass')).fuse(weak_grad.r_pass.c, weak_grad.s_pass.c).contract(weak_grad.r_pass, lambda x, d, e, c, b, i: (b, i))
   r_pass kept in lambda x, d, e, c, b, i: (b, i)
@@ -1750,8 +1751,8 @@ derived from the math: Schedule(weak_grad, target='c').rewrite(weak_grad.grad, b
 
 the divergence, derived the same way: Schedule(weak_div, target='c').rewrite(weak_div.div, by=sum_factorization, keep=('r_pass', 's_pass'))
   tested   interpreter rewrite(div, by=sum_factorization, keep=(r_pass, s_pass)): over the reals, the passes leave in div what weak_div's statement says, unfolded through r_pass and s_pass; sum_factorization at Fr := Fr[d], Fs := Fs[d], Ft := Ft[d], u := w[d, e], for d = 0, 1 and 2
-  w: within 1e-06 (approx) -> tested
-  div: within 3.07e-06 (approx) -> tested
+  w: difference 0 within 1e-06 (approx) -> tested
+  div: difference at roundoff within 1e-06 (approx) -> tested
 
 refused: fuse(passes.along_r.i, passes.along_s.i) illegal: v[q, e, k, j, i] = reduce_sum(...) (hexahedra.py:239) at q=8, e=0, k=1, j=1, i=1 writes v[8, 0, 1, 1, 1], read by vs[q, e, k, j, i] = reduce_sum(...) (hexahedra.py:252) at q=8, e=0, k=1, j=0, i=1, scheduled earlier (at n=2, ne=1, isl's choice); fuse(passes.along_r.k, passes.along_s.k) runs every dependence between them forward
 
@@ -1957,7 +1958,7 @@ decided  isl            hexahedra.py:435  weak_grad              n >= 0 and (k >
                                                                    and every i, which sum_factorization needs
 decided  type           hexahedra.py:435  weak_grad              after rewrite(grad, ...), grad is compared at approx (it was approx)
 tested   run            hexahedra.py:435  weak_grad              the compiled factored agrees with the native weak_grad in grad at approx,
-                                                                   within 1e-06 of each value (measured 4e-16 of the largest), on its example inputs and 3 drawn ones
+                                                                   within 1e-06 of each value (measured at roundoff), on its example inputs and 3 drawn ones
 decided  isl            hexahedra.py:440  weak_grad              fuse(weak_grad.r_pass.c, weak_grad.s_pass.c) renames the instances of weak_grad one for one
 decided  isl            hexahedra.py:440  weak_grad              the order after fuse(weak_grad.r_pass.c, weak_grad.s_pass.c) runs every dependence of
                                                                    weak_grad forward
@@ -2025,7 +2026,7 @@ decided  isl            hexahedra.py:446  weak_div               n >= 0 and (k >
                                                                    and every i, which sum_factorization needs
 decided  type           hexahedra.py:446  weak_div               after rewrite(div, ...), div is compared at approx (it was approx)
 tested   run            hexahedra.py:446  weak_div               the compiled factored_div agrees with the native weak_div in div at approx,
-                                                                   within 1e-06 of each value (measured 7e-16 of the largest), on its example inputs and 3 drawn ones
+                                                                   within 1e-06 of each value (measured at roundoff), on its example inputs and 3 drawn ones
 decided  isl            hexahedra.py:467  metric_along_r         every cell of w that along_r reads, metric stored before it
 tested   interpreter    hexahedra.py:462  metric_along_r         the traced term computes what the body computes
 decided  isl            hexahedra.py:475  contravariant_along_r  every cell of w that along_r reads, contravariant stored before it
@@ -2049,8 +2050,10 @@ weak_grad: Schedule(weak_grad, target='c').rewrite(weak_grad.grad, by=sum_factor
   grad: difference at roundoff within 1e-06 (approx) -> tested
 weak_grad: Schedule(weak_grad, target='c').rewrite(weak_grad.grad, by=sum_factorization, keep=('r_pass', 's_pass')).fuse(weak_grad.r_pass.c, weak_grad.s_pass.c).contract(weak_grad.r_pass, lambda x, d, e, c, b, i: (b, i))
   w: difference 0 within 1e-06 (approx) -> tested
+  grad: difference at roundoff within 1e-06 (approx) -> tested
 weak_div: Schedule(weak_div, target='c').rewrite(weak_div.div, by=sum_factorization, keep=('r_pass', 's_pass'))
   w: difference 0 within 1e-06 (approx) -> tested
+  div: difference at roundoff within 1e-06 (approx) -> tested
 passes: Schedule(passes, target='c').fuse(passes.metric.j, passes.along_r.j).fuse(passes.along_r.k, passes.along_s.k)
   grad: difference 0 within 1e-06 (approx) -> tested
 passes: Schedule(passes, target='c').fuse(passes.metric.j, passes.along_r.j).fuse(passes.along_r.k, passes.along_s.k).contract(passes.w, lambda q, e, k, j, i: i).contract(passes.v, lambda q, e, k, j, i: (j, i))
@@ -2066,7 +2069,7 @@ along_s: Schedule(along_s, target='c')
 gradient_along_t: Schedule(gradient_along_t, target='c')
   grad: difference 0 within 1e-06 (approx) -> tested
 divergence_along_t: Schedule(divergence_along_t, target='c')
-  div: difference 0 within 1.01e-06 (approx) -> tested
+  div: difference 0 within 1e-06 (approx) -> tested
 div_passes: Schedule(div_passes, target='c')
   div: difference 0 within 1e-06 (approx) -> tested
 metric_along_r: Schedule(metric_along_r, target='c')
@@ -2110,7 +2113,7 @@ decided                                               decided    isl          he
                                                                                                                          and every i, which sum_factorization needs
 decided                                               decided    type         hexahedra.py:435  weak_grad              after rewrite(grad, ...), grad is compared at approx (it was approx)
 tested                                                tested     run          hexahedra.py:435  weak_grad              the compiled factored agrees with the native weak_grad in grad at approx,
-                                                                                                                         within 1e-06 of each value (measured 4e-16 of the largest), on its example inputs and 3 drawn ones
+                                                                                                                         within 1e-06 of each value (measured at roundoff), on its example inputs and 3 drawn ones
 tested                                                tested     loopy        hexahedra.py:435  weak_grad              the scheduled run of weak_grad agrees with the native run to the accuracy its types state
 decided                                               decided    isl          hexahedra.py:440  weak_grad              fuse(weak_grad.r_pass.c, weak_grad.s_pass.c) renames the instances of weak_grad one for one
 decided                                               decided    isl          hexahedra.py:440  weak_grad              the order after fuse(weak_grad.r_pass.c, weak_grad.s_pass.c) runs every dependence of
@@ -2156,7 +2159,7 @@ decided                                               decided    isl          he
                                                                                                                          and every i, which sum_factorization needs
 decided                                               decided    type         hexahedra.py:446  weak_div               after rewrite(div, ...), div is compared at approx (it was approx)
 tested                                                tested     run          hexahedra.py:446  weak_div               the compiled factored_div agrees with the native weak_div in div at approx,
-                                                                                                                         within 1e-06 of each value (measured 7e-16 of the largest), on its example inputs and 3 drawn ones
+                                                                                                                         within 1e-06 of each value (measured at roundoff), on its example inputs and 3 drawn ones
 tested                                                tested     loopy        hexahedra.py:446  weak_div               the scheduled run of weak_div agrees with the native run to the accuracy its types state
 decided                                               decided    isl          hexahedra.py:317  passes                 every cell of passes.w that passes reads, passes.metric has stored by the time it is read,
                                                                                                                          so passes runs without the zeros passes.w is made with
@@ -2569,7 +2572,7 @@ decided  isl            advection.py:646  weak_rhs                       n >= 0 
                                                                            and every i, which inverse_mass_inward and lift_inward need
 decided  type           advection.py:646  weak_rhs                       after rewrite(rhs, ...), rhs is compared at approx (it was approx)
 tested   run            advection.py:646  weak_rhs                       the compiled derived agrees with the native weak_rhs in rhs at approx,
-                                                                           within 1e-06 of each value (measured 8e-16 of the largest), on its example inputs and 3 drawn ones
+                                                                           within 1e-06 of each value (measured at roundoff), on its example inputs and 3 drawn ones
 decided  isl            advection.py:331  advection_rhs                  u[e, inside[f, a, b, 0], inside[f, a, b, 1], inside[f, a, b, 2]] is in bounds
                                                                            for every instance of flux[e, f, a, b] = upwind_flux(...) (advection.py:331),
                                                                            where upwind is called at advection.py:611
@@ -2626,10 +2629,10 @@ $ uv run loopty run examples/advection.py
 advection_rhs: Schedule(advection_rhs, target='c').substitute(advection_rhs.V).substitute(advection_rhs.vn).fuse(advection_rhs.volume.i, advection_rhs.lift.i).fuse(advection_rhs.upwind.e, advection_rhs.volume.e)
   rhs: difference 0 within 1e-06 (approx) -> tested
 advection_rhs: Schedule(advection_rhs, target='c').substitute(advection_rhs.V).substitute(advection_rhs.vn).fuse(advection_rhs.volume.i, advection_rhs.lift.i).fuse(advection_rhs.upwind.e, advection_rhs.volume.e).contract(advection_rhs.flux, lambda e, f, a, b: (f, a, b))
-  rhs: difference 0 within 1.01e-06 (approx) -> tested
+  rhs: difference 0 within 1e-06 (approx) -> tested
 weak_rhs: Schedule(weak_rhs, target='c').rewrite(weak_rhs.rhs, by=(inverse_mass_inward, lift_inward), keep=('D', 'L'))
-  w: difference 0 within 1.03e-06 (approx) -> tested
-  rhs: difference 3.55e-15 within 1.26e-06 (approx) -> tested
+  w: difference 0 within 1e-06 (approx) -> tested
+  rhs: difference at roundoff within 1e-06 (approx) -> tested
 reference_velocity: Schedule(reference_velocity, target='c')
   V: difference 0 within 1e-06 (approx) -> tested
 normal_velocity: Schedule(normal_velocity, target='c')
@@ -2650,7 +2653,7 @@ volume_and_lift: Schedule(volume_and_lift, target='c')
   rhs: difference 0 within 1e-06 (approx) -> tested
 
 STATUS                                                  EFFECTIVE  BY           WHERE             OWNER               STATEMENT
-------------------------------------------------------  ---------  -----------  ----------------  ------------------  ----------------------------------------------------------------------------------------------------
+------------------------------------------------------  ---------  -----------  ----------------  ------------------  ---------------------------------------------------------------------------------------------------
 decided                                                 decided    isl          advection.py:606  advection_rhs       every cell of advection_rhs.V that advection_rhs reads,
                                                                                                                         advection_rhs.reference_velocity has stored by the time it is read,
                                                                                                                         so advection_rhs runs without the zeros advection_rhs.V is made with
@@ -2729,7 +2732,7 @@ decided                                                 decided    isl          
                                                                                                                         and every i, which inverse_mass_inward and lift_inward need
 decided                                                 decided    type         advection.py:646  weak_rhs            after rewrite(rhs, ...), rhs is compared at approx (it was approx)
 tested                                                  tested     run          advection.py:646  weak_rhs            the compiled derived agrees with the native weak_rhs in rhs at approx,
-                                                                                                                        within 1e-06 of each value (measured 8e-16 of the largest), on its example inputs and 3 drawn ones
+                                                                                                                        within 1e-06 of each value (measured at roundoff), on its example inputs and 3 drawn ones
 tested                                                  tested     loopy        advection.py:646  weak_rhs            the scheduled run of weak_rhs agrees with the native run to the accuracy its types state
 tested                                                  tested     loopy        advection.py:276  reference_velocity  the scheduled run of reference_velocity agrees with the native run to the accuracy its types state
 tested                                                  tested     loopy        advection.py:295  normal_velocity     the scheduled run of normal_velocity agrees with the native run to the accuracy its types state
