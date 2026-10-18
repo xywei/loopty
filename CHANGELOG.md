@@ -205,6 +205,12 @@ All notable changes to loopty are recorded here. The format follows
   the words above, and `refresh_example_outputs.py --check` no longer
   depends on the machine that made the documents.
 
+- The transcripts in `examples/README.md` show lanky's shorter `NOT CHECKED`
+  line, a clause where the `WITHOUT LEAN` line above it already says what is
+  missing: `NOT CHECKED log_of_the_modulus at layer_potential.py:205: without
+  Lean, each step of its proof was tested at drawn points instead (lines 212
+  and 213).` (lanky#179).
+
 - **A cited theorem is restated from the text Lean proved of it.** A theorem
   applied to a kernel's postcondition, the theorem and identities of a
   series row, and the theorems a program's postcondition unfolds through are
