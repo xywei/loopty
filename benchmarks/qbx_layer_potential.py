@@ -152,7 +152,7 @@ def arithmetic(ex: Any, layer: str, target: str) -> Any:
 
     Each division through the conjugate, and the single layer's ``log|alpha|``
     with no square root, as the example's schedules rewrite them. The kernel
-    and its theorems are taken from ``ex``, one import of the example, by the
+    and its claims are taken from ``ex``, one import of the example, by the
     layer's name: :func:`example` imports the file afresh at each call, so a
     kernel from one import is never the kernel of another.
     """

@@ -4,7 +4,7 @@ Two verbs. ``loopty run FILE`` imports the file, lowers its kernels through
 loopy, runs them on the requested target, and compares against the native numpy
 run. ``loopty check FILE`` is an alias of ``lanky check FILE``: the checking verb
 belongs to the host, and loopty reaches it through the plugin registry rather
-than reimplementing it, so that one command checks theorems and kernels together.
+than reimplementing it, so that one command checks claims and kernels together.
 
 ``RunVerb`` is the same verb registered under ``lanky.verbs``, which is how
 ``lanky run`` and ``loopty run`` stay one implementation.

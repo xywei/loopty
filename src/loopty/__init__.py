@@ -19,7 +19,7 @@ loopy generates the code (C, OpenCL, CUDA).
 loopty is the first plugin for its sister project lanky (a Python-hosted proof
 language over Lean 4; https://github.com/xywei/lanky): loopty's typing rules emit
 facts into lanky's ledger, its isl oracle decides the Presburger ones, and the
-residual obligations become lanky theorems.
+residual obligations become lanky claims.
 
 Status: in development, and honest about it; the README's status list is the
 long form. A decorated kernel runs natively on numpy, traces to a term, states

@@ -126,7 +126,7 @@ def _facts(path: Path) -> list[Any]:
 def _isls(fact: Any) -> bool:
     """Whether isl decides the fact: its term is a question, or a cast isl answered.
 
-    A theorem a kernel cites, applied to the postcondition isl decided
+    A claim a kernel cites, applied to the postcondition isl decided
     (``by-theorem``, decided by ``claim``), is counted with them: it is
     stated for Lean the same way, and what it applies to is isl's.
     """
