@@ -493,6 +493,11 @@ def test_a_right_side_is_compared_at_draws_of_both_signs() -> None:
     assert not _one_value(Abs(x - Subscript(Var("x"), 1)), x - Subscript(Var("x"), 1))
     assert _one_value(Abs(J) * 2 / 24, Abs(J) / 12)
     assert _one_value(Abs(-x), Abs(x))
+    # a complex cell is drawn off the real axis (Codex, #348)
+    z = Subscript(Var("z"), 0)
+    assert _one_value(Abs(z) ** 2, z * z)  # equal at every real draw
+    assert not _one_value(Abs(z) ** 2, z * z, frozenset({"z"}))
+    assert _one_value(Abs(z) * 2 / 24, Abs(z) / 12, frozenset({"z"}))
 
 
 def test_weights_off_beyond_their_digits_refute_the_condition() -> None:

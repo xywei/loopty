@@ -713,7 +713,7 @@ def _concluded(
             if not matcher.match(_flat(equation.left), value, trial, {}):
                 continue
             concluded = _concluded_side(equation.right, trial, variables, functions)
-            if _one_value(concluded, conjunct.right):
+            if _one_value(concluded, conjunct.right, _complex_names(term)):
                 sigma = trial
                 break
         else:
@@ -742,16 +742,33 @@ def _concluded_side(
 _DRAWS = 8
 
 
-def _one_value(concluded: Any, claimed: Any) -> bool:
+def _complex_names(term: Term) -> frozenset[str]:
+    """The kernel's arrays and scalars of complex numbers, by name."""
+    from loopty.rewriting import _inexact
+
+    out = set()
+    for name, typ in (*term.params, *term.temporaries, *term.tables):
+        dtype = _inexact(getattr(typ, "dtype", typ))
+        if dtype is not None and dtype.kind == "c":
+            out.add(name)
+    return frozenset(out)
+
+
+def _one_value(
+    concluded: Any, claimed: Any, complex_names: frozenset[str] = frozenset()
+) -> bool:
     """Whether a theorem's right side at its binding is the claim's: terms, or draws.
 
     Each cell at a point with a value, ``x[2, 1]``, and each free name is
     drawn at random, the same in both, and both sides are evaluated; they
     have to agree to rounding at every draw. The draws take both signs, all
     negative once, all positive once and mixed after, at magnitudes between
-    a half and two, so ``abs(x)`` is not taken for ``x``. A side with a cell
-    at a point with no value, or one that cannot be evaluated at a draw, is
-    not shown to be the other, and ``False`` is returned.
+    a half and two, so ``abs(x)`` is not taken for ``x``; a cell of an array
+    named in ``complex_names``, or a scalar so named, is drawn with an
+    imaginary part as well, so ``abs(z)**2`` is not taken for ``z*z``. A
+    side with a cell at a point with no value, or one that cannot be
+    evaluated at a draw, is not shown to be the other, and ``False`` is
+    returned.
     """
     from lanky.terms import evaluate, free_variables
 
@@ -763,6 +780,7 @@ def _one_value(concluded: Any, claimed: Any) -> bool:
     if _same(concluded, claimed):
         return True
     names: dict[str, Var] = {}
+    complex_atoms = set(complex_names)
 
     def atoms(node: Any) -> Any:
         if isinstance(node, prim.Subscript) and isinstance(
@@ -771,7 +789,10 @@ def _one_value(concluded: Any, claimed: Any) -> bool:
             index = node.index if isinstance(node.index, tuple) else (node.index,)
             if any(_concrete(item) is None for item in index):
                 raise _Unstated(f"{render(node)} is no cell at a point with a value")
-            return names.setdefault(render(node), Var(f"_cell_{len(names)}"))
+            atom = names.setdefault(render(node), Var(f"_cell_{len(names)}"))
+            if node.aggregate.name in complex_names:
+                complex_atoms.add(atom.name)
+            return atom
         if isinstance(node, prim.ExpressionNode):
             return type(node)(*(atoms(arg) for arg in init_args(node)))
         if isinstance(node, tuple):
@@ -790,10 +811,14 @@ def _one_value(concluded: Any, claimed: Any) -> bool:
                 if draw == 1
                 else rng.choice([-1.0, 1.0], size=len(free)).tolist()
             )
-            context = {
+            context: dict[str, Any] = {
                 name: sign * float(rng.uniform(0.5, 2.0))
                 for name, sign in zip(free, signs, strict=True)
             }
+            for name in free:
+                if name in complex_atoms:
+                    turn = float(rng.uniform(0.5, 2.0)) * float(rng.choice([-1.0, 1.0]))
+                    context[name] = complex(context[name], turn)
             a, b = complex(evaluate(left, context)), complex(evaluate(right, context))
             if not abs(a - b) <= 1e-12 * (abs(a) + abs(b) + 1e-300):
                 return False

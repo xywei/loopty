@@ -211,8 +211,10 @@ All notable changes to loopty are recorded here. The format follows
   postcondition with another right side read `..., by <theorem>` and rested
   on the theorem and its conditions on the tables. The right side at the same
   binding now has to be the postcondition's too, as a term or at drawn values
-  of what both read, of both signs: `element_mass`'s `abs(J) * 2 / 24` is
-  `mass_ffc`'s `abs(jacobian(x)) / 12`, while `abs(x)` is not `x`, and a
+  of what both read, of both signs and, for complex arrays, off the real
+  axis: `element_mass`'s `abs(J) * 2 / 24` is `mass_ffc`'s
+  `abs(jacobian(x)) / 12`, while `abs(x)` is not `x`, nor `abs(z)**2` the
+  `z*z` of a complex `z`, and a
   claim of a sixth of the sum times `1 + 1e-8`, true only to the approx
   tolerance, is the kernel's own claim, tested on the runs.
 
