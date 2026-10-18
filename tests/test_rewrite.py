@@ -361,6 +361,195 @@ def test_the_compared_row_is_measured_and_notes_the_extremes() -> None:
     assert compared.provenance["outputs"]["out"]["measured"] < 1e-12
 
 
+def test_a_condition_is_needed_only_where_the_statement_runs() -> None:
+    """``x[i] / a[i]`` under ``if a[i] != 0``: a zero where it does not run is fine.
+
+    The condition was tested at every point of the domain, which a guard
+    that reads data does not narrow, and refuted at a zero the guard skips
+    (Codex, #341).
+    """
+
+    @kernel
+    def guarded(
+        x: Arr[Fin[n], Real],  # noqa: F821
+        a: Arr[Fin[n], Real],  # noqa: F821
+        out: Arr[Fin[n], Real],  # noqa: F821
+    ):
+        for i in out.dom:
+            if a[i] != 0.0:
+                out[i] = x[i] / a[i]
+
+    a = np.ones(5)
+    a[3] = 0.0
+    inputs_ = {"x": Arr.from_numpy(np.arange(5.0)), "a": Arr.from_numpy(a)}
+    schedule = (
+        Schedule(guarded)
+        .rewrite(guarded.out, by=through_the_reciprocal)
+        .example(**inputs_, out=Arr.zeros(5))
+    )
+    (condition,) = rows(schedule)["rewrite-condition"]
+    assert condition.status.value == "tested", condition.provenance
+    assert condition.statement.startswith(
+        "a[i] != 0 for every i where a[i] != 0.0, which through_the_reciprocal needs"
+    )
+    # and Lean is asked T == T' where the statement runs, which the row tests
+    (equality,) = rows(schedule)["rewrite"]
+    (part,) = equality.term.lean_obligation().parts
+    guards = [render(guard) for guard in part.term.guard.children]
+    assert "a[i] != 0.0" in guards, guards
+
+
+def test_a_rewrite_finite_before_and_nan_after_at_a_draw_is_refuted() -> None:
+    """``log(x * x)`` as ``2 * log(x)``: NaN where x < 0, and the row says so.
+
+    A cell finite on one side and NaN on the other was left out of the
+    comparison of drawn inputs, so the step read tested (Codex, #341).
+    """
+
+    @theorem
+    def log_of_a_square(x: Real) -> log(x * x) == 2 * log(x):  # noqa: F821
+        """False for a negative x, where the right side is NaN."""
+
+    @kernel
+    def logs(x: Arr[Fin[n], Real], out: Arr[Fin[n], Real]):  # noqa: F821
+        for i in out.dom:
+            out[i] = log(x[i] * x[i])
+
+    (row,) = rows(Schedule(logs).rewrite(logs.out, by=log_of_a_square))["rewrite"]
+    assert row.status.value == "refuted", row.provenance
+    assert "nan after" in row.provenance["reason"], row.provenance
+
+
+def test_facts_asked_through_short_lived_schedules_are_each_their_own() -> None:
+    """Rows are kept with the inputs they were made from, not by an id (Codex, #341)."""
+    base = Schedule(layer).rewrite(layer.out, by=conjugate_form)
+    for apart, status in ((True, "tested"), (False, "refuted"), (True, "tested")):
+        (condition,) = rows(base.example(**inputs(apart=apart)))["rewrite-condition"]
+        assert condition.status.value == status, (apart, condition.provenance)
+
+
+def test_a_condition_on_a_scalar_input_is_on_data() -> None:
+    """``a != 0`` for ``a: Real`` is tested on the inputs, not by isl (Codex, #341)."""
+
+    @kernel
+    def scaled(
+        x: Arr[Fin[n], Real],  # noqa: F821
+        a: Real,
+        out: Arr[Fin[n], Real],  # noqa: F821
+    ):
+        for i in out.dom:
+            out[i] = x[i] / a
+
+    base = Schedule(scaled).rewrite(scaled.out, by=through_the_reciprocal)
+    x = Arr.from_numpy(np.arange(4.0))
+    (condition,) = rows(base.example(x=x, a=2.0, out=Arr.zeros(4)))["rewrite-condition"]
+    assert condition.provenance["kind"] == "data"
+    assert (condition.status.value, condition.decided_by) == ("tested", "run")
+    (condition,) = rows(base.example(x=x, a=0.0, out=Arr.zeros(4)))["rewrite-condition"]
+    assert condition.status.value == "refuted", condition.provenance
+
+
+def test_rows_are_asked_again_when_the_example_inputs_change_in_place() -> None:
+    """The rows' cache reads what the inputs hold, not only which (Codex, #341)."""
+    given = inputs()
+    schedule = as_sumpy_computes().example(**given)
+    (condition,) = rows(schedule)["rewrite-condition"]
+    assert condition.status.value == "tested"
+    given["y"][2] = given["c"][1]
+    (condition,) = rows(schedule)["rewrite-condition"]
+    assert condition.status.value == "refuted", condition.provenance
+
+
+def test_index_conditions_under_different_sums_are_rows_of_their_own() -> None:
+    """``∀i. A(i)`` and ``∀j. B(j)`` stay apart: one's empty range proves nothing.
+
+    Merged, they read ``∀i, j. A(i) ∧ B(j)``, which isl shows true when either
+    range is empty (Codex, #341). The statement's own loops still merge.
+    """
+    from pymbolic.primitives import Comparison, Variable
+
+    from loopty.rewriting import Condition, Match, Rewritten, Step
+
+    def condition(claim, over):
+        return Condition("t", "h", claim, "index", over, "S0")
+
+    i, j, m, p, k = (Variable(name) for name in "ijmpk")
+    under_i = condition(Comparison(i, "<", 5), (("k", None), ("i", m)))
+    under_j = condition(Comparison(j, "<", 5), (("k", None), ("j", p)))
+    on_k = condition(Comparison(k, ">=", 0), (("k", None),))
+    match = Match(None, "S0", None, None, None, None, (), (), (under_i, under_j, on_k))
+    step = Step(None, None, None, (match,))
+    rows_ = Rewritten("out", "out", "t", None, None, (step,)).conditions
+    assert [render(row.claim) for row in rows_] == ["i < 5", "j < 5", "k >= 0"]
+
+
+def test_a_disagreement_at_a_drawn_input_fails_the_compared_row() -> None:
+    """Example inputs that happen to agree do not hide a draw that does not.
+
+    A disagreement at a drawn input that meets the theorems' conditions was a
+    note on a row that read tested; only the magnitude extremes are notes
+    (Codex, #341).
+    """
+
+    @theorem
+    def abs_is_itself(x: Real) -> abs(x) == x:  # noqa: F821
+        """False for a negative x."""
+
+    @kernel
+    def magnitudes(x: Arr[Fin[n], Real], out: Arr[Fin[n], Real]):  # noqa: F821
+        for i in out.dom:
+            out[i] = abs(x[i])
+
+    given = {"x": Arr.from_numpy(np.arange(1.0, 5.0)), "out": Arr.zeros(4)}
+    schedule = Schedule(magnitudes).rewrite(magnitudes.out, by=abs_is_itself)
+    (compared,) = rows(schedule.example(**given))["rewrite-compared"]
+    assert compared.status.value == "refuted", compared.provenance
+    assert "at the inputs drawn with seed" in compared.provenance["reason"]
+
+
+def test_draws_that_break_the_theorems_condition_are_not_compared() -> None:
+    """``log(x * x) == 2 * log(x)`` where ``x > 0``: draws with x <= 0 say nothing.
+
+    The theorem says nothing where its condition fails, so a draw there is
+    no evidence either way (Codex, #341): with every draw outside it, the
+    row says why it is not tested.
+    """
+
+    @theorem
+    def log_of_a_square(x: Real, positive: x > 0) -> log(x * x) == 2 * log(x):  # noqa: F821
+        """True where x > 0."""
+
+    @kernel
+    def logs(x: Arr[Fin[n], Real], out: Arr[Fin[n], Real]):  # noqa: F821
+        for i in out.dom:
+            out[i] = log(x[i] * x[i])
+
+    (row,) = rows(Schedule(logs).rewrite(logs.out, by=log_of_a_square))["rewrite"]
+    assert row.status.value in ("tested", "assumed"), row.provenance
+    if row.status.value == "assumed":
+        reason = row.provenance["reason"]
+        assert "broke a condition the theorems need, x[i] > 0" in reason, reason
+
+
+def test_a_later_step_leaves_an_earlier_steps_compared_row_as_it_was() -> None:
+    """A rewrite compares the schedule it made, asked of a later one (Codex, #341)."""
+
+    @theorem
+    def wrong_form(x: Complex, alpha: Complex, nonzero: alpha != 0) -> (  # noqa: F821
+        x / alpha == x * alpha  # noqa: F821
+    ):
+        """False: what a later step should not refute the earlier row by."""
+
+    first = Schedule(layer).rewrite(layer.out, by=log_of_the_modulus)
+    first = first.example(**inputs())
+    later = first.rewrite(layer.out, by=wrong_form)
+    alone = rows(first)["rewrite-compared"][0]
+    earlier, wrong = rows(later)["rewrite-compared"]
+    assert alone.status.value == earlier.status.value == "tested", earlier.provenance
+    assert earlier.statement == alone.statement
+    assert wrong.status.value == "refuted"
+
+
 def test_without_examples_the_data_rows_say_what_they_need() -> None:
     found = rows(as_sumpy_computes())
     (condition,) = found["rewrite-condition"]
@@ -477,6 +666,30 @@ def kron_inputs(n: int = 4, seed: int = 1) -> dict:
         "u": Arr.from_numpy(rng.normal(size=(n, n))),
         "out": Arr.zeros((n, n)),
     }
+
+
+def test_keep_and_into_refuse_a_guarded_statement() -> None:
+    """A kept pass would run where the guard keeps the statement from (Codex, #341)."""
+
+    @kernel
+    def corner(
+        F: Arr[Fin[n], Fin[n], Real],  # noqa: F821
+        G: Arr[Fin[n], Fin[n], Real],  # noqa: F821
+        u: Arr[Fin[n], Fin[n], Real],  # noqa: F821
+        out: Arr[Fin[n], Fin[n], Real],  # noqa: F821
+    ):
+        for k, j in out.dom:
+            if k <= j:
+                out[k, j] = reduce_sum(
+                    F[k, b] * G[j, a] * u[b, a] for b in F.dom[k] for a in G.dom[j]
+                )
+
+    with pytest.raises(IllegalRewrite, match="runs only where k <= j"):
+        Schedule(corner).rewrite(corner.out, by=two_passes, keep=("v",))
+    with pytest.raises(IllegalRewrite, match="the program into= names runs at every"):
+        Schedule(corner).rewrite(corner.out, by=two_passes, into=kron_passes)
+    # without either, the rewrite stays inside the guarded statement
+    Schedule(corner).rewrite(corner.out, by=two_passes)
 
 
 def test_keep_stores_the_inner_sum_and_the_statement_reads_it() -> None:

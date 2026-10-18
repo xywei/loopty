@@ -349,6 +349,9 @@ class Condition:
     #: The statement as the source writes it, where the same claim is a row
     #: of more than one statement, and empty otherwise.
     statement: str = ""
+    #: The statement's guard where it reads data, which isl leaves out of the
+    #: domain: the condition is needed, and tested, only where it holds.
+    runs_where: str = ""
 
     @property
     def shown(self) -> str:
@@ -368,6 +371,8 @@ class Condition:
             text += " for " + " and ".join(
                 f"every {names.get(name, name)}" for name, _ in self.over
             )
+        if self.runs_where:
+            text += f" where {self.runs_where}"
         if self.statement:
             text += f", in {self.statement}"
         return text
@@ -836,6 +841,11 @@ def _conditions(
                 spelled=tuple(
                     zip(stmt.inames, stmt.spelled or stmt.inames, strict=False)
                 ),
+                runs_where=(
+                    render(_spelled_in(stmt.guard, stmt))
+                    if stmt.unnarrowed and stmt.guard is not None
+                    else ""
+                ),
             )
         )
     return tuple(out)
@@ -848,11 +858,23 @@ def _conjunction(parts: Sequence[Any]) -> Any:
 
 
 def _condition_kind(claim: Any, term: Term) -> str:
-    """``index``, ``table`` or ``data``: who settles a condition."""
+    """``index``, ``table`` or ``data``: who settles a condition.
+
+    A condition on a scalar input of numbers, ``a != 0`` for ``a: Real``,
+    is on data, as one on an array is: isl would read ``a`` as an integer
+    parameter (Codex, #341).
+    """
+    from loopty.summands import _number_sort
     from loopty.unfolding import _read
 
     arrays = _read(claim)
     if not arrays:
+        named = _names(claim)
+        if any(
+            name in named and _number_sort(typ) is not None
+            for name, typ in term.params
+        ):
+            return "data"
         return "index"
     tables = {name for name, _ in term.tables}
     if arrays <= tables:
@@ -936,7 +958,7 @@ class Rewritten:
 
         found: dict[Any, Condition] = {}
         needs: dict[Any, list[str]] = {}
-        index: dict[str, list[Any]] = {}
+        index: dict[Any, list[Any]] = {}
         for match in self.matches:
             for condition in match.conditions:
                 key = (
@@ -946,27 +968,29 @@ class Rewritten:
                     structural_key(condition.over),
                 )
                 if key not in found and condition.kind == "index":
-                    # a statement's conditions on indices are one row, as isl
-                    # decides them in one question
-                    index.setdefault(condition.stmt, []).append(key)
+                    # a statement's conditions on indices under the same sums
+                    # are one row, as isl decides them in one question; under
+                    # other sums they are rows of their own, since one sum's
+                    # empty range must not make another's condition vacuous
+                    # (Codex, #341)
+                    index.setdefault(_index_group(condition), []).append(key)
                 found.setdefault(key, condition)
                 names = needs.setdefault(key, [])
                 if condition.theorem not in names:
                     names.append(condition.theorem)
         out = []
-        merged: set[str] = set()
+        merged: set[Any] = set()
         for key, condition in found.items():
             if condition.kind != "index":
                 out.append(dataclasses.replace(condition, theorem=_listed(needs[key])))
                 continue
-            if condition.stmt in merged:
+            group = _index_group(condition)
+            if group in merged:
                 continue
-            merged.add(condition.stmt)
-            parts = [found[part] for part in index[condition.stmt]]
+            merged.add(group)
+            parts = [found[part] for part in index[group]]
             theorems = list(
-                dict.fromkeys(
-                    name for part in index[condition.stmt] for name in needs[part]
-                )
+                dict.fromkeys(name for part in index[group] for name in needs[part])
             )
             over = tuple(
                 dict.fromkeys(
@@ -1000,6 +1024,18 @@ class Rewritten:
                 )
             out.append(condition)
         return out
+
+
+def _index_group(condition: Condition) -> Any:
+    """Which index conditions share a row: one statement's, under the same sums.
+
+    The statement's own loops (no bound of their own) do not part them; the
+    sums a condition is under, each with its range, do.
+    """
+    from loopty.hypotheses import structural_key
+
+    sums = tuple((name, bound) for name, bound in condition.over if bound is not None)
+    return condition.stmt, structural_key(sums)
 
 
 def _listed(names: Sequence[str]) -> str:
@@ -1161,6 +1197,13 @@ class MathRewrite(RewriteTerm):
             claim.hypotheses.append(theorem_term)
             try:
                 claim.hypotheses.extend(_domain_conditions(old))
+                if old.unnarrowed and old.guard is not None:
+                    # the statement runs only where its guard holds, which its
+                    # domain does not say, and its conditions are tested there
+                    # (failing_point): T == T' is claimed there too (Codex, #341)
+                    from loopty.math import as_stated
+
+                    claim.hypotheses.append(as_stated(old.guard))
                 for condition in _stmt_conditions(step, stmt_id):
                     claim.hypotheses.append(_quantified(condition, old))
                 goal = Comparison(
@@ -1253,18 +1296,65 @@ def _drawn_equal(
 ) -> tuple[bool | None, str]:
     """``T == T'`` at drawn inputs, on the interpreter: agreed, differed or unknown."""
     return _drawn_terms(
-        step.before, step.after, rewritten.array, f"{step.identity.name}", seed
+        step.before,
+        step.after,
+        rewritten.array,
+        f"{step.identity.name}",
+        seed,
+        _data_conditions(match.conditions for match in step.matches),
     )
 
 
+def _data_conditions(groups: Any) -> tuple[Condition, ...]:
+    """The conditions on data among ``groups``, each once: what a draw has to meet."""
+    from loopty.hypotheses import structural_key
+
+    out: dict[Any, Condition] = {}
+    for conditions in groups:
+        for condition in conditions:
+            if condition.kind == "index":
+                continue
+            key = (
+                condition.stmt,
+                structural_key(condition.claim),
+                structural_key(condition.over),
+            )
+            out.setdefault(key, condition)
+    return tuple(out.values())
+
+
+def _meets(conditions: Sequence[Condition], term: Term, arguments: Any) -> bool:
+    """Whether a draw meets every condition at every point it is over.
+
+    With the term's constant tables beside the draw, which a condition on a
+    table reads, as :func:`condition_fact` gives them (Codex, #341).
+    """
+    given = {**dict(arguments), **dict(term.tables)}
+    for condition in conditions:
+        try:
+            held, _detail = failing_point(condition, term, given)
+        except Exception:  # noqa: BLE001 - a draw that cannot be shown to meet it
+            return False
+        if not held:
+            return False
+    return True
+
+
 def _drawn_terms(
-    before: Term, after: Term, array: str, what: str, seed: int = 0
+    before: Term,
+    after: Term,
+    array: str,
+    what: str,
+    seed: int = 0,
+    conditions: Sequence[Condition] = (),
 ) -> tuple[bool | None, str]:
     """``before`` and ``after`` at drawn inputs agree in ``array``, on the interpreter.
 
     ``True`` when every draw agrees at the array's class, ``False`` with the
     first cell that differs, and ``None`` with why when nothing could be
-    compared. ``what`` names the step in the words.
+    compared. ``what`` names the step in the words. A draw that breaks one
+    of ``conditions``, the theorems' conditions on data, is not compared:
+    the theorems say nothing there (Codex, #341).
     """
     from loopty.faithful import _NoSample, sample_arguments
     from loopty.interpret import InterpretError, interpret
@@ -1274,11 +1364,15 @@ def _drawn_terms(
     if exactness == "exact":
         exactness = "approx"
     compared = 0
+    outside = 0
     for draw in range(3):
         try:
             arguments, _sizes = sample_arguments(before, seed=seed + draw)
         except _NoSample as exc:
             return None, f"no input could be drawn: {exc}"
+        if conditions and not _meets(conditions, before, arguments):
+            outside += 1
+            continue
         try:
             first = interpret(before, _copied(arguments), limit=2_000_000)
             second = interpret(after, _copied(arguments), limit=2_000_000)
@@ -1289,16 +1383,27 @@ def _drawn_terms(
             continue
         want, got = np.asarray(want), np.asarray(got)
         with np.errstate(all="ignore"):
-            finite = np.isfinite(want) & np.isfinite(got)
-            differs = np.asarray(disagreement(got, want, exactness)) & finite
+            # a cell where one side is finite and the other is not is a
+            # disagreement (Codex, #341); one where both left the float range
+            # is not compared, since a draw may break the theorem's conditions
+            either = np.isfinite(want) | np.isfinite(got)
+            differs = np.asarray(disagreement(got, want, exactness)) & either
         if differs.any():
             cell = tuple(int(k) for k in np.argwhere(differs)[0])
             return False, (
                 f"at the inputs drawn with seed {seed + draw}, {array}{list(cell)} is "
                 f"{want[cell]} before {what} and {got[cell]} after"
             )
-        compared += 1
+        if either.any():
+            # a draw where both sides left the float range everywhere compared
+            # nothing, and is no evidence (Codex, #341)
+            compared += 1
     if not compared:
+        if outside:
+            return None, (
+                f"no drawn input was compared: {outside} broke a condition the "
+                f"theorems need, {_listed([c.shown for c in conditions])}"
+            )
         return None, "no drawn input was compared"
     return True, f"{compared} drawn inputs agree at {exactness}"
 
@@ -1447,6 +1552,21 @@ def _sizes_of(term: Term, arguments: Mapping[str, Any]) -> dict[str, int]:
     return sizes_of(term, arguments)
 
 
+def _fingerprint(arguments: Mapping[str, Any]) -> tuple:
+    """What the arguments hold, as a key: each array's dtype, shape and bytes hashed."""
+    import hashlib
+
+    out = []
+    for name, value in sorted(_values(arguments).items()):
+        array = np.asarray(value)
+        if array.dtype == object:
+            out.append((name, repr(value)))
+            continue
+        digest = hashlib.sha1(np.ascontiguousarray(array).tobytes()).hexdigest()
+        out.append((name, array.dtype.str, array.shape, digest))
+    return tuple(out)
+
+
 def _values(arguments: Mapping[str, Any]) -> dict[str, Any]:
     """The arguments as numpy arrays and numbers, as lanky evaluates a claim at them."""
     out: dict[str, Any] = {}
@@ -1540,11 +1660,28 @@ def failing_point(
                 return found
         return None
 
+    guard = stmt.guard if stmt.unnarrowed else None
     for point in _statement_points(stmt, sizes):
-        found = walk({**values, **point}, sums)
+        env = {**values, **point}
+        if guard is not None and not _runs_at(guard, env):
+            # the statement does not run here, so it needs nothing here (Codex,
+            # #341): a guard that reads data, isl leaves out of the domain
+            continue
+        found = walk(env, sums)
         if found is not None:
             return found
     return True, f"{count} points"
+
+
+def _runs_at(guard: Any, env: Mapping[str, Any]) -> bool:
+    """Whether a statement's guard holds at a point; ``True`` where it cannot tell."""
+    from lanky.terms import evaluate
+
+    try:
+        held = evaluate(guard, env)
+    except Exception:  # noqa: BLE001 - a point that cannot be ruled out is tested
+        return True
+    return held is True or (isinstance(held, np.bool_) and bool(held))
 
 
 def condition_fact(
@@ -1587,8 +1724,10 @@ def condition_fact(
         decided, why = _decided_by_isl(condition, term)
         if decided is True:
             return fact(Status.DECIDED, "isl", statement, detail=why)
-        if decided is False:
+        if decided is False and not term.stmt(condition.stmt).unnarrowed:
             return fact(Status.REFUTED, "isl", statement, reason=why, detail=why)
+        # isl's point may be one a guard that reads data keeps the statement
+        # from running at: the condition is tested on the inputs instead
         if arguments is None:
             return fact(Status.ASSUMED, None, statement, reason=why)
     if condition.kind == "table":
@@ -1758,7 +1897,6 @@ def _first_disagreement(
 
 def compared_fact(
     rows: Any,
-    schedule: Any,
     arguments: Mapping[str, Any] | None,
     identifier: str,
     owner: str,
@@ -1766,6 +1904,11 @@ def compared_fact(
     name: str,
 ) -> Fact:
     """The compiled rewritten schedule against the native kernel, measured.
+
+    The schedule compiled is ``rows.schedule``, the one the step made, and
+    not a later schedule the facts are asked of: a step after it, failing or
+    undoing it, leaves this row as it was. Only the example inputs come from
+    the schedule asked.
 
     On the example inputs, where a disagreement fails the row, and with the
     inputs scaled to the magnitude extremes of :data:`EXTREMES`, where a
@@ -1845,6 +1988,7 @@ def compared_fact(
     notes: list[str] = []
     written = set(after.lowering.results)
     drawn = 0
+    conditions = _data_conditions(match.conditions for match in rows.rewritten.matches)
     for seed in range(DRAWS):
         try:
             from loopty.faithful import _NoSample, sample_arguments
@@ -1852,6 +1996,9 @@ def compared_fact(
             arguments_d, _sizes = sample_arguments(rows.rewritten.before, seed=seed)
         except _NoSample:
             break
+        if conditions and not _meets(conditions, rows.rewritten.before, arguments_d):
+            # the theorems say nothing where their conditions fail
+            continue
         try:
             got_d, want_d = _runs(kernel, after, arguments_d)
         except Exception:  # noqa: BLE001 - a draw the native body refuses is skipped
@@ -1861,7 +2008,9 @@ def compared_fact(
             exactness = exactness_of_output(after.term, after, output)
             cell = _first_disagreement(got_d[output], want_d[output], exactness)
             if cell is not None:
-                notes.append(
+                # a draw that meets the conditions is as good as the example
+                # inputs: a disagreement there fails the row (Codex, #341)
+                failures.append(
                     f"at the inputs drawn with seed {seed}, {output}{list(cell)} is "
                     f"{got_d[output][cell]} compiled and {want_d[output][cell]} "
                     f"natively, beyond {exactness}"
@@ -1870,6 +2019,8 @@ def compared_fact(
         words = words.replace(
             "on its example inputs", f"on its example inputs and {drawn} drawn ones"
         )
+    if failures:
+        return fact(Status.REFUTED, words, outputs=outputs, reason="; ".join(failures))
     for factor in EXTREMES:
         scaled = _scaled(arguments, factor, written)
         try:
@@ -1936,7 +2087,7 @@ class Rows:
         self.where = where
         self.identifier = identifier
         self.compared_id = compared_id
-        self._made: dict[int, tuple[Fact, ...]] = {}
+        self._made: dict[Any, tuple[Any, tuple[Fact, ...]]] = {}
 
     def magnitude(self, arguments: Mapping[str, Any], cell: tuple[int, ...]) -> str:
         """`` (|c[t] - y[s]| about 1e-170)``: a data condition's operand there."""
@@ -1970,11 +2121,16 @@ class Rows:
             if not hasattr(self, "_file"):
                 self._file = _file_examples(self.kernel)
             arguments = self._file
-        key = id(arguments) if arguments is not None else 0
-        made = self._made.get(key)
-        if made is None:
-            made = self._make(schedule, arguments)
-            self._made[key] = made
+        key = (id(arguments), _fingerprint(arguments)) if arguments is not None else 0
+        cached = self._made.get(key)
+        if cached is not None and cached[0] is arguments:
+            return cached[1]
+        made = self._make(schedule, arguments)
+        # the arguments are kept with their rows, so that their id is not
+        # reused by another schedule's while the entry lives, and what they
+        # hold is in the key, so that inputs changed in place are asked
+        # again (Codex, #341)
+        self._made[key] = (arguments, made)
         return made
 
     def _make(
@@ -2033,7 +2189,6 @@ class Rows:
         )
         compared = compared_fact(
             self,
-            schedule,
             arguments,
             self.compared_id,
             owner,
@@ -2689,10 +2844,33 @@ def structural(
     shown: str,
     at: str = "",
 ) -> Rewritten:
-    """The rewrite with its nested sums stored (``keep=``), or into a program."""
+    """The rewrite with its nested sums stored (``keep=``), or into a program.
+
+    Raises:
+        IllegalRewrite: If both are given, or a rewritten statement runs
+            under a guard: the passes run at every instance, so a kept pass
+            would compute, and read, where the guard keeps the statement
+            from, and the claim Lean is asked would say more than the kernel
+            (Codex, #341).
+    """
     if keep is not None and into is not None:
         raise IllegalRewrite(
             f"{text}: keep= derives the passes and into= names them; give one"
+        )
+    for stmt_id in dict.fromkeys(match.stmt for match in rewritten.matches):
+        stmt = rewritten.before.stmt(stmt_id)
+        if stmt.guard is None:
+            continue
+        given, passes = (
+            ("keep=", "the passes keep= derives run")
+            if keep is not None
+            else ("into=", "the program into= names runs")
+        )
+        raise IllegalRewrite(
+            f"{text}: {stmt.text or stmt.id} runs only where "
+            f"{render(_spelled_in(stmt.guard, stmt))}, and {passes} at every "
+            "instance, computing what the guard keeps the statement from; rewrite "
+            f"{shown} without {given}"
         )
     if into is not None:
         return into_term(rewritten, into, source, text)
@@ -2776,7 +2954,11 @@ def structural_facts(
     """
     proof, assignment, detail_words = structural_proof(rewritten, owner, identifier)
     agreed, detail = _drawn_terms(
-        rewritten.before, rewritten.after, rewritten.array, _short_text(rewritten)
+        rewritten.before,
+        rewritten.after,
+        rewritten.array,
+        _short_text(rewritten),
+        conditions=_data_conditions(match.conditions for match in rewritten.matches),
     )
     status = (
         Status.TESTED
