@@ -641,8 +641,12 @@ def _concluded(
     with its tables left as cells, has to have the left side of an equation
     the theorem concludes, written out, with one binding of the theorem's
     variables for all of them: ``element_mass``'s ``FE`` is ``FE0``, its
-    ``W`` is ``W3`` and its ``J`` the cell's Jacobian. ``None`` where it
-    does not.
+    ``W`` is ``W3`` and its ``J`` the cell's Jacobian. The equation's right
+    side at that binding has to be the conjunct's right side, as a term or
+    at drawn values of what both read (:func:`_one_value`):
+    ``abs(J) * 2 / 24`` is ``abs(jacobian(x)) / 12``, while a theorem that
+    concludes something else of what the kernel stores concludes nothing of
+    this claim. ``None`` where it does not.
     """
     from lanky.prelude import FnType
 
@@ -674,15 +678,90 @@ def _concluded(
         except _Unstated:
             return None
         value = _flat(value)
+        if _cells(conjunct.right, written):
+            # a right side that reads what the kernel writes is not about its inputs
+            return None
         for equation in equations:
             trial = dict(sigma)
             matcher = _Matcher(functions, scalars)
-            if matcher.match(_flat(equation.left), value, trial, {}):
+            if not matcher.match(_flat(equation.left), value, trial, {}):
+                continue
+            concluded = _concluded_side(equation.right, trial, variables, functions)
+            if _one_value(concluded, conjunct.right):
                 sigma = trial
                 break
         else:
             return None
     return sigma
+
+
+def _concluded_side(
+    side: Any, sigma: dict[str, Any], variables: dict[str, Any], functions: set[str]
+) -> Any:
+    """A side of a theorem's equation at ``sigma``; ``None`` if a variable is free."""
+    from lanky.terms import free_variables
+
+    from loopty.unfolding import _instantiate
+
+    if (set(variables) - set(sigma)) & set(free_variables(side)):
+        return None
+    bound = {
+        name: (Var(value) if isinstance(value, str) else value)
+        for name, value in sigma.items()
+    }
+    return _instantiate(side, bound, functions)
+
+
+#: How many draws tell two values of the inputs apart.
+_DRAWS = 3
+
+
+def _one_value(concluded: Any, claimed: Any) -> bool:
+    """Whether a theorem's right side at its binding is the claim's: terms, or draws.
+
+    Each cell at a point with a value, ``x[2, 1]``, and each free name is
+    drawn at random, the same in both, and both sides are evaluated; they
+    have to agree to rounding at every draw. A side with a cell at a point
+    with no value, or one that cannot be evaluated, is not shown to be the
+    other, and ``False`` is returned.
+    """
+    from lanky.terms import evaluate, free_variables
+
+    from loopty.hypotheses import _same
+
+    if concluded is None:
+        return False
+    concluded, claimed = _flat(concluded), _flat(claimed)
+    if _same(concluded, claimed):
+        return True
+    names: dict[str, Var] = {}
+
+    def atoms(node: Any) -> Any:
+        if isinstance(node, prim.Subscript) and isinstance(
+            node.aggregate, prim.Variable
+        ):
+            index = node.index if isinstance(node.index, tuple) else (node.index,)
+            if any(_concrete(item) is None for item in index):
+                raise _Unstated(f"{render(node)} is no cell at a point with a value")
+            return names.setdefault(render(node), Var(f"_cell_{len(names)}"))
+        if isinstance(node, prim.ExpressionNode):
+            return type(node)(*(atoms(arg) for arg in init_args(node)))
+        if isinstance(node, tuple):
+            return tuple(atoms(item) for item in node)
+        return node
+
+    try:
+        left, right = atoms(concluded), atoms(claimed)
+        free = sorted(set(free_variables(left)) | set(free_variables(right)))
+        rng = np.random.default_rng(20261018)
+        for _ in range(_DRAWS):
+            context = {name: float(rng.uniform(0.5, 2.0)) for name in free}
+            a, b = complex(evaluate(left, context)), complex(evaluate(right, context))
+            if not abs(a - b) <= 1e-12 * (abs(a) + abs(b) + 1e-300):
+                return False
+    except Exception:  # noqa: BLE001 - what cannot be evaluated is not shown equal
+        return False
+    return True
 
 
 def cited_over_the_reals(

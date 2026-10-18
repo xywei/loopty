@@ -320,12 +320,21 @@ def sixth_rounded(x: Arr[Fin[3], Real], y: Arr[Fin[1], Real]) -> (  # noqa: F821
     y[0] = reduce_sum(W11[q] * x[q] for q in W11.dom)
 
 
+@kernel(uses=[_sixth_of_the_sum])
+def sixth_claimed_otherwise(x: Arr[Fin[3], Real], y: Arr[Fin[1], Real]) -> (  # noqa: F821
+    y[0] == (x[0] + x[1] + x[2]) / 6 * (1 + 1e-8)  # noqa: F821
+):
+    """The same sum, claimed a sixth of it give or take 1e-8: true at approx only."""
+    y[0] = reduce_sum(W3[q] * x[q] for q in W3.dom)
+
+
 def example_inputs() -> dict:
     rng = np.random.default_rng(6)
     x = Arr.from_numpy(rng.normal(size=3))
     return {
         "sixth": {"x": x, "y": Arr.zeros(1)},
         "sixth_rounded": {"x": x, "y": Arr.zeros(1)},
+        "sixth_claimed_otherwise": {"x": x, "y": Arr.zeros(1)},
     }
 
 
@@ -343,6 +352,28 @@ def test_a_postcondition_by_the_theorem_it_cites_under_the_tables_condition() ->
     assert _sixth_of_the_sum.fact_id in post.rests_on
     obligation = post.term.lean_obligation()
     assert not getattr(obligation, "declined", None), obligation
+
+
+def test_a_theorem_that_concludes_another_right_side_is_not_cited_for_it() -> None:
+    """Its left side is what the kernel stores, its right side not the claim's.
+
+    Codex on #348: ``_sixth_of_the_sum`` concludes ``(x[0] + x[1] + x[2]) / 6`` of what
+    ``sixth_claimed_otherwise`` stores, which claims that times ``1 + 1e-8``:
+    the same to the approx tolerance, which the runs test, and not over the
+    reals. Matched by its left side alone, the row read "by
+    _sixth_of_the_sum" and rested on the theorem and its condition on the
+    tables; the claim is now the kernel's own, tested on the runs.
+    """
+    facts = {
+        fact.kind: fact
+        for fact in sixth_claimed_otherwise.facts()
+        if fact.kind != "in-bounds"
+    }
+    post = facts["postcondition"]
+    assert post.status.value == "tested", post.provenance
+    assert "_sixth_of_the_sum" not in post.statement
+    assert _sixth_of_the_sum.fact_id not in post.rests_on
+    assert "rewrite-condition" not in facts
 
 
 def test_weights_off_beyond_their_digits_refute_the_condition() -> None:

@@ -199,6 +199,17 @@ All notable changes to loopty are recorded here. The format follows
 
 ### Fixed
 
+- **A postcondition is credited to a theorem the kernel cites only where the
+  theorem concludes it** (Codex on #347 and #348). The theorem's equation was
+  matched by its left side alone, against what the kernel stores, so a
+  postcondition with another right side read `..., by <theorem>` and rested
+  on the theorem and its conditions on the tables. The right side at the same
+  binding now has to be the postcondition's too, as a term or at drawn values
+  of what both read: `element_mass`'s `abs(J) * 2 / 24` is `mass_ffc`'s
+  `abs(jacobian(x)) / 12`, and a claim of a sixth of the sum times `1 +
+  1e-8`, true only to the approx tolerance, is the kernel's own claim,
+  tested on the runs.
+
 - **The transcripts' check passes on GitHub's runners and on the pool
   alike.** The six lines #341 elided as a stopgap, the measured differences
   of the hexahedra runs and the single layer's compared row, are back, in
