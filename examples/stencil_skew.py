@@ -131,7 +131,7 @@ def example_inputs() -> dict:
 
 def main() -> int:
     """Run the demo: the rejection with its witness, then the skewed run."""
-    from loopty.executor import LoopyExecutor
+    from loopty.executor import LoopyExecutor, differences
 
     u = initial()
     jacobi(u)
@@ -157,12 +157,8 @@ def main() -> int:
 
     print()
     fact = LoopyExecutor().differential(jacobi, schedule, {"u": initial()})
-    for name, detail in fact.provenance["outputs"].items():
-        print(
-            f"  {name}: difference {detail['difference']:.3g} within "
-            f"{detail['tolerance']:.3g} ({detail['exactness']}) -> "
-            f"{fact.status.value}"
-        )
+    for line in differences(fact):
+        print(f"  {line}")
     agrees = np.allclose(u.numpy(), reference(spike()))
     print(f"  the native run matches the hand-written sweep: {agrees}")
     return 0 if agrees and fact.status.value == "tested" else 1

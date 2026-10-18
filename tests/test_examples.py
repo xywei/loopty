@@ -1240,7 +1240,8 @@ def test_the_hexahedra_demo_refuses_the_deeper_fusion_and_keeps_the_windows() ->
     assert result.returncode == 0, result.stdout + result.stderr
     out = result.stdout
     assert (
-        "the dense kernels and the passes are the dense Kronecker operators: True"
+        "the dense kernels and the passes are the dense Kronecker operators, "
+        "to 1e-13 of the largest value: True"
     ) in out
     assert "the divergence, derived the same way: Schedule(weak_div" in out
     # each pass's statement by its text and line, at the names its loops have

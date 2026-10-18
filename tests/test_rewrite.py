@@ -348,9 +348,12 @@ def test_the_compared_row_is_measured_and_notes_the_extremes() -> None:
     found = rows(as_sumpy_computes().example(**inputs()))
     (compared,) = found["rewrite-compared"]
     assert compared.status.value == "tested", compared.provenance
+    # in words every machine prints alike: the figure, whose last digits are
+    # the machine's, is the provenance's
     assert compared.statement.startswith(
         "the compiled layer after rewrite(out, ...) agrees with the native layer "
-        "in out at approx, within 1e-06 of each value (measured "
+        "in out at approx, within 1e-06 of each value (measured at roundoff), "
+        "on its example inputs"
     )
     assert (
         "on its example inputs and 3 drawn ones; note: with the inputs scaled by "

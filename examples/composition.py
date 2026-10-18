@@ -108,7 +108,7 @@ def example_inputs() -> dict:
 
 def main() -> int:
     """Run the program natively, then show its term, its kernel and its run."""
-    from loopty.executor import LoopyExecutor, emit_code
+    from loopty.executor import LoopyExecutor, differences, emit_code
 
     u = velocity()
     rhs = Arr.zeros(N)
@@ -132,12 +132,8 @@ def main() -> int:
 
     inputs = example_inputs()["burgers_rhs"]
     fact = LoopyExecutor().differential(burgers_rhs, Schedule(burgers_rhs), inputs)
-    for name, detail in fact.provenance["outputs"].items():
-        print(
-            f"  {name}: difference {detail['difference']:.3g} within "
-            f"{detail['tolerance']:.3g} ({detail['exactness']}) -> "
-            f"{fact.status.value}"
-        )
+    for line in differences(fact):
+        print(f"  {line}")
     return 0 if native and fact.status.value == "tested" else 1
 
 

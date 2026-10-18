@@ -296,7 +296,7 @@ def benchmark(nt: int = 128, nx: int = 8192, repeats: int = 5) -> int:
 
 def main() -> int:
     """Run the demo: each rejection with its witness, and each accepted run."""
-    from loopty.executor import LoopyExecutor
+    from loopty.executor import LoopyExecutor, differences
 
     data = initial()
     pressure0 = data["pressure"].numpy().copy()
@@ -332,12 +332,8 @@ def main() -> int:
 
     print()
     fact = LoopyExecutor().differential(acoustic, schedule, initial())
-    for name, detail in fact.provenance["outputs"].items():
-        print(
-            f"  {name}: difference {detail['difference']:.3g} within "
-            f"{detail['tolerance']:.3g} ({detail['exactness']}) -> "
-            f"{fact.status.value}"
-        )
+    for line in differences(fact):
+        print(f"  {line}")
     want_pressure, want_velocity = reference(pressure0, velocity0)
     agrees = np.allclose(pressure, want_pressure) and np.allclose(
         data["velocity"].numpy(), want_velocity
@@ -359,12 +355,8 @@ def main() -> int:
         print(f"  {step.status.value:8} {step.decided_by or '-':4} {step.statement}")
     print()
     diamond_fact = LoopyExecutor().differential(acoustic, schedule, initial())
-    for name, detail in diamond_fact.provenance["outputs"].items():
-        print(
-            f"  {name}: difference {detail['difference']:.3g} within "
-            f"{detail['tolerance']:.3g} ({detail['exactness']}) -> "
-            f"{diamond_fact.status.value}"
-        )
+    for line in differences(diamond_fact):
+        print(f"  {line}")
 
     message = str(rejected_diamond_tiling())
     print()
@@ -379,12 +371,8 @@ def main() -> int:
         print(f"  {step.status.value:8} {step.decided_by or '-':4} {step.statement}")
     print()
     tiled_fact = LoopyExecutor().differential(acoustic, schedule, initial())
-    for name, detail in tiled_fact.provenance["outputs"].items():
-        print(
-            f"  {name}: difference {detail['difference']:.3g} within "
-            f"{detail['tolerance']:.3g} ({detail['exactness']}) -> "
-            f"{tiled_fact.status.value}"
-        )
+    for line in differences(tiled_fact):
+        print(f"  {line}")
     statuses = {fact.status.value, diamond_fact.status.value, tiled_fact.status.value}
     return 0 if agrees and statuses == {"tested"} else 1
 

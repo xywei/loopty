@@ -15,6 +15,11 @@ The tolerance is per element, and depends on nothing but that element:
 with ``b`` the expected output, ``eps_class`` from :data:`TOLERANCE` and
 ``FLOOR`` the absolute floor :data:`TOLERANCE_FLOOR`. How the faithfulness
 fact applies it, NaN included, is :func:`disagreement`.
+
+What a comparison measured is said in words every machine prints alike
+(:func:`described`): ``0``, ``at roundoff``, or only that it is within the
+allowance. The figure itself is in the fact's provenance, which ``--json``
+writes and ``loopty run --verbose`` prints.
 """
 
 from __future__ import annotations
@@ -28,8 +33,10 @@ from loopty.term import ArrType, Term
 from loopty.trace import EXACTNESS_ORDER, reductions_in
 
 __all__ = [
+    "ROUNDOFF",
     "TOLERANCE",
     "TOLERANCE_FLOOR",
+    "described",
     "disagreement",
     "element_class",
     "output_class",
@@ -48,6 +55,36 @@ TOLERANCE = {"exact": 0.0, "reassoc": 1e-12, "approx": 1e-6}
 #: parameter to tune away a failure: it sets the scale at which "near zero"
 #: starts, and 1.0 is the scale of a normalized quantity.
 TOLERANCE_FLOOR = 1.0
+
+#: A difference no larger than this, beside the magnitude it is measured
+#: against, is roundoff: within what the ``reassoc`` class allows, the room a
+#: different order of the same arithmetic needs.
+ROUNDOFF = TOLERANCE["reassoc"]
+
+
+def described(difference: float, scale: float = 1.0) -> str | None:
+    """A measured difference in words every machine prints alike, or ``None``.
+
+    ``"0"`` where the two runs agree exactly, and ``"at roundoff"`` where the
+    difference is within :data:`ROUNDOFF` of ``scale``, the magnitude it is
+    measured against. The digits of a roundoff difference are the machine's
+    and not the kernel's: numpy picks its summation loops by the processor,
+    and the BLAS its kernels, so one machine measures 7.22e-16 where another
+    measures 6.11e-16, and a transcript that printed the figure would hold on
+    one of them only. The bound is four orders of magnitude above roundoff,
+    so only a difference the math sets, which every machine measures alike
+    to its leading digits, comes near it.
+
+    Anything larger, and a difference that is not a number, is ``None``: the
+    caller says only that it is within the allowance, or prints the figure
+    of a disagreement, which is a claim about one cell. The figures are in
+    the fact's provenance either way.
+    """
+    if difference == 0:
+        return "0"
+    if difference <= ROUNDOFF * scale:
+        return "at roundoff"
+    return None
 
 
 def element_class(dtype: Any) -> str:

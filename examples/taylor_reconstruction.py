@@ -196,7 +196,7 @@ def rejected_interchange() -> Schedule:
 
 def main() -> int:
     """Reconstruct natively, compare with the derivatives, and run compiled."""
-    from loopty.executor import LoopyExecutor
+    from loopty.executor import LoopyExecutor, differences
     from loopty.schedule import IllegalCast
 
     data = example_inputs()
@@ -228,12 +228,8 @@ def main() -> int:
         print(f"interchange(b, a) -> IllegalCast: {exc}")
     print()
     fact = LoopyExecutor().differential(reconstruct, cpu, example_inputs())
-    for name, detail in fact.provenance["outputs"].items():
-        print(
-            f"  {name}: difference {detail['difference']:.3g} within "
-            f"{detail['tolerance']:.3g} ({detail['exactness']}) -> "
-            f"{fact.status.value}"
-        )
+    for line in differences(fact):
+        print(f"  {line}")
     exact = math.isclose(worst, 0.0, abs_tol=1e-9)
     return 0 if exact and fact.status.value == "tested" else 1
 

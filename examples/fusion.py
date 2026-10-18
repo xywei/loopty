@@ -147,7 +147,7 @@ def example_inputs() -> dict:
 
 def main() -> int:
     """Run the program natively, then the refused fusion and the two accepted."""
-    from loopty.executor import LoopyExecutor, emit_code
+    from loopty.executor import LoopyExecutor, differences, emit_code
 
     u = velocity()
     rhs = Arr.zeros(N)
@@ -179,12 +179,8 @@ def main() -> int:
         print()
         inputs = example_inputs()["burgers_rhs"]
         fact = LoopyExecutor().differential(burgers_rhs, schedule, inputs)
-        for name, detail in fact.provenance["outputs"].items():
-            print(
-                f"  {name}: difference {detail['difference']:.3g} within "
-                f"{detail['tolerance']:.3g} ({detail['exactness']}) -> "
-                f"{fact.status.value}"
-            )
+        for line in differences(fact):
+            print(f"  {line}")
         print()
         ok = ok and fact.status.value == "tested"
     return 0 if ok else 1
