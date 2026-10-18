@@ -1095,18 +1095,22 @@ def _named(term: Term) -> set[str]:
 
 
 def set_aside(before: Term, after: Term) -> Term:
-    """``after`` with the arrays ``before`` reads and it does not set aside.
+    """``after`` with the arrays it does not read, that ``before`` read, set aside.
 
     A math step can leave an argument unread: once the inverse mass has
     cancelled the mass, ``M`` is read nowhere. The schedule still takes it,
     as the kernel does, and the compiled code has no argument for it
-    (:attr:`loopty.term.Term.set_aside`).
+    (:attr:`loopty.term.Term.set_aside`). An array an earlier step set
+    aside stays aside through the next, which does not read it either.
     """
     named = _named(after)
+    before_named = _named(before)
     unread = tuple(
         name
         for name, typ in after.params
-        if isinstance(typ, ArrType) and name in _named(before) and name not in named
+        if isinstance(typ, ArrType)
+        and name not in named
+        and (name in before_named or name in before.set_aside)
     )
     if unread == after.set_aside:
         return after

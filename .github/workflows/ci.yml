@@ -115,15 +115,20 @@ jobs:
       # The floor can name the lanky release main waits for before it is on
       # PyPI (lanky>=0.5.0, which ships lanky.known). Until it is, there is no
       # released pair to test: the job says so in a notice and skips the
-      # rest, and any other failure to resolve still fails it.
+      # rest. Only that skips it: the probe resolves lanky alone, without its
+      # dependencies, and skips only where the resolver says no release of
+      # lanky meets the floor ("only lanky<=0.4.0 is available", "there is no
+      # version of lanky"). A release whose Python requirement does not fit
+      # fails the probe, and one whose dependencies conflict fails the
+      # install below.
       - name: Install loopty, with lanky from PyPI
         id: install
         run: |
           set -euo pipefail
           uv venv --python 3.13
           floor=$(.venv/bin/python -c 'import tomllib; print(next(d for d in tomllib.load(open("pyproject.toml", "rb"))["project"]["dependencies"] if d.startswith("lanky")))')
-          if ! resolved=$(uv pip install --no-sources --dry-run "${floor}" 2>&1); then
-            if grep -q "unsatisfiable" <<<"${resolved}"; then
+          if ! resolved=$(uv pip install --no-sources --no-deps --dry-run "${floor}" 2>&1); then
+            if grep -Eq "only lanky[^ ]* (is|are) available and you require lanky|there is no version of lanky" <<<"${resolved}"; then
               echo "::notice title=released lanky::${floor} is not on PyPI yet; this job tests the released pair once it is"
               echo "released=false" >> "${GITHUB_OUTPUT}"
               exit 0

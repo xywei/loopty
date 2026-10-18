@@ -177,10 +177,13 @@ All notable changes to loopty are recorded here. The format follows
   the class's allowance, the same for every cell:
 
   ```
-    grad: difference at roundoff within 1e-06 (approx) -> tested
+    grad: difference at roundoff within 1e-06 of each value (approx) -> tested
   ```
 
-  `loopty run --verbose` adds the figures, those of the cell that came
+  The allowance is relative, as the line says and the compared row of a
+  rewrite already said (`within 1e-06 of each value`): a cell of `1e9` is
+  allowed about `1e3` (Codex on #344 and #348). An `exact` output reads
+  `within 0 (exact)`. `loopty run --verbose` adds the figures, those of the cell that came
   closest to its allowance (`; measured 7.22e-16 where 1.01e-06 is
   allowed`), and the ledger `--json` writes has them as before. A
   disagreement prints the figures of its cell always:
@@ -195,7 +198,10 @@ All notable changes to loopty are recorded here. The format follows
   whose two facts `layer_potential.py`'s proof of `log_of_the_modulus`
   cites. It is not on PyPI yet: until it is, CI's released-lanky job says so
   in a notice and skips its steps, and the release PR relocks `uv.lock`
-  against the published lanky.
+  against the published lanky. Only a floor no release meets skips it: the
+  probe resolves lanky alone and skips where the resolver says no release
+  of lanky is at the floor, so a release whose Python requirement or
+  dependencies do not fit still fails the job (Codex on #344 and #348).
 
 ### Fixed
 
@@ -209,6 +215,12 @@ All notable changes to loopty are recorded here. The format follows
   `abs(jacobian(x)) / 12`, and a claim of a sixth of the sum times `1 +
   1e-8`, true only to the approx tolerance, is the kernel's own claim,
   tested on the runs.
+
+- An array a rewrite set aside, as `M` once the inverse mass cancels it,
+  stays aside through a later rewrite of the same schedule, which reads it
+  no more; the later step worked the arrays out again from the term before
+  it, which no longer names `M`, and its lowering took `M` for an argument
+  the code needs (Codex on #347 and #348).
 
 - **The transcripts' check passes on GitHub's runners and on the pool
   alike.** The six lines #341 elided as a stopgap, the measured differences

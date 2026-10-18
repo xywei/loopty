@@ -1029,7 +1029,8 @@ def test_a_run_of_a_schedule_of_a_schedule_is_compared_with_its_kernel(
     assert main(["run", str(path), "--json", str(out_path)]) == 0
     out = capsys.readouterr().out
     assert "ran double on the c target" not in out
-    assert out.count("  y: difference 0 within 1e-06 (approx) -> tested") == 2
+    line = "  y: difference 0 within 1e-06 of each value (approx) -> tested"
+    assert out.count(line) == 2
     facts = json.loads(out_path.read_text(encoding="utf-8"))
     steps = "[c].split(double.i, 2)"
     agreements = [
@@ -1512,7 +1513,7 @@ def test_a_run_says_roundoff_in_words_and_its_figures_under_verbose(
     (run,) = [fact for fact in facts if fact["kind"] == "agreement"]
     detail = run["provenance"]["outputs"]["y"]
     assert 0 < detail["difference"] < 1e-12 * detail["tolerance"] / 1e-6
-    line = "  y: difference at roundoff within 1e-06 (approx) -> tested"
+    line = "  y: difference at roundoff within 1e-06 of each value (approx) -> tested"
     figures = (
         f"; measured {detail['difference']:.3g} where "
         f"{detail['tolerance']:.3g} is allowed"

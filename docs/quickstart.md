@@ -82,7 +82,7 @@ device schedule: Schedule(spmv, target='c').on_groups(spmv.r).split(spmv.j, 32).
   decided  isl  the accumulation into spmv.y is reassociated by on_items(spmv.j.inner), so its result is compared at 'reassoc'
   reason: the parallel tag on spmv.j.inner sits inside a loop whose bound comes from an array (a ragged fiber), and loopy will not put a hardware axis in a domain with a data-dependent parameter. Parallelize an enclosing loop with a size known at launch instead, such as the rows of a CSR product
 
-  y: difference 0 within 1e-06 (approx) -> tested
+  y: difference 0 within 1e-06 of each value (approx) -> tested
 ```
 
 No loopy is involved in the first four lines: `@kernel` is inert, so the body
@@ -222,11 +222,11 @@ Read the `BY` column.
 ```console
 $ uv run loopty run examples/spmv.py
 spmv: Schedule(spmv, target='c').split(spmv.j, 2).realize(spmv.y, tree=True)
-  y: difference 0 within 1e-06 (approx) -> tested
+  y: difference 0 within 1e-06 of each value (approx) -> tested
 scan: Schedule(scan, target='c')
   off: difference 0 within 0 (exact) -> tested
 solve: Schedule(solve, target='c')
-  y: difference 0 within 1e-06 (approx) -> tested
+  y: difference 0 within 1e-06 of each value (approx) -> tested
   off: difference 0 within 0 (exact) -> tested
 
 STATUS   BY     WHERE        OWNER  STATEMENT
@@ -344,7 +344,7 @@ accepted: Schedule(jacobi, target='c').skew(jacobi.i, by=jacobi.t).tile(jacobi.t
   decided  isl  tile(jacobi.t, jacobi.i, 8, 8) renames the instances of jacobi one for one
   decided  isl  the order after tile(jacobi.t, jacobi.i, 8, 8) runs every dependence of jacobi forward
 
-  u: difference 0 within 1e-06 (approx) -> tested
+  u: difference 0 within 1e-06 of each value (approx) -> tested
   the native run matches the hand-written sweep: True
 ```
 
@@ -392,7 +392,7 @@ WITHOUT LEAN: 9 rows are not proved. To have Lean prove what it can: pip install
 ```console
 $ uv run loopty run examples/stencil_skew.py
 jacobi: Schedule(jacobi, target='c').skew(jacobi.i, by=jacobi.t).tile(jacobi.t, jacobi.i, 8, 8)
-  u: difference 0 within 1e-06 (approx) -> tested
+  u: difference 0 within 1e-06 of each value (approx) -> tested
 ...
 5 facts: 4 decided, 1 tested
 ```
@@ -425,7 +425,7 @@ schedule: Schedule(transpose, target='c').split(transpose.i, 2).interchange(tran
   decided  isl  interchange(transpose.i.outer, transpose.j, transpose.i.inner) renames the instances of transpose one for one
   decided  isl  the order after interchange(transpose.i.outer, transpose.j, transpose.i.inner) runs every dependence of transpose forward
 ...
-  b: difference 0 within 1e-06 (approx) -> tested
+  b: difference 0 within 1e-06 of each value (approx) -> tested
 ```
 
 `Fin[n*m]` normalizes to `Fin[n] x Fin[m]`, a layout is an isl map from index

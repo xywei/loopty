@@ -257,6 +257,19 @@ def test_the_mass_the_rewrite_cancels_is_set_aside() -> None:
     assert np.allclose(got["out"], want["out"].numpy(), rtol=1e-12, atol=1e-12)
 
 
+def test_an_array_set_aside_stays_aside_through_the_next_rewrite() -> None:
+    """A later rewrite reads ``M`` no more than the one that set it aside (Codex, #348).
+
+    The arrays set aside were worked out again from what the term before
+    the step read, which no longer names ``M``, and the next lowering took
+    ``M`` for an argument the code needs.
+    """
+    from loopty.rewriting import set_aside
+
+    term = derived().term
+    assert set_aside(term, term).set_aside == ("M",)
+
+
 def test_keep_of_tables_rows_each_theorem_and_reading_the_kept_table() -> None:
     found = rows(derived().example(**weak_inputs()))
     statements = [fact.statement for fact in found["rewrite"]]

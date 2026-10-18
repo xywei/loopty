@@ -492,19 +492,23 @@ def test_a_run_prints_the_same_line_on_every_machine() -> None:
         fact = agreement(term, Schedule(term), {"z": got}, {"z": want})
         return differences(fact, verbose=verbose)
 
-    assert lines(want.copy()) == ["z: difference 0 within 1e-06 (approx) -> tested"]
+    assert lines(want.copy()) == [
+        "z: difference 0 within 1e-06 of each value (approx) -> tested"
+    ]
     assert lines(want.copy(), verbose=True) == lines(want.copy())
     pool, runner = want.copy(), want.copy()
     pool[0] += 7.22e-16
     runner[1] += 6.11e-16
-    roundoff = "z: difference at roundoff within 1e-06 (approx) -> tested"
+    roundoff = "z: difference at roundoff within 1e-06 of each value (approx) -> tested"
     assert lines(pool) == lines(runner) == [roundoff]
     assert lines(pool, verbose=True) == [
         f"{roundoff}; measured 7.22e-16 where 1.01e-06 is allowed"
     ]
     larger = want.copy()
     larger[2] += 1e-7
-    assert lines(larger) == ["z: difference within 1e-06 (approx) -> tested"]
+    assert lines(larger) == [
+        "z: difference within 1e-06 of each value (approx) -> tested"
+    ]
     wrong = want.copy()
     wrong[2] += 0.5
     assert lines(wrong) == ["z: difference 0.5, allowed 3e-06 (approx) -> refuted"]
