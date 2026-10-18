@@ -2785,6 +2785,11 @@ def _fresh_name(stem: str, taken: set[str]) -> str:
 def keep_term(rewritten: Rewritten, keep: Any, text: str, at: str) -> Rewritten:
     """The rewrite with the sums its right side nests stored, ``keep=("r_pass", ...)``.
 
+    Where the right sides add sums of tables, and are no one nest of passes
+    or the theorems need conditions on data or tables, each name stores one
+    sum of tables, in the order the statement reads them, computed once
+    (:func:`_keep_sums`): ``keep=("D", "L")``. Otherwise:
+
     Each name stores one nested sum, innermost first, over the loops it reads
     (:func:`_kept_indices`), in a statement of its own that runs before the
     rewritten one; the next sum out reads the kept array where it summed.
@@ -2827,7 +2832,13 @@ def keep_term(rewritten: Rewritten, keep: Any, text: str, at: str) -> Rewritten:
     ((stmt_id, matches),) = by_stmt.items()
     stmt = term.stmt(stmt_id)
     original = rewritten.before.stmt(stmt_id)
-    if not _one_chain(stmt, matches, len(names)):
+    # sums of tables, each computed once, where the right sides are no one nest
+    # of passes, or where the theorems need conditions on data or tables: each
+    # theorem's step is then a row of its own, which Lean proves under them
+    conditional = any(
+        condition.kind != "index" for match in matches for condition in match.conditions
+    )
+    if conditional or not _one_chain(stmt, matches, len(names)):
         sums = _table_sums(rewritten, stmt_id)
         if sums is not None and len(sums) >= len(names):
             return _keep_sums(rewritten, stmt_id, names, sums, taken, text, at)
