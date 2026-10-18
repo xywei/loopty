@@ -24,6 +24,7 @@ from loopty.executor import (
     TOLERANCE_FLOOR,
     LoopyExecutor,
     agreement,
+    differences,
     emit_code,
     exactness_of_output,
 )
@@ -458,6 +459,55 @@ def test_a_reference_covering_every_output_is_accepted() -> None:
         reference={"y": 2 * x, "z": x + 1},
     )
     assert fact.status.value == "tested"
+
+
+def test_a_difference_is_said_in_words_every_machine_prints_alike() -> None:
+    """0, at roundoff, or none: the figure of roundoff is the processor's."""
+    from loopty.tolerance import ROUNDOFF, described
+
+    assert ROUNDOFF == TOLERANCE["reassoc"]
+    assert described(0.0) == "0"
+    assert described(7.22e-16) == described(6.11e-16) == "at roundoff"
+    assert described(2e-12, scale=3.0) == "at roundoff"
+    assert described(2e-12) is None
+    assert described(1e-9) is None
+    assert described(float("nan")) is None
+    assert described(float("inf")) is None
+
+
+def test_a_run_prints_the_same_line_on_every_machine() -> None:
+    """Two machines' roundoff, at two cells with two allowances, is one line.
+
+    The pool measured 7.22e-16 beside an allowance of 1.01e-06 for the
+    hexahedra demo's factored grad, and GitHub's runners 6.11e-16 beside
+    1.36e-06 (#341's stopgap elided the line). Each prints the class's
+    allowance and ``at roundoff``; ``verbose`` adds the figures. A
+    difference larger than roundoff is within the allowance, and a
+    disagreement prints the figures of its cell.
+    """
+    term = ht.axpy_term()
+    want = np.array([0.01, 0.36, 2.0, -1.0])
+
+    def lines(got: np.ndarray, verbose: bool = False) -> list[str]:
+        fact = agreement(term, Schedule(term), {"z": got}, {"z": want})
+        return differences(fact, verbose=verbose)
+
+    assert lines(want.copy()) == ["z: difference 0 within 1e-06 (approx) -> tested"]
+    assert lines(want.copy(), verbose=True) == lines(want.copy())
+    pool, runner = want.copy(), want.copy()
+    pool[0] += 7.22e-16
+    runner[1] += 6.11e-16
+    roundoff = "z: difference at roundoff within 1e-06 (approx) -> tested"
+    assert lines(pool) == lines(runner) == [roundoff]
+    assert lines(pool, verbose=True) == [
+        f"{roundoff}; measured 7.22e-16 where 1.01e-06 is allowed"
+    ]
+    larger = want.copy()
+    larger[2] += 1e-7
+    assert lines(larger) == ["z: difference within 1e-06 (approx) -> tested"]
+    wrong = want.copy()
+    wrong[2] += 0.5
+    assert lines(wrong) == ["z: difference 0.5, allowed 3e-06 (approx) -> refuted"]
 
 
 def test_a_refuted_agreement_names_the_outputs_that_disagree_as_its_reason() -> None:

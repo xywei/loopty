@@ -499,7 +499,7 @@ def main() -> int:
     And list the facts of sumpy's schedule for a GPU, ``on_a_gpu``, whose run
     is ``loopty run``'s, where pyopencl is installed.
     """
-    from loopty.executor import LoopyExecutor
+    from loopty.executor import LoopyExecutor, differences
     from loopty.schedule import IllegalCast
 
     data = example_inputs()["l2p"]
@@ -524,11 +524,8 @@ def main() -> int:
     for fact in contracted.facts():
         print(f"  {fact.status.value:8} {fact.decided_by or '-':4} {fact.statement}")
     run = LoopyExecutor().differential(l2p, contracted, example_inputs()["l2p"])
-    for name, detail in run.provenance["outputs"].items():
-        print(
-            f"  {name}: difference {detail['difference']:.3g} within "
-            f"{detail['tolerance']:.3g} ({detail['exactness']}) -> {run.status.value}"
-        )
+    for line in differences(run):
+        print(f"  {line}")
     print()
     windowed = on_a_device()
     # its own facts, the tag's, but whether C can build it: it cannot

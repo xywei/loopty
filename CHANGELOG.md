@@ -88,7 +88,46 @@ All notable changes to loopty are recorded here. The format follows
 - **lanky's `Complex` is an element type**, stored as `complex128`, as `Real`
   is stored as `float64`: `Arr[Fin[nt], Complex]`.
 
+### Changed
+
+- **A run says what it measured in words every machine prints alike.** The
+  digits of roundoff are the processor's: numpy picks its summation loops by
+  the processor, and the BLAS its kernels, so the pool measured `7.22e-16`
+  beside an allowance of `1.01e-06` for the hexahedra demo's factored
+  `grad`, where GitHub's runners measured `6.11e-16` beside `1.36e-06`, at
+  another cell. A run's line now says the difference as `0`, `at roundoff`
+  (within what the `reassoc` class allows, the room another order of the
+  same arithmetic needs), or only that it is within the allowance, beside
+  the class's allowance, the same for every cell:
+
+  ```
+    grad: difference at roundoff within 1e-06 (approx) -> tested
+  ```
+
+  `loopty run --verbose` adds the figures, those of the cell that came
+  closest to its allowance (`; measured 7.22e-16 where 1.01e-06 is
+  allowed`), and the ledger `--json` writes has them as before. A
+  disagreement prints the figures of its cell always:
+  `y: difference 7, allowed 2.2e-05 (approx) -> refuted`. A rewrite's
+  compared row says `(measured at roundoff)` where it said `(measured 8e-16
+  of the largest)`, with the figure in its provenance. The demos print a run
+  as `loopty run` does, through `loopty.executor.differences(fact)`, and
+  `hexahedra.py`'s first line states the bound it checks, `to 1e-13 of the
+  largest value`, in place of the difference the BLAS sets.
+
+- **lanky 0.5.0 is the floor**, the lanky release that ships `lanky.known`,
+  whose two facts `layer_potential.py`'s proof of `log_of_the_modulus`
+  cites. It is not on PyPI yet: until it is, CI's released-lanky job says so
+  in a notice and skips its steps, and the release PR relocks `uv.lock`
+  against the published lanky.
+
 ### Fixed
+
+- **The transcripts' check passes on GitHub's runners and on the pool
+  alike.** The six lines #341 elided as a stopgap, the measured differences
+  of the hexahedra runs and the single layer's compared row, are back, in
+  the words above, and `refresh_example_outputs.py --check` no longer
+  depends on the machine that made the documents.
 
 - **A cited theorem is restated from the text Lean proved of it.** A theorem
   applied to a kernel's postcondition, the theorem and identities of a

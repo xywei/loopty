@@ -406,7 +406,7 @@ def example_inputs() -> dict:
 
 def main() -> int:
     """Run natively on both meshes, then the refused and the accepted schedules."""
-    from loopty.executor import LoopyExecutor
+    from loopty.executor import LoopyExecutor, differences
     from loopty.obligations import prove
 
     coords, cells = pyop2_mesh()
@@ -461,12 +461,8 @@ def main() -> int:
     fact = LoopyExecutor().differential(
         mass_action, vectorized, inputs_on(square_mesh())
     )
-    for name, detail in fact.provenance["outputs"].items():
-        print(
-            f"  {name}: difference {detail['difference']:.3g} within "
-            f"{detail['tolerance']:.3g} ({detail['exactness']}) -> "
-            f"{fact.status.value}"
-        )
+    for line in differences(fact):
+        print(f"  {line}")
     ok = test and action and closed and rounded and post.status.value == "tested"
     return 0 if ok and not buildable and fact.status.value == "tested" else 1
 

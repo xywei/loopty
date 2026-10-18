@@ -118,7 +118,7 @@ def example_inputs() -> dict:
 
 def main() -> int:
     """Run natively on both layouts, then compiled on both, and compare."""
-    from loopty.executor import LoopyExecutor
+    from loopty.executor import LoopyExecutor, differences
 
     count = PARTICLES * (PARTICLES - 1) // 2
     print(f"{PARTICLES} particles, {count} pairs")
@@ -145,12 +145,8 @@ def main() -> int:
         print()
         print(f"schedule: {schedule!r}")
         fact = executor.differential(pairs, schedule, scene(storage=storage))
-        for name, detail in fact.provenance["outputs"].items():
-            print(
-                f"  {name}: difference {detail['difference']:.3g} within "
-                f"{detail['tolerance']:.3g} ({detail['exactness']}) -> "
-                f"{fact.status.value}"
-            )
+        for line in differences(fact):
+            print(f"  {line}")
         ok = ok and fact.status.value == "tested"
     return 0 if ok else 1
 

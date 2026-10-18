@@ -877,7 +877,7 @@ def test_a_claim_not_in_the_table_that_was_refuted_is_said_to_be(
     out_path = tmp_path / "ledger.json"
     assert main(["run", str(path), "--json", str(out_path)]) == 1
     out = capsys.readouterr().out
-    assert "  y: difference 7 within 2.2e-05 (approx) -> refuted" in out
+    assert "  y: difference 7, allowed 2.2e-05 (approx) -> refuted" in out
     assert "REFUTED" not in out
     facts = json.loads(out_path.read_text(encoding="utf-8"))
     assert {fact["status"] for fact in facts} == {"decided", "tested"}
@@ -1487,3 +1487,34 @@ def test_run_compiles_a_program_and_names_one_it_cannot(tmp_path, capsys) -> Non
     ]
     assert fact["status"] == "tested"
     assert set(fact["provenance"]["outputs"]) == {"z"}
+
+
+def test_a_run_says_roundoff_in_words_and_its_figures_under_verbose(
+    tmp_path, capsys
+) -> None:
+    """The digits of roundoff are the machine's, so a run prints none by default.
+
+    GitHub's runners measured 6.11e-16 where the pool measured 7.22e-16 for
+    one output of the hexahedra demo, at another cell with another
+    allowance, and a transcript that printed either held on one machine
+    only. The line says ``at roundoff`` and the class's allowance;
+    ``--verbose`` adds the figures, the ones the ledger ``--json`` writes.
+    """
+    native = "        y[...] = 2.0 * x\n"
+    assert native in FIXTURE
+    # the native body rounds once more than the compiled one does
+    body = FIXTURE.replace(native, "        y[...] = 2.0 * x * (1 + 1e-15)\n")
+    path = write_fixture(tmp_path, body)
+    out_path = tmp_path / "ledger.json"
+    assert main(["run", str(path), "--verbose", "--json", str(out_path)]) == 0
+    out = capsys.readouterr().out
+    facts = json.loads(out_path.read_text(encoding="utf-8"))
+    (run,) = [fact for fact in facts if fact["kind"] == "agreement"]
+    detail = run["provenance"]["outputs"]["y"]
+    assert 0 < detail["difference"] < 1e-12 * detail["tolerance"] / 1e-6
+    line = "  y: difference at roundoff within 1e-06 (approx) -> tested"
+    figures = (
+        f"; measured {detail['difference']:.3g} where "
+        f"{detail['tolerance']:.3g} is allowed"
+    )
+    assert line + figures in out.splitlines()

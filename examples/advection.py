@@ -813,7 +813,7 @@ def _settled(facts: list) -> str:
 
 def main() -> int:
     """Natively against grudge's dense operators, the fusion and window, the device."""
-    from loopty.executor import LoopyExecutor
+    from loopty.executor import LoopyExecutor, differences
     from loopty.obligations import prove
 
     _, mass = factors()
@@ -876,11 +876,8 @@ def main() -> int:
     for name, window in contracted.windows.items():
         print(f"  {name} kept in {window.placement}")
     kept = LoopyExecutor().differential(advection_rhs, contracted, inputs())
-    for name, detail in kept.provenance["outputs"].items():
-        print(
-            f"  {name}: difference {detail['difference']:.3g} within "
-            f"{detail['tolerance']:.3g} ({detail['exactness']}) -> {kept.status.value}"
-        )
+    for line in differences(kept):
+        print(f"  {line}")
     print()
 
     print("libParanumal's lift onto the face nodes, a face's nodes on the work items:")

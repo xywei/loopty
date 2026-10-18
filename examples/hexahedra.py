@@ -637,7 +637,7 @@ def _settled(facts: list) -> str:
 
 def main() -> int:
     """Natively against the dense operators, the fusions and windows, and the device."""
-    from loopty.executor import LoopyExecutor
+    from loopty.executor import LoopyExecutor, differences
     from loopty.obligations import prove
 
     data = inputs()
@@ -651,11 +651,12 @@ def main() -> int:
         np.abs(data["weak_grad"]["grad"].numpy() - grad).max(),
         np.abs(data["weak_div"]["div"].numpy() - div).max(),
     )
+    # the bound, not the difference, whose digits are the BLAS's and so the
+    # machine's
     native = bool(gap <= 1e-13 * scale)
     print(
         f"order {ORDER}, {ELEMENTS} hexahedra: the dense kernel and the passes are "
-        f"the dense Kronecker operators: {native} (largest difference "
-        f"{gap / scale:.0e} of the largest)"
+        f"the dense Kronecker operators, to 1e-13 of the largest value: {native}"
     )
     print()
 
@@ -669,11 +670,8 @@ def main() -> int:
         derived = derived and fact.status.value != "refuted"
         print(f"  {fact.status.value:8} {fact.decided_by or '-':11} {fact.statement}")
     kept = LoopyExecutor().differential(weak_grad, contracted, inputs()["weak_grad"])
-    for name, detail in kept.provenance["outputs"].items():
-        print(
-            f"  {name}: difference {detail['difference']:.3g} within "
-            f"{detail['tolerance']:.3g} ({detail['exactness']}) -> {kept.status.value}"
-        )
+    for line in differences(kept):
+        print(f"  {line}")
     print()
 
     try:
@@ -690,12 +688,8 @@ def main() -> int:
     by_hand = LoopyExecutor().differential(
         passes, passes_contracted, inputs()["passes"]
     )
-    for name, detail in by_hand.provenance["outputs"].items():
-        print(
-            f"  {name}: difference {detail['difference']:.3g} within "
-            f"{detail['tolerance']:.3g} ({detail['exactness']}) -> "
-            f"{by_hand.status.value}"
-        )
+    for line in differences(by_hand):
+        print(f"  {line}")
     print()
 
     print(

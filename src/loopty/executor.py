@@ -39,9 +39,16 @@ fact reads as well. Every element has to pass. The scale is deliberately local:
 an earlier version scaled one tolerance by the 1-norm of the whole expected
 output, which made a big output easy to agree with (a million ones bought a
 tolerance of 1.0) and tied the verdict for one cell to values it has nothing to
-do with. The ``difference ... within ...`` line a run prints reports the element
-that came closest to its own allowance, so the two numbers beside each other are
-a claim about one cell rather than about an average.
+do with. The figures a run records, its ``difference`` and ``tolerance``, are
+those of the element that came closest to its own allowance, so the two numbers
+beside each other are a claim about one cell rather than about an average.
+
+The line a run prints for each output (:func:`differences`) says the difference
+in words every machine prints alike, ``0`` or ``at roundoff``, beside the
+class's allowance: ``grad: difference at roundoff within 1e-06 (approx) ->
+tested``. The digits of roundoff are the processor's, and a transcript that
+printed them would hold on one machine only. ``loopty run --verbose`` adds the
+figures, and ``--json`` writes them; a disagreement prints them always.
 """
 
 from __future__ import annotations
@@ -64,6 +71,7 @@ from loopty.term import Term
 from loopty.tolerance import (
     TOLERANCE,
     TOLERANCE_FLOOR,
+    described,
     disagreement,
     output_class,
 )
@@ -76,6 +84,7 @@ __all__ = [
     "TOLERANCE",
     "LoopyExecutor",
     "agreement",
+    "differences",
     "emit_code",
     "exactness_of_output",
 ]
@@ -908,6 +917,53 @@ def agreement(
     if not ok:
         provenance["reason"] = "\n".join(disagreements)
     return _agreement_fact(term, schedule, ok, provenance)
+
+
+def differences(fact: Any, *, verbose: bool = False) -> list[str]:
+    """What a run's agreement fact measured, a line per output, as a run prints it.
+
+    ``grad: difference at roundoff within 1e-06 (approx) -> tested``: the
+    difference in the words of :func:`loopty.tolerance.described`, ``0`` or
+    ``at roundoff`` or none, which every machine prints alike; the class's
+    allowance, ``eps_class`` of each value (:data:`TOLERANCE`); the class;
+    and the fact's status. A disagreement prints the figures of its cell, a
+    claim about that cell that the fix starts from:
+    ``y: difference 7, allowed 2.2e-05 (approx) -> refuted``.
+
+    ``verbose`` adds the figures to an agreeing line too, those of the cell
+    that came closest to its allowance:
+    ``; measured 7.22e-16 where 1.01e-06 is allowed``. They are in the
+    fact's provenance either way, which ``--json`` writes.
+
+    A demo prints a run as ``loopty run`` does::
+
+        fact = LoopyExecutor().differential(spmv, rows_split, inputs)
+        for line in differences(fact):
+            print(f"  {line}")
+    """
+    status = fact.status.value
+    lines: list[str] = []
+    for name, detail in fact.provenance.get("outputs", {}).items():
+        exactness = detail["exactness"]
+        difference = detail["difference"]
+        allowed = detail["tolerance"]
+        if not detail.get("agree", True):
+            lines.append(
+                f"{name}: difference {difference:.3g}, allowed {allowed:.3g} "
+                f"({exactness}) -> {status}"
+            )
+            continue
+        epsilon = TOLERANCE.get(exactness, 0.0)
+        # The cell's own magnitude, |expected| + FLOOR, which its allowance
+        # scales: roundoff is roundoff of that cell.
+        scale = allowed / epsilon if epsilon else TOLERANCE_FLOOR
+        words = described(difference, scale)
+        size = f"difference {words}" if words else "difference"
+        line = f"{name}: {size} within {epsilon:g} ({exactness}) -> {status}"
+        if verbose and difference != 0:
+            line += f"; measured {difference:.3g} where {allowed:.3g} is allowed"
+        lines.append(line)
+    return lines
 
 
 def _refused_agreement(

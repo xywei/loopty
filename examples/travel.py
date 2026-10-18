@@ -254,7 +254,7 @@ def main() -> int:
     """Run each program natively, say how its requirements were met, compare."""
     from lanky.terms import render
 
-    from loopty.executor import LoopyExecutor, emit_code
+    from loopty.executor import LoopyExecutor, differences, emit_code
 
     ok = True
     for prog in (permuted, through, checked, flat):
@@ -277,12 +277,8 @@ def main() -> int:
                 print(f"    decided under {used}")
         fact = LoopyExecutor().differential(prog, Schedule(prog), inputs)
         ok = ok and fact.status.value == "tested"
-        for name, detail in fact.provenance["outputs"].items():
-            print(
-                f"  {name}: difference {detail['difference']:.3g} within "
-                f"{detail['tolerance']:.3g} ({detail['exactness']}) -> "
-                f"{fact.status.value}"
-            )
+        for line in differences(fact):
+            print(f"  {line}")
     post = [fact for fact in number.facts() if fact.kind == "postcondition"]
     print()
     print(f"number's postcondition, {render(number.term.post)}: {post[0].status.value}")

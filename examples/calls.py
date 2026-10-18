@@ -215,7 +215,7 @@ def rejected_size() -> None:
 
 def main() -> int:
     """Run natively, then show the inlined term, its code, a refusal, a schedule."""
-    from loopty.executor import LoopyExecutor, emit_code
+    from loopty.executor import LoopyExecutor, differences, emit_code
 
     inputs = example_inputs()
     ok = True
@@ -277,12 +277,8 @@ def main() -> int:
     print()
     fact = LoopyExecutor().differential(matvec, split_rows, example_inputs()["matvec"])
     print(f"schedule: {split_rows!r}")
-    for name, detail in fact.provenance["outputs"].items():
-        print(
-            f"  {name}: difference {detail['difference']:.3g} within "
-            f"{detail['tolerance']:.3g} ({detail['exactness']}) -> "
-            f"{fact.status.value}"
-        )
+    for line in differences(fact):
+        print(f"  {line}")
     return 0 if ok and fact.status.value == "tested" else 1
 
 

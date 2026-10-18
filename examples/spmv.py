@@ -244,7 +244,7 @@ def rows_parallel(target: str = "opencl") -> Schedule:
 
 def main() -> int:
     """Run the demo: natively, then compiled, and print what agreed."""
-    from loopty.executor import LoopyExecutor
+    from loopty.executor import LoopyExecutor, differences
 
     data = random_csr()
     solve(data["cnt"], data["col"], data["val"], data["x"], data["y"], data["off"])
@@ -275,12 +275,8 @@ def main() -> int:
     # A fresh copy of the same matrix, so that the compiled run and the native
     # run inside ``differential`` both start from a zeroed ``y``.
     fact = LoopyExecutor().differential(spmv, rows_split, example_inputs()["spmv"])
-    for name, detail in fact.provenance["outputs"].items():
-        print(
-            f"  {name}: difference {detail['difference']:.3g} within "
-            f"{detail['tolerance']:.3g} ({detail['exactness']}) -> "
-            f"{fact.status.value}"
-        )
+    for line in differences(fact):
+        print(f"  {line}")
     return 0 if fact.status.value == "tested" else 1
 
 

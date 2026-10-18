@@ -112,18 +112,37 @@ jobs:
         with:
           enable-cache: true
 
+      # The floor can name the lanky release main waits for before it is on
+      # PyPI (lanky>=0.5.0, which ships lanky.known). Until it is, there is no
+      # released pair to test: the job says so in a notice and skips the
+      # rest, and any other failure to resolve still fails it.
       - name: Install loopty, with lanky from PyPI
+        id: install
         run: |
           set -euo pipefail
           uv venv --python 3.13
+          floor=$(.venv/bin/python -c 'import tomllib; print(next(d for d in tomllib.load(open("pyproject.toml", "rb"))["project"]["dependencies"] if d.startswith("lanky")))')
+          if ! resolved=$(uv pip install --no-sources --dry-run "${floor}" 2>&1); then
+            if grep -q "unsatisfiable" <<<"${resolved}"; then
+              echo "::notice title=released lanky::${floor} is not on PyPI yet; this job tests the released pair once it is"
+              echo "released=false" >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
+            echo "${resolved}" >&2
+            exit 1
+          fi
+          echo "released=true" >> "${GITHUB_OUTPUT}"
           uv pip install --no-sources -e . pytest
           .venv/bin/python -c "import importlib.metadata as m; print('lanky', m.version('lanky'), 'from PyPI')"
 
       - name: Pytest
+        if: steps.install.outputs.released == 'true'
         run: .venv/bin/python -m pytest -q
 
       - name: Check the worked example
+        if: steps.install.outputs.released == 'true'
         run: .venv/bin/lanky check examples/spmv.py
 
       - name: Run the worked example
+        if: steps.install.outputs.released == 'true'
         run: .venv/bin/loopty run examples/spmv.py

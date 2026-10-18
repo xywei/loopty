@@ -50,7 +50,8 @@ isl; one on data, ``c[t] - y[s] != 0``, is tested on the native runs and
 never proved; one on a constant table is tested at the table's digits. The
 class of the output becomes ``approx`` (an ``exact`` output is refused, as
 ``realize`` refuses it), and the compared row says how far the floats moved,
-measured: on the example inputs, where a failure fails the row, and at
+in words every machine prints alike (``measured at roundoff``; the figure is
+in its provenance): on the example inputs, where a failure fails the row, and at
 drawn magnitude extremes, where a failure is a note with the input, since a
 rewrite like sumpy's changes the float range on purpose
 (:func:`compared_fact`).
@@ -1952,7 +1953,7 @@ def compared_fact(
             f"{base}, on its example inputs",
             reason=f"the runs could not be made: {type(exc).__name__}: {exc}",
         )
-    from loopty.tolerance import TOLERANCE
+    from loopty.tolerance import TOLERANCE, described
 
     outputs: dict[str, Any] = {}
     failures: list[str] = []
@@ -1973,10 +1974,13 @@ def compared_fact(
             )
     exactness = outputs.get(array, {}).get("exactness", "approx")
     tolerance = TOLERANCE.get(exactness, 0.0)
-    measured = outputs.get(array, {}).get("measured", 0.0)
+    # measured beside the largest value, in words every machine prints
+    # alike; the figure is the provenance's
+    size = described(outputs.get(array, {}).get("measured", 0.0))
+    shown = f" (measured {size})" if size else ""
     words = (
-        f"{base} at {exactness}, within {tolerance:g} of each value (measured "
-        f"{measured:.0e} of the largest), on its example inputs"
+        f"{base} at {exactness}, within {tolerance:g} of each value{shown}, "
+        "on its example inputs"
     )
     if failures:
         return fact(
