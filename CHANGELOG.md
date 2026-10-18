@@ -43,6 +43,12 @@ All notable changes to loopty are recorded here. The format follows
   - `examples/advection.py` and `examples/assembly.py` say why no kernel
     cites their theorems yet: each would take a condition on a table (#285,
     #342).
+  - The coverage in `docs/lean-checks.md` counts them: of 1638 facts isl
+    decides, Lean proves 1574, and with Mathlib all 1600 that are not
+    refuted on purpose. The 27 more of `examples/hexahedra.py` are the
+    derived divergence's, all proved; the one more of
+    `examples/layer_potential.py` is `double_layer`'s series, which needs
+    Mathlib.
 
 - **The theorem matcher's higher-order rule**, shared with lanky
   (`lanky.matching.higher_order_value`). With `higher_order=True`, a
