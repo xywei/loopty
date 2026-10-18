@@ -2093,9 +2093,11 @@ order, under the hypothesis `inverse`, that `M^-1` is the mass's inverse:
 node's value into the node it sits on, as `lift_on_faces` lifts with the
 GLL quadrature's mass, is the transpose of the face gather the flux reads
 through, for any face map and every order; with the field `1`, the lift
-keeps the element's total; `main` checks it on the face maps.
-`benchmarks/advection.py` compares the right-hand side with grudge's
-own on a warped periodic mesh, where it agrees to a few units in the 15th
+keeps the element's total; `main` checks it on the face maps. With Mathlib
+the third reads `proved`; the first two read `tested`, since proving them
+collapses a sum against the identity, which lanky has no fact for yet
+(lanky#181). `benchmarks/advection.py` compares the right-hand side with
+grudge's own on a warped periodic mesh, where it agrees to a few units in the 15th
 digit.
 
 `weak_rhs` is grudge's operator as the math says it, dense: the inverse
@@ -2824,8 +2826,10 @@ into the nodes, `y[cell[c, a]] += ...`. The kernel is a kernel of its own,
 inlined where it is called. The file's theorems are the mathematics the loop
 rests on: the 3-point rule integrates every quadratic exactly, a cell's mass
 matrix is `|J| (1 + delta_jk) / 24`, and the scatter keeps the total on every
-mesh. With Mathlib all three are proved. The transcripts below have no
-Lean: sympy, lanky's `cas` extra, decides that the rule is exact on
+mesh. With Mathlib the first and the last are proved; the element's mass,
+stated of the rule's tables, reads `tested`, since lanky's ladder proves each
+of its nine equations alone and not the nine together (lanky#180). The
+transcripts below have no Lean: sympy, lanky's `cas` extra, decides that the rule is exact on
 quadratics, `decided (heuristic)` by `cas`, and the other two read `tested`.
 
 `mass_ffc` promises the element's mass in closed form, `|J| (1 + delta_jk) /
