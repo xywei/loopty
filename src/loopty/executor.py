@@ -285,7 +285,8 @@ def _call_arguments(
     and the table of row starts and the starts of its pieces that the
     lowering takes as arguments. Such a kernel is also given every size the
     call determines that it takes as a value argument, since a flat buffer
-    has no shape for loopy to read a size off.
+    has no shape for loopy to read a size off; so is one with an array a
+    math step set aside, whose shape the code no longer has.
     """
     from loopty.arr import Arr
     from loopty.contract import resolve_sizes
@@ -309,10 +310,12 @@ def _call_arguments(
     }
     out: dict[str, np.ndarray] = {}
     declared = {arg.name for arg in lowering.kernel.default_entrypoint.args}
+    aside = False
     for name, value in supplied.items():
         if name in term.set_aside and name not in declared:
             # a math step left it unread, and the compiled code takes no such
             # argument (loopty.term.Term.set_aside)
+            aside = True
             continue
         if isinstance(value, Arr) and value.domain is not None:
             storage = lowering.storage.get(name, "box")
@@ -340,7 +343,8 @@ def _call_arguments(
         layout = layouts[array]
         packed = lowering.storage[array] == "packed"
         out[argument] = (layout.table_bases if packed else layout.box_bases)[piece]
-    if lowering.storage:
+    if lowering.storage or aside:
+        # a size an array set aside carried has no shape left to be read off
         sizes = resolve_sizes(dict(term.params), supplied)
         for name in lowering.value_args:
             if name not in out and name in sizes:

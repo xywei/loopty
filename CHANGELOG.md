@@ -224,6 +224,16 @@ All notable changes to loopty are recorded here. The format follows
   part's equations, what the kernel stores and the theorem's conditions at
   its tables, are now rewritten with in turn, and `ring` closes it.
 
+- A compiled kernel with an array a rewrite set aside is passed the sizes
+  that array alone carried: `x: Arr[Fin[m], Real]` read only as `x[j] * 0`
+  is set aside, the sum over `Fin[m]` still runs, and loopy had no shape to
+  read `m` off (Codex on #348).
+
+- A sum of tables that reads one index on axes of two extents, `A[i, q] *
+  B[i, q]` with `A` of `n` rows and `B` of `k`, is not kept as a table: the
+  kept table ran over the first array's axis and read the other past its end
+  (Codex on #348).
+
 - An array a rewrite set aside, as `M` once the inverse mass cancels it,
   stays aside through a later rewrite of the same schedule, which reads it
   no more; the later step worked the arrays out again from the term before

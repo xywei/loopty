@@ -3111,7 +3111,9 @@ def _templated(
     Returns the template, the indices each parameter stands for here, and
     the extent of the axis each first indexes; ``None`` where the sum reads
     an array some statement writes, a variable outside an index, or an
-    array whose axes are not a box of extents.
+    array whose axes are not a box of extents, or reads one index on axes of
+    two extents: a kept table would run over the first array's axis, and
+    read the other's past its end.
     """
     from loopty.hypotheses import structural_key, substitute
 
@@ -3142,6 +3144,11 @@ def _templated(
                     parameters[key] = len(arguments)
                     arguments.append(item)
                     axes.append(typ.axes[position])
+                elif structural_key(axes[parameters[key]]) != structural_key(
+                    typ.axes[position]
+                ):
+                    failed = True
+                    return node
                 out.append(Var(f"_p{parameters[key]}"))
             return Subscript(node.aggregate, tuple(out) if len(out) > 1 else out[0])
         if isinstance(node, prim.Variable):

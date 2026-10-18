@@ -783,3 +783,45 @@ def test_into_and_keep_are_one_or_the_other() -> None:
 
 
 # }}}
+
+
+# {{{ a size only an array set aside carries
+
+
+@theorem
+def times_nothing(a: Real, b: Real) -> a * 0 + b == b:  # noqa: F821
+    """A term times nothing adds nothing."""
+
+
+@kernel
+def padded(
+    x: Arr[Fin[m], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+    out: Arr[Fin[n], Real],  # noqa: F821
+):
+    """``m`` copies of ``y``, with ``x`` read and multiplied by nothing."""
+    for i in out.dom:
+        out[i] = reduce_sum(x[j] * 0 + y[i] for j in x.dom)
+
+
+def test_a_size_only_a_set_aside_array_carries_is_passed() -> None:
+    """``x`` is set aside, and the sum over ``Fin[m]`` still needs ``m`` (Codex, #348).
+
+    The compiled code takes no ``x``, so loopy has no shape to read ``m``
+    off; the call passes it, as it does for a kernel over a domain.
+    """
+    from loopty.executor import LoopyExecutor
+
+    schedule = Schedule(padded).rewrite(padded.out, by=times_nothing)
+    assert schedule.term.set_aside == ("x",)
+    rng = np.random.default_rng(8)
+    given = {
+        "x": Arr.from_numpy(rng.normal(size=4)),
+        "y": Arr.from_numpy(rng.normal(size=3)),
+        "out": Arr.zeros(3),
+    }
+    got = LoopyExecutor().run(schedule, **given)
+    assert np.allclose(got["out"], 4 * given["y"].numpy(), rtol=1e-12, atol=1e-12)
+
+
+# }}}

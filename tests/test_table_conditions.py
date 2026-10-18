@@ -296,6 +296,33 @@ def test_a_kept_table_has_a_handle() -> None:
     assert repr(schedule.D) == "weak.D"
 
 
+@kernel
+def two_extents(
+    A: Arr[Fin[n], Fin[m], Real],  # noqa: F821
+    B: Arr[Fin[k], Fin[m], Real],  # noqa: F821
+    out: Arr[Fin[k], Real],  # noqa: F821
+):
+    """A sum of two tables at one row index, over the rows ``B`` has."""
+    for i in out.dom:
+        out[i] = reduce_sum(A[i, q] * B[i, q] for q in B.dom[i])
+
+
+def test_a_sum_reading_one_index_on_axes_of_two_extents_is_not_a_table() -> None:
+    """Kept, it would run over ``A``'s rows and read ``B`` past its own (Codex, #348).
+
+    The index ``i`` reads an axis of ``n`` in ``A`` and of ``k`` in ``B``;
+    the sum was a table over ``A``'s axis alone. It is none now, and a
+    rewrite keeps no such sum.
+    """
+    from loopty.rewriting import _templated
+    from loopty.trace import reductions_in
+
+    term = two_extents.term
+    (stmt,) = term.stmts
+    (found,) = reductions_in(stmt.expr)
+    assert _templated(found, {"out"}, term.array_types) is None
+
+
 # }}}
 
 
