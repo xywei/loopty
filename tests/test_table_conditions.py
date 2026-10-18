@@ -498,6 +498,9 @@ def test_a_right_side_is_compared_at_draws_of_both_signs() -> None:
     assert _one_value(Abs(z) ** 2, z * z)  # equal at every real draw
     assert not _one_value(Abs(z) ** 2, z * z, frozenset({"z"}))
     assert _one_value(Abs(z) * 2 / 24, Abs(z) / 12, frozenset({"z"}))
+    # exactly, not to a tolerance (Codex, #348)
+    assert not _one_value(x, x * (1 + 1e-13))
+    assert _one_value(x * 0.5, x / 2)
 
 
 def test_weights_off_beyond_their_digits_refute_the_condition() -> None:

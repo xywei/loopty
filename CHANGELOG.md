@@ -210,13 +210,13 @@ All notable changes to loopty are recorded here. The format follows
   matched by its left side alone, against what the kernel stores, so a
   postcondition with another right side read `..., by <theorem>` and rested
   on the theorem and its conditions on the tables. The right side at the same
-  binding now has to be the postcondition's too, as a term or at drawn values
-  of what both read, of both signs and, for complex arrays, off the real
-  axis: `element_mass`'s `abs(J) * 2 / 24` is `mass_ffc`'s
-  `abs(jacobian(x)) / 12`, while `abs(x)` is not `x`, nor `abs(z)**2` the
-  `z*z` of a complex `z`, and a
-  claim of a sixth of the sum times `1 + 1e-8`, true only to the approx
-  tolerance, is the kernel's own claim, tested on the runs.
+  binding now has to be the postcondition's too: the same term, or the same
+  number exactly at drawn rational values of what both read, of both signs,
+  and off the real axis for complex arrays. So `element_mass`'s `abs(J) * 2
+  / 24` is `mass_ffc`'s `abs(jacobian(x)) / 12`, while `abs(x)` is not `x`,
+  `abs(z)**2` is not the `z*z` of a complex `z`, and `x * (1 + 1e-13)` is
+  not `x`; a claim of a sixth of the sum times `1 + 1e-8`, true only to the
+  approx tolerance, is the kernel's own claim, tested on the runs.
 
 - **With Mathlib, Lean proves `mass_ffc`'s postcondition by `element_mass`
   again**, as it proved the closed form before the theorem was cited. Each

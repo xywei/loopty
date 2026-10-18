@@ -760,17 +760,24 @@ def _one_value(
     """Whether a theorem's right side at its binding is the claim's: terms, or draws.
 
     Each cell at a point with a value, ``x[2, 1]``, and each free name is
-    drawn at random, the same in both, and both sides are evaluated; they
-    have to agree to rounding at every draw. The draws take both signs, all
-    negative once, all positive once and mixed after, at magnitudes between
-    a half and two, so ``abs(x)`` is not taken for ``x``; a cell of an array
+    drawn at random, a rational number, the same in both, and both sides are
+    evaluated in lanky's exact reading (:func:`lanky.terms.exact_reading`),
+    where a float literal is the rational it holds; they have to be the same
+    number at every draw, exactly, so ``x * (1 + 1e-13)`` is not taken for
+    ``x``. The draws take both signs, all negative once, all positive once
+    and mixed after, so ``abs(x)`` is not taken for ``x``; a cell of an array
     named in ``complex_names``, or a scalar so named, is drawn with an
-    imaginary part as well, so ``abs(z)**2`` is not taken for ``z*z``. A
-    side with a cell at a point with no value, or one that cannot be
-    evaluated at a draw, is not shown to be the other, and ``False`` is
+    imaginary part as well, its parts a scaled Pythagorean pair so that its
+    modulus is rational too, so ``abs(z)**2`` is not taken for ``z*z``. A
+    side with a cell at a point with no value, one that cannot be evaluated
+    at a draw, or one whose value there is no exact number (a square root
+    that is not rational), is not shown to be the other, and ``False`` is
     returned.
     """
-    from lanky.terms import evaluate, free_variables
+    from fractions import Fraction
+
+    from lanky.intervals import ComplexValue
+    from lanky.terms import evaluate, exact_reading, free_variables
 
     from loopty.hypotheses import _same
 
@@ -799,32 +806,65 @@ def _one_value(
             return tuple(atoms(item) for item in node)
         return node
 
+    rng = np.random.default_rng(20261018)
+
+    def drawn(sign: int) -> Fraction:
+        return Fraction(sign * int(rng.integers(1, 64)), int(rng.integers(1, 64)))
+
     try:
         left, right = atoms(concluded), atoms(claimed)
         free = sorted(set(free_variables(left)) | set(free_variables(right)))
-        rng = np.random.default_rng(20261018)
         for draw in range(_DRAWS):
             signs = (
-                [-1.0] * len(free)
+                [-1] * len(free)
                 if draw == 0
-                else [1.0] * len(free)
+                else [1] * len(free)
                 if draw == 1
-                else rng.choice([-1.0, 1.0], size=len(free)).tolist()
+                else [int(sign) for sign in rng.choice([-1, 1], size=len(free))]
             )
-            context: dict[str, Any] = {
-                name: sign * float(rng.uniform(0.5, 2.0))
-                for name, sign in zip(free, signs, strict=True)
-            }
-            for name in free:
+            context: dict[str, Any] = {}
+            for name, sign in zip(free, signs, strict=True):
+                context[name] = drawn(sign)
                 if name in complex_atoms:
-                    turn = float(rng.uniform(0.5, 2.0)) * float(rng.choice([-1.0, 1.0]))
-                    context[name] = complex(context[name], turn)
-            a, b = complex(evaluate(left, context)), complex(evaluate(right, context))
-            if not abs(a - b) <= 1e-12 * (abs(a) + abs(b) + 1e-300):
+                    # parts of a Pythagorean triple, scaled: off the real
+                    # axis, with a modulus that is rational, so abs is exact
+                    m = int(rng.integers(2, 9))
+                    n = int(rng.integers(1, m))
+                    scale = context[name]
+                    one, other = scale * (m * m - n * n), scale * 2 * m * n
+                    if int(rng.integers(2)):
+                        one, other = other, one
+                    context[name] = ComplexValue(one, int(rng.choice([-1, 1])) * other)
+            with exact_reading():
+                a, b = evaluate(left, context), evaluate(right, context)
+            if not _exactly_equal(a, b):
                 return False
     except Exception:  # noqa: BLE001 - what cannot be evaluated is not shown equal
         return False
     return True
+
+
+def _exactly_equal(a: Any, b: Any) -> bool:
+    """Whether two values of the exact reading are one number, both exact."""
+    import numbers
+    from fractions import Fraction
+
+    from lanky.intervals import ComplexValue
+
+    def parts(value: Any) -> tuple[Fraction, Fraction] | None:
+        if isinstance(value, bool | np.bool_):
+            return None
+        if isinstance(value, numbers.Rational):
+            return Fraction(value), Fraction(0)
+        if isinstance(value, ComplexValue) and all(
+            isinstance(part, numbers.Rational) and not isinstance(part, bool)
+            for part in (value.real, value.imag)
+        ):
+            return Fraction(value.real), Fraction(value.imag)
+        return None
+
+    first, second = parts(a), parts(b)
+    return first is not None and first == second
 
 
 def cited_over_the_reals(
