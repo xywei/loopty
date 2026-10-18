@@ -118,7 +118,11 @@ run is compared with its native one, at the approx tolerance, ``|a - b| <=
 1e-6 (|b| + 1)``: tested on its runs, and proved by Lean with Mathlib, from
 what the kernel stores, with each table at the value it holds. That proof
 is of the kernel's term read over the reals; the floats it computes are
-what the runs test.
+what the runs test. So ``mass_ffc`` does not cite ``element_mass``: the
+theorem is about the rule, and the kernel's tables round it. Citing it would
+take the tables' values as a condition, ``FE0`` the P1 basis at the rule's
+points and ``W3`` its weights, to their digits, which ``python`` checks and
+no row states yet (#342).
 """
 
 from __future__ import annotations

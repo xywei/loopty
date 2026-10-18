@@ -47,8 +47,9 @@ order, decides it at ``n`` from 1 to 6, and Lean proves it for every ``n``.
 Run this file three ways.
 
 ``python examples/hexahedra.py``
-    Applies both operators natively and compares them with the dense
-    Kronecker operators grudge's escape hatch builds. Then fuses the passes
+    Applies both operators natively, as the math and as passes, and compares
+    them with the dense Kronecker operators grudge's escape hatch builds.
+    Then derives the passes of each operator from its math, fuses the passes
     as deep as each pair allows, refuses one step deeper with its pair, keeps
     what passes between them in the cells live at once, and compares the
     compiled run with the native one; and lists the facts of the three
@@ -60,7 +61,8 @@ Run this file three ways.
 
 ``loopty run examples/hexahedra.py``
     Each kernel, both programs and the schedules, compiled and compared; the
-    dense kernel factored, fused and contracted among them.
+    dense kernels factored, and the gradient's fused and contracted, among
+    them.
 
 What is worth reading here
 --------------------------
@@ -82,17 +84,23 @@ with Mathlib from what the derived passes store and the theorem at each
 direction's tables, that they leave in ``grad`` what ``weak_grad``'s
 statement says; the kept arrays' accesses in bounds, their writes distinct,
 and each cell stored before it is read; and that the compiled ``factored``
-agrees with the native dense kernel.
+agrees with the native dense kernel. ``weak_div`` is the divergence the same
+way, grudge's ``weak_local_div``: the flux along each direction first,
+``sum_x J dr_d/dx_x f_x``, then the Kronecker product of the direction's
+tables applied to it, the three directions summed; ``factored_div`` derives
+its passes by the same rewrite, and the ledger says the same of them.
 
-*What the programs leave.* ``passes``, the same four passes written by hand
-as one call each, claims that ``grad`` is the dense operator of each
+*What the programs leave.* ``passes`` and ``div_passes`` are the same four
+passes written by hand, as one call each, the gradient's and the
+divergence's. ``passes`` claims that ``grad`` is the dense operator of each
 direction applied to the field times its metric term, the three summed, and
-``weak_div`` the same of the flux. Lean proves each, with
-Mathlib, from what the four calls store and ``sum_factorization``, taken at
-each direction's sections: ``Fr[3*x + 0]`` for the theorem's ``Fr`` and
-``w[3*x + 0, e]`` for its ``u``. Without Mathlib the claims are tested on the
+``div_passes`` the same of the flux. Lean proves each, with Mathlib, from
+what the four calls store and ``sum_factorization``, taken at each
+direction's sections: ``Fr[3*x + 0]`` for the theorem's ``Fr`` and ``w[3*x
++ 0, e]`` for its ``u``. Without Mathlib the claims are tested on the
 programs' runs, compared at the class of ``grad``, since the passes sum in
-another order than the dense operator does.
+another order than the dense operator does. They are what the derived
+passes are timed against, by ``benchmarks/hexahedra.py``.
 
 *How deep each fusion goes.* In ``passes``, ``along_s`` reads a whole column
 of what ``along_r`` stored in the same ``k``-slab, so the two fuse on ``(q,
@@ -316,7 +324,7 @@ def passes(G, u, Fr, Fs, Ft, grad) -> all(
 
 
 @program(uses=[sum_factorization])
-def weak_div(G, f, Fr, Fs, Ft, div) -> all(
+def div_passes(G, f, Fr, Fs, Ft, div) -> all(
     div[e, k, j, i]
     == sum(
         Ft[d, k, c]
@@ -351,7 +359,7 @@ def weak_div(G, f, Fr, Fs, Ft, div) -> all(
 # }}}
 
 
-# {{{ the math: the dense weak gradient, as grudge's weak_local_grad says it
+# {{{ the math: the dense weak gradient and divergence, as grudge says them
 
 
 @kernel
@@ -385,6 +393,39 @@ def weak_grad(
         )
 
 
+@kernel
+def weak_div(
+    G: Arr[Fin[3], Fin[3], Fin[ne], Fin[n], Fin[n], Fin[n], Real],
+    f: Arr[Fin[3], Fin[ne], Fin[n], Fin[n], Fin[n], Real],
+    Fr: Arr[Fin[3], Fin[n], Fin[n], Real],
+    Fs: Arr[Fin[3], Fin[n], Fin[n], Real],
+    Ft: Arr[Fin[3], Fin[n], Fin[n], Real],
+    w: Arr[Fin[3], Fin[ne], Fin[n], Fin[n], Fin[n], Real],
+    div: Arr[Fin[ne], Fin[n], Fin[n], Fin[n], Real],
+):
+    """grudge's weak_local_div, as the math says it.
+
+    ``w[d]`` is the flux along the direction ``d``, ``sum_x J dr_d/dx_x
+    f_x``, the metric terms ``G[x, d]`` summed first. The divergence is, for
+    each direction ``d``, the Kronecker product of ``Ft[d]``, ``Fs[d]`` and
+    ``Fr[d]`` applied to ``w[d]``; the three directions summed.
+    """
+    for d, e, k, j, i in w.dom:
+        w[d, e, k, j, i] = reduce_sum(
+            G[x, d, e, k, j, i] * f[x, e, k, j, i] for x in Fin[3]
+        )
+    for e, k, j, i in div.dom:
+        div[e, k, j, i] = reduce_sum(
+            reduce_sum(
+                Ft[d, k, c] * Fs[d, j, b] * Fr[d, i, a] * w[d, e, c, b, a]
+                for c in Ft.dom[d, k]
+                for b in Fs.dom[d, j]
+                for a in Fr.dom[d, i]
+            )
+            for d in Fin[3]
+        )
+
+
 # }}}
 
 
@@ -400,6 +441,11 @@ fused = factored.fuse(factored.r_pass.c, factored.s_pass.c)
 
 #: The r pass kept one slab at a time.
 contracted = fused.contract(factored.r_pass)
+
+#: The divergence's passes, derived as the gradient's are.
+factored_div = Schedule(weak_div).rewrite(
+    weak_div.div, by=sum_factorization, keep=("r_pass", "s_pass")
+)
 
 #: The passes written by hand: the metric with the pass along r, on every loop
 #: but the row's, down to j; then the two passes on (q, e, k), a slab at a time.
@@ -534,6 +580,15 @@ def inputs(elements: int = ELEMENTS, seed: int = 0) -> dict:
             "grad": Arr.zeros((3, *nodes)),
         },
         "weak_div": {
+            "G": Arr.from_numpy(G.reshape(3, 3, *nodes)),
+            "f": Arr.from_numpy(f),
+            "Fr": Arr.from_numpy(Dr),
+            "Fs": Arr.from_numpy(Ds),
+            "Ft": Arr.from_numpy(Dt),
+            "w": Arr.zeros((3, *nodes)),
+            "div": Arr.zeros(nodes),
+        },
+        "div_passes": {
             "G": Arr.from_numpy(G),
             "f": Arr.from_numpy(f),
             "Fr": Arr.from_numpy(Dr),
@@ -560,7 +615,7 @@ def dense(data: dict) -> tuple[np.ndarray, np.ndarray]:
     shape = data["passes"]["u"].numpy().shape
     G = data["passes"]["G"].numpy().reshape(3, 3, shape[0], -1)
     u = data["passes"]["u"].numpy().reshape(shape[0], -1)
-    f = data["weak_div"]["f"].numpy().reshape(3, shape[0], -1)
+    f = data["div_passes"]["f"].numpy().reshape(3, shape[0], -1)
     grad = np.stack([sum((G[x, d] * u) @ ops[d].T for d in range(3)) for x in range(3)])
     div = sum((G[x, d] * f[x]) @ ops[d].T for x in range(3) for d in range(3))
     return grad.reshape(3, *shape), div.reshape(shape)
@@ -569,7 +624,7 @@ def dense(data: dict) -> tuple[np.ndarray, np.ndarray]:
 def example_inputs() -> dict:
     """The inputs ``loopty run`` gives each kernel, and the programs."""
     data = inputs()
-    grad_in, div_in = data["passes"], data["weak_div"]
+    grad_in, div_in = data["passes"], data["div_passes"]
     nodes = grad_in["u"].numpy().shape
     nine = np.random.default_rng(1).normal(size=(9, *nodes))
     three = np.random.default_rng(2).normal(size=(3, *nodes))
@@ -603,6 +658,7 @@ def example_inputs() -> dict:
         "weak_grad": inputs()["weak_grad"],
         "passes": inputs()["passes"],
         "weak_div": inputs()["weak_div"],
+        "div_passes": inputs()["div_passes"],
         "metric_along_r": {
             "G": grad_in["G"],
             "u": grad_in["u"],
@@ -644,16 +700,18 @@ def main() -> int:
     passes(**data["passes"])
     weak_grad(**data["weak_grad"])
     weak_div(**data["weak_div"])
+    div_passes(**data["div_passes"])
     grad, div = dense(data)
     scale = max(np.abs(grad).max(), np.abs(div).max())
     gap = max(
         np.abs(data["passes"]["grad"].numpy() - grad).max(),
         np.abs(data["weak_grad"]["grad"].numpy() - grad).max(),
         np.abs(data["weak_div"]["div"].numpy() - div).max(),
+        np.abs(data["div_passes"]["div"].numpy() - div).max(),
     )
     native = bool(gap <= 1e-13 * scale)
     print(
-        f"order {ORDER}, {ELEMENTS} hexahedra: the dense kernel and the passes are "
+        f"order {ORDER}, {ELEMENTS} hexahedra: the dense kernels and the passes are "
         f"the dense Kronecker operators: {native} (largest difference "
         f"{gap / scale:.0e} of the largest)"
     )
@@ -673,6 +731,26 @@ def main() -> int:
         print(
             f"  {name}: difference {detail['difference']:.3g} within "
             f"{detail['tolerance']:.3g} ({detail['exactness']}) -> {kept.status.value}"
+        )
+    print()
+
+    print(f"the divergence, derived the same way: {factored_div!r}")
+    for fact in factored_div.facts():
+        if fact.kind != "rewrite":
+            # its other facts are the gradient's, said above
+            continue
+        fact = prove(fact)
+        derived = derived and fact.status.value != "refuted"
+        print(f"  {fact.status.value:8} {fact.decided_by or '-':11} {fact.statement}")
+    kept_div = LoopyExecutor().differential(
+        weak_div, factored_div, inputs()["weak_div"]
+    )
+    for name, detail in kept_div.provenance["outputs"].items():
+        # the verdict and the allowance, not the difference, whose last
+        # digits are the platform's
+        print(
+            f"  {name}: within {detail['tolerance']:.3g} ({detail['exactness']}) "
+            f"-> {kept_div.status.value}"
         )
     print()
 
@@ -714,7 +792,7 @@ def main() -> int:
             f"  {schedule.term.name}: {'.'.join(schedule.history)}: "
             f"{len(cast)} facts, {_settled(cast)}"
         )
-    ok = kept.status.value == by_hand.status.value == "tested"
+    ok = kept.status.value == kept_div.status.value == by_hand.status.value == "tested"
     return 0 if native and derived and ok and legal else 1
 
 
