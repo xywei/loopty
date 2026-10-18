@@ -800,6 +800,14 @@ class Term:
 
     Both are empty for a term written by hand, whose statements' loops are
     then its binders, each named as the term names it.
+
+    And one is a schedule's alone:
+
+    * ``set_aside`` names the array parameters a math step left unread
+      (:meth:`loopty.schedule.Schedule.rewrite`): ``M`` once the inverse
+      mass has cancelled it. The schedule still takes them, as the kernel
+      does, so that both are called alike; the lowering declares no
+      argument for them, and the compiled run passes none.
     """
 
     name: str
@@ -821,6 +829,7 @@ class Term:
     result: str | None = None
     binders: tuple[Binder, ...] = ()
     callsites: tuple[Callsite, ...] = ()
+    set_aside: tuple[str, ...] = ()
 
     @property
     def param_names(self) -> tuple[str, ...]:

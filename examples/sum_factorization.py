@@ -164,7 +164,7 @@ def example_inputs() -> dict:
 
 def main() -> int:
     """Run natively, the refused fusion, the accepted one, and its window."""
-    from loopty.executor import LoopyExecutor
+    from loopty.executor import LoopyExecutor, differences
 
     data = inputs()
     weak_derivative(**data)
@@ -187,12 +187,8 @@ def main() -> int:
     for fact in fused.facts():
         print(f"  {fact.status.value:8} {fact.decided_by:4} {fact.statement}")
     fact = LoopyExecutor().differential(weak_derivative, fused, inputs())
-    for name, detail in fact.provenance["outputs"].items():
-        print(
-            f"  {name}: difference {detail['difference']:.3g} within "
-            f"{detail['tolerance']:.3g} ({detail['exactness']}) -> "
-            f"{fact.status.value}"
-        )
+    for line in differences(fact):
+        print(f"  {line}")
     print()
 
     window = contracted.windows["v"]

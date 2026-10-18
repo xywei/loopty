@@ -7452,6 +7452,12 @@ class Schedule:
                 shown=shown,
                 at=_called_at(),
             )
+        if rewritten.into is None:
+            from loopty.rewriting import set_aside
+
+            rewritten = dataclasses.replace(
+                rewritten, after=set_aside(self._term, rewritten.after)
+            )
         out = Schedule(
             self._source,
             target=self._target,

@@ -66,6 +66,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
+import pymbolic.primitives as prim
 from lanky.ledger import Fact, Status, fact_id
 from lanky.prelude import FinType, FnType, Refined
 from lanky.terms import evaluate, free_variables
@@ -487,7 +488,6 @@ def _class_of(body: Any, term: Term) -> str:
     ``exact`` for anything but an equation, and for one that reads no array
     the program writes.
     """
-    import pymbolic.primitives as prim
 
     from loopty.trace import EXACTNESS_ORDER
 
@@ -503,7 +503,6 @@ def _class_of(body: Any, term: Term) -> str:
 
 def _arrays_read(expr: Any) -> set[str]:
     """The arrays ``expr`` reads a cell of."""
-    import pymbolic.primitives as prim
     from lanky.terms import init_args
 
     out: set[str] = set()
@@ -1088,7 +1087,7 @@ def _record(arguments: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def sample_arguments(
-    term: Term, seed: Any = SEED
+    term: Term, seed: Any = SEED, given: Mapping[str, Any] | None = None
 ) -> tuple[dict[str, Any], dict[str, int]]:
     """Arguments for ``term`` drawn from its declared types, with their sizes.
 
@@ -1105,14 +1104,41 @@ def sample_arguments(
     size. Offsets the kernel declares beside a ragged array
     (:func:`loopty.term.declared_layout`) are that array's offsets rather than
     a draw, since a call has to pass them so (:mod:`loopty.contract`).
+
+    ``given`` holds arrays to take as they are rather than draw, the tables a
+    math step's conditions are about (:mod:`loopty.rewriting`): each size an
+    axis of one determines is what it has there, solved from ``Fin[n + 1]``
+    as a call solves it (:func:`loopty.contract.resolve_sizes`), and the
+    rest are drawn.
     """
     rng = np.random.default_rng(seed)
     types = dict(term.params)
     names = sorted((_size_names(term) - set(types)) | _integral_scalars(term))
-    sizes = {name: int(rng.integers(*SIZES)) for name in names}
+    held: dict[str, int] = {}
+    kept_types = {
+        name: typ
+        for name, typ in types.items()
+        if name in (given or {})
+        and isinstance(typ, ArrType)
+        and typ.domain is None
+        and not any(typ.ragged)
+    }
+    if kept_types:
+        from loopty.contract import resolve_sizes
+
+        # every size an axis of a table taken as it is determines, a bare
+        # Fin[n] or one solved from Fin[n + 1] or Fin[2 * n], as a call does
+        held = resolve_sizes(kept_types, {name: given[name] for name in kept_types})
+    sizes = {
+        name: held[name] if name in held else int(rng.integers(*SIZES))
+        for name in names
+    }
     arguments: dict[str, Any] = {}
     ragged: list[tuple[str, ArrType]] = []
     for name, typ in term.params:
+        if given is not None and name in given and isinstance(typ, ArrType):
+            arguments[name] = _copy(given[name])
+            continue
         if isinstance(typ, ArrType):
             if typ.domain is not None:
                 needed = typ.domain.size_names()

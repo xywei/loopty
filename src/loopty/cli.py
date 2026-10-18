@@ -571,7 +571,10 @@ class RunVerb:
         parser.add_argument(
             "--verbose",
             action="store_true",
-            help="also name each cast Lean was not asked about, and why",
+            help=(
+                "also print the figures each run measured, and name each cast "
+                "Lean was not asked about, and why"
+            ),
         )
 
     def run(self, args: Any, /) -> int:
@@ -581,7 +584,7 @@ class RunVerb:
         from lanky.ledger import Ledger, Status
         from lanky.plugins import registry
 
-        from loopty.executor import LoopyExecutor, emit_code
+        from loopty.executor import LoopyExecutor, differences, emit_code
         from loopty.lower import pyopencl_installed
         from loopty.oracle import IslOracle
         from loopty.schedule import Schedule, definition_of
@@ -710,13 +713,10 @@ class RunVerb:
                 failures += 1
                 continue
             fact = claims.add_run(fact, schedule)
-            outputs = fact.provenance.get("outputs", {})
-            for output, detail in outputs.items():
-                print(
-                    f"  {output}: difference {detail['difference']:.3g} "
-                    f"within {detail['tolerance']:.3g} "
-                    f"({detail['exactness']}) -> {fact.status.value}"
-                )
+            # In words every machine prints alike, 0 or at roundoff; the
+            # figures under --verbose, and in the ledger --json writes.
+            for line in differences(fact, verbose=getattr(args, "verbose", False)):
+                print(f"  {line}")
 
         # The casts were decided by isl as each step was taken, and a layout's
         # facts above; where Lean is installed it checks each once, a cast

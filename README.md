@@ -101,7 +101,7 @@ schedule: Schedule(l2p, target='c').fuse(l2p.unpack.box, l2p.reconstruct.box, l2
 ...
   decided  isl  no read of l2p.R sees its slot overwritten after contract(l2p.R, lambda box, a, b: (a, b)): l2p.R kept in 121 cells, R[box, a, b] in slot (a, b)
 ...
-  pot: difference 0 within 1.1e-06 (approx) -> tested
+  pot: difference 0 within 1e-06 of each value (approx) -> tested
 ...
 ```
 
@@ -890,7 +890,9 @@ interface can change in a minor release; the CHANGELOG says when one does.
   nonzero, first_term and ode, read over the complex numbers`: about the term it
   evaluates, read over the complex numbers, and not about the floats it
   produces. With Mathlib, Lean checks it a term at a time, the theorem
-  applied, restated from the text its own command proved.
+  applied, restated from the text its own command proved. `double_layer`
+  adds `(-beta / alpha) ** k` from `k = 0` and cites `reciprocal_taylor`,
+  whose row reads `double_layer adds reciprocal_taylor's b(n) for n in 0..5`.
 - Equations of reals at their class (`loopty.reals`). An equation of a
   postcondition that rounds, a closed form the kernel computes another way,
   is compared after each native run as the compiled run is with the native
@@ -903,7 +905,9 @@ interface can change in a minor release; the CHANGELOG says when one does.
   hold; that is a proof of the term read over the reals, and the fact rests
   on the kernel's `trace-faithful` fact. `examples/assembly.py`'s `mass_ffc`
   promises the element's mass, `|J| (1 + delta_jk) / 24`, from FFC's
-  15-digit tables.
+  15-digit tables, by `element_mass` (`@kernel(uses=[element_mass])`): the
+  theorem is about tables that are the rule, and that FFC's are is a
+  condition on the tables, a row tested at their digits.
 - `lanky check` lists a file's schedules (#191). The casts of every schedule
   a file holds at module level are rows of the ledger beside the facts of
   the kernel or program it schedules, decided by isl as each step was taken
@@ -926,9 +930,13 @@ interface can change in a minor release; the CHANGELOG says when one does.
   sums a theorem's right side nests in arrays of their own, one nest each,
   whose handles are the schedule's (`factored.r_pass.c`), proved to leave
   the kernel's statement as a program's postcondition is; `into=passes`
-  compiles a program the file has instead. `examples/layer_potential.py`
-  computes the single layer as sumpy does, and `examples/hexahedra.py`
-  derives grudge's passes from the dense weak gradient.
+  compiles a program the file has instead. A condition on tables, `M^-1 M`
+  is the identity, is tested at the tables' digits, and `keep=("D", "L")`
+  computes the sums of tables the right sides read once, outside the
+  elements. `examples/layer_potential.py` computes the single layer as
+  sumpy does, `examples/hexahedra.py` derives grudge's passes from the
+  dense weak gradient, and `examples/advection.py` derives `volume` and
+  `lift` from grudge's dense operator.
 - `Schedule`: `tag`, `split`, `interchange`, `prioritize`, `tile`, `skew`,
   `affine`, `fuse`, each checked as a cast, each emitting its fact; `realize`
   and `atomic`, which move no instance and record what they make of a sum;
@@ -1216,9 +1224,9 @@ interface can change in a minor release; the CHANGELOG says when one does.
   reals), and `decided` by isl from what each call stores where that decides
   it; otherwise Lean is asked to prove it from the same equations and the
   theorems the program cites, unfolding a call at a time (`loopty.unfolding`).
-  `examples/hexahedra.py`'s `weak_grad` claims the dense Kronecker operators
-  grudge's escape hatch applies, and Lean proves it with Mathlib from what
-  the three passes store and `sum_factorization`.
+  `examples/hexahedra.py`'s `passes` and `div_passes` claim the dense
+  Kronecker operators grudge's escape hatch applies, and Lean proves them
+  with Mathlib from what the four calls store and `sum_factorization`.
 - A program lowers sequentially: its calls' loops run one after another, as
   the program runs them, until a schedule fuses them. A fusion moves the
   outer loops of each side, as many as both have or as `loops` says, and a

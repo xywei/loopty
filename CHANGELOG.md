@@ -8,6 +8,57 @@ All notable changes to loopty are recorded here. The format follows
 
 ### Added
 
+- **A math step under a condition on a table** (#342, #285). The inverse
+  mass cancels the mass only where the two tables are each other's
+  inverse, a property of the tables a run is given. A theorem says so with
+  a hypothesis about table cells, `inverse: all(sum(Mi[p, c] * M[c, p] for c
+  in Fin[n]) == 1 for p in Fin[n]) & all(... == 0 ... if p != q)`; at the
+  kernel it is a condition on tables, a row tested at the tables' digits
+  and a hypothesis of the Lean part. A condition is on tables where it
+  reads only constant tables, or reads arrays at no loop of the statement
+  and no sum around the match. Its equations are read at the tables'
+  digits: each value is the exact one to 15 digits (6 for `float32`), so a
+  sum of products of `k` of them is within `k` units of its 15th digit,
+  relative to the sum of their sizes; `np.linalg.inv`'s inverse passes, and
+  a table off by `1e-9` is refuted, naming the equation and the allowance.
+  The draws that compare a rewrite keep the example's tables and draw the
+  rest (`sample_arguments(..., fixed=...)`).
+- **Sums of tables, computed once.** Where the theorems' right sides are no
+  one nest of passes, or the theorems need conditions on data or tables,
+  `keep=("D", "L")` stores the sums of tables the rewritten statement reads,
+  in the order it reads them, each over the indices it reads, in a statement
+  of its own before the rewritten one and outside every loop of it; the
+  statement reads `D[i, r]` where the sum was. Each theorem's step stays a
+  row, and reading the kept tables is one more, proved by unfolding them;
+  the kept tables have handles, `derived.D`.
+- **An array a math step leaves unread is set aside**
+  (`Term.set_aside`): once the inverse mass cancels the mass, `M` is read
+  nowhere, and the schedule still takes it, as the kernel does, while the
+  compiled code neither declares nor passes it. The C target refused such a
+  kernel before (`docs/loopy-notes.md`, note 1).
+- **A postcondition by a cited theorem, under conditions on the kernel's
+  tables.** `@kernel(uses=[element_mass])`: where the theorem concludes, of
+  what the kernel stores with its tables left as cells, the left side of
+  each conjunct of the postcondition, its hypotheses at those tables are
+  rows tested at the tables' digits, and the postcondition reads `..., by
+  element_mass`, proved by Lean over the reals from them, the theorem and
+  what the kernel stores (`loopty.reals.ByTheorem`).
+- **`examples/advection.py` derives `volume` and `lift` from grudge's
+  operator.** `weak_rhs` is `inverse_mass(v . weak_local_grad(u) -
+  face_mass(flux))` as the math says it, dense, and `derived =
+  Schedule(weak_rhs).rewrite(weak_rhs.rhs, by=(inverse_mass_inward,
+  lift_inward), keep=("D", "L"))` reads "weak_rhs, with rhs rewritten by the
+  inverse mass pushed inward and the lift pushed inward, keeping D and L".
+  The two theorems take `M^-1 M` the identity as their hypothesis `inverse`
+  and conclude what `volume` and `lift` compute; `weak_rhs` stores each
+  direction's field with its axis last, so one theorem matches all three
+  directions and one all six faces. `python` runs `derived` compiled against
+  `volume` and `lift` at order 3.
+- **`examples/assembly.py`'s `mass_ffc` cites `element_mass`**, now stated
+  of tables that are the rule (`tabulated`): FFC's 15-digit tables are a
+  condition on the tables, tested at their digits, and the postcondition is
+  the theorem's conclusion.
+
 - **The demos write their proofs.** `examples/l2p.py`'s `compressed_taylor`
   proves itself as a textbook does: the claim at `(a, b)` is what is stored
   where `a < 2`, and otherwise a chain, `R[a, b]` equals `-R[a - 2, b + 2]`
@@ -24,6 +75,31 @@ All notable changes to loopty are recorded here. The format follows
   `lanky check --steps` prints its outline, a row per step at its line.
   Without Lean, each link is drawn, and the proof reads `NOT CHECKED` with
   why.
+
+- **The demos prove and derive more of what they claim** (the user,
+  2026-10-16).
+  - `examples/layer_potential.py`'s double layer is tied to a theorem
+    (#281). `reciprocal_taylor` gives the line-Taylor coefficients of `alpha
+    / (alpha + tau * beta)`, the powers of `-beta / alpha`, proved by its
+    body, the induction `line_taylor` writes. `double_layer` cites it, and
+    its ledger reads `double_layer adds reciprocal_taylor's b(n) for n in
+    0..5, for every b with nonzero, first_term and ode, read over the complex
+    numbers`, proved by Lean with Mathlib, a term at a time.
+  - `examples/hexahedra.py`'s `weak_div` is the divergence as grudge's
+    `weak_local_div` says it, a dense kernel with the metric terms summed
+    into the flux first. `factored_div` derives its passes by the rewrite
+    that derives `weak_grad`'s, `rewrite(weak_div.div, by=sum_factorization,
+    keep=("r_pass", "s_pass"))`. The passes written by hand are
+    `div_passes`, which `benchmarks/hexahedra.py` times.
+  - `examples/advection.py` and `examples/assembly.py` say why no kernel
+    cites their theorems yet: each would take a condition on a table (#285,
+    #342).
+  - The coverage in `docs/lean-checks.md` counts them: of 1638 facts isl
+    decides, Lean proves 1574, and with Mathlib all 1600 that are not
+    refuted on purpose. The 27 more of `examples/hexahedra.py` are the
+    derived divergence's, all proved; the one more of
+    `examples/layer_potential.py` is `double_layer`'s series, which needs
+    Mathlib.
 
 - **The theorem matcher's higher-order rule**, shared with lanky
   (`lanky.matching.higher_order_value`). With `higher_order=True`, a
@@ -88,7 +164,112 @@ All notable changes to loopty are recorded here. The format follows
 - **lanky's `Complex` is an element type**, stored as `complex128`, as `Real`
   is stored as `float64`: `Arr[Fin[nt], Complex]`.
 
+### Changed
+
+- **A run says what it measured in words every machine prints alike.** The
+  digits of roundoff are the processor's: numpy picks its summation loops by
+  the processor, and the BLAS its kernels, so the pool measured `7.22e-16`
+  beside an allowance of `1.01e-06` for the hexahedra demo's factored
+  `grad`, where GitHub's runners measured `6.11e-16` beside `1.36e-06`, at
+  another cell. A run's line now says the difference as `0`, `at roundoff`
+  (within what the `reassoc` class allows, the room another order of the
+  same arithmetic needs), or only that it is within the allowance, beside
+  the class's allowance, the same for every cell:
+
+  ```
+    grad: difference at roundoff within 1e-06 of each value (approx) -> tested
+  ```
+
+  The allowance is relative, as the line says and the compared row of a
+  rewrite already said (`within 1e-06 of each value`): a cell of `1e9` is
+  allowed about `1e3` (Codex on #344 and #348). An `exact` output reads
+  `within 0 (exact)`. `loopty run --verbose` adds the figures, those of the cell that came
+  closest to its allowance (`; measured 7.22e-16 where 1.01e-06 is
+  allowed`), and the ledger `--json` writes has them as before. A
+  disagreement prints the figures of its cell always:
+  `y: difference 7, allowed 2.2e-05 (approx) -> refuted`. A rewrite's
+  compared row says `(measured at roundoff)` where it said `(measured 8e-16
+  of the largest)`, with the figure in its provenance. The demos print a run
+  as `loopty run` does, through `loopty.executor.differences(fact)`, and
+  `hexahedra.py`'s first line states the bound it checks, `to 1e-13 of the
+  largest value`, in place of the difference the BLAS sets.
+
+- **lanky 0.5.0 is the floor**, the lanky release that ships `lanky.known`,
+  whose two facts `layer_potential.py`'s proof of `log_of_the_modulus`
+  cites. It is not on PyPI yet: until it is, CI's released-lanky job says so
+  in a notice and skips its steps, and the release PR relocks `uv.lock`
+  against the published lanky. Only a floor no release meets skips it: the
+  probe resolves lanky alone and skips where the resolver says no release
+  of lanky is at the floor, so a release whose Python requirement or
+  dependencies do not fit still fails the job (Codex on #344 and #348).
+
 ### Fixed
+
+- **A postcondition is credited to a theorem the kernel cites only where the
+  theorem concludes it** (Codex on #347 and #348). The theorem's equation was
+  matched by its left side alone, against what the kernel stores, so a
+  postcondition with another right side read `..., by <theorem>` and rested
+  on the theorem and its conditions on the tables. The right side at the same
+  binding now has to be the postcondition's too, by algebra: both are read as
+  polynomials with rational coefficients in the cells, the names and every
+  subterm that is no polynomial (`abs(...)`, a quotient by a variable), its
+  inside read the same way, and the two polynomials have to be one. So
+  `element_mass`'s `abs(J) * 2 / 24` is `mass_ffc`'s `abs(jacobian(x)) /
+  12`, while `abs(x)` is not `x`, `abs(z)**2` is not `z*z`, `x / x` is not
+  `1`, and `x * (1 + 1e-13)` is not `x`; a claim of a sixth of the sum times
+  `1 + 1e-8`, true only to the approx tolerance, is the kernel's own claim,
+  tested on the runs. Draws, tried first, let each of these through.
+
+- **With Mathlib, Lean proves `mass_ffc`'s postcondition by `element_mass`
+  again**, as it proved the closed form before the theorem was cited. Each
+  part was given to `linarith` alone, which reads a table's value times an
+  input as an atom, and found no proof, so the row read `tested` and
+  `tests/test_lean_checks.py` failed on `assembly.py` with Mathlib. The
+  part's equations, what the kernel stores and the theorem's conditions at
+  its tables, are now rewritten with in turn, and `ring` closes it.
+
+- A compiled kernel with an array a rewrite set aside is passed the sizes
+  that array alone carried: `x: Arr[Fin[m], Real]` read only as `x[j] * 0`
+  is set aside, the sum over `Fin[m]` still runs, and loopy had no shape to
+  read `m` off (Codex on #348).
+
+- A sum of tables that reads one index on axes of two extents, `A[i, q] *
+  B[i, q]` with `A` of `n` rows and `B` of `k`, is not kept as a table: the
+  kept table ran over the first array's axis and read the other past its end.
+  Nor is one with an index that mixes its binder with a loop around it,
+  `T[q + i]`, which left `i` free in the table (Codex on #348).
+
+- A kept sum of tables keeps the sum's own type, the one its tables promote
+  to: complex tables under `real(...)` in a real output stay complex,
+  `float64` tables in a `float32` output stay `float64`, and `float32`
+  tables in a `float64` output stay `float32`, as the sum accumulated before
+  it was kept; it took the output's element type, and lost the imaginary
+  part or changed the rounding before the arithmetic around it ran. A kept
+  sum with more indices than spare letters names its loops `p1`, `q1`, and
+  so on, where it raised `StopIteration` (Codex on #348).
+
+- The draws that compare a rewrite take a table kept as it is with the sizes
+  its axes determine, `n` from a `Fin[n + 1]` axis of 6 cells as a call
+  solves it; only a bare `Fin[n]` fixed a size, and the other arrays were
+  drawn at a size of their own (Codex on #348).
+
+- An array a rewrite set aside, as `M` once the inverse mass cancels it,
+  stays aside through a later rewrite of the same schedule, which reads it
+  no more; the later step worked the arrays out again from the term before
+  it, which no longer names `M`, and its lowering took `M` for an argument
+  the code needs (Codex on #347 and #348).
+
+- **The transcripts' check passes on GitHub's runners and on the pool
+  alike.** The six lines #341 elided as a stopgap, the measured differences
+  of the hexahedra runs and the single layer's compared row, are back, in
+  the words above, and `refresh_example_outputs.py --check` no longer
+  depends on the machine that made the documents.
+
+- The transcripts in `examples/README.md` show lanky's shorter `NOT CHECKED`
+  line, a clause where the `WITHOUT LEAN` line above it already says what is
+  missing: `NOT CHECKED log_of_the_modulus at layer_potential.py:240: without
+  Lean, each step of its proof was tested at drawn points instead (lines 247
+  and 248).` (lanky#179).
 
 - **A cited theorem is restated from the text Lean proved of it.** A theorem
   applied to a kernel's postcondition, the theorem and identities of a
@@ -103,7 +284,10 @@ All notable changes to loopty are recorded here. The format follows
   whose citation is not the theorem's statement. A theorem with no proved
   text, an axiom or one only tested, is restated as before, and the row
   says so. Needs the lanky of the same name; against lanky 0.4.0 the parts
-  are what they were.
+  are what they were. Each citation is lanky's one record of a fact cited,
+  `lanky.citations.Citation(theorem, hypothesis=position)`, the theorem at
+  the hypothesis that restates it (`loopty.obligations.cited`); a lanky of
+  before it gets `lanky.obligations.Citation`, as it did.
 
 - **A run leaves no `tmp_loopy*` directory behind (#335).** loopy 2025.2's C
   compiler makes a directory in `$TMPDIR` with each C target and never

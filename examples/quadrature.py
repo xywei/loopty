@@ -146,7 +146,7 @@ def example_inputs() -> dict:
 
 def main() -> int:
     """Run on both meshes natively, then show the tables and the compiled run."""
-    from loopty.executor import LoopyExecutor, emit_code
+    from loopty.executor import LoopyExecutor, differences, emit_code
 
     ok = True
     for label, mesh in (
@@ -168,12 +168,8 @@ def main() -> int:
         mass_action, split_cells, inputs_on(square_mesh())
     )
     print(f"schedule: {split_cells!r}")
-    for name, detail in fact.provenance["outputs"].items():
-        print(
-            f"  {name}: difference {detail['difference']:.3g} within "
-            f"{detail['tolerance']:.3g} ({detail['exactness']}) -> "
-            f"{fact.status.value}"
-        )
+    for line in differences(fact):
+        print(f"  {line}")
     return 0 if ok and fact.status.value == "tested" else 1
 
 

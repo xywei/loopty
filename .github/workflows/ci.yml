@@ -112,18 +112,42 @@ jobs:
         with:
           enable-cache: true
 
+      # The floor can name the lanky release main waits for before it is on
+      # PyPI (lanky>=0.5.0, which ships lanky.known). Until it is, there is no
+      # released pair to test: the job says so in a notice and skips the
+      # rest. Only that skips it: the probe resolves lanky alone, without its
+      # dependencies, and skips only where the resolver says no release of
+      # lanky meets the floor ("only lanky<=0.4.0 is available", "there is no
+      # version of lanky"). A release whose Python requirement does not fit
+      # fails the probe, and one whose dependencies conflict fails the
+      # install below.
       - name: Install loopty, with lanky from PyPI
+        id: install
         run: |
           set -euo pipefail
           uv venv --python 3.13
+          floor=$(.venv/bin/python -c 'import tomllib; print(next(d for d in tomllib.load(open("pyproject.toml", "rb"))["project"]["dependencies"] if d.startswith("lanky")))')
+          if ! resolved=$(uv pip install --no-sources --no-deps --dry-run "${floor}" 2>&1); then
+            if grep -Eq "only lanky[^ ]* (is|are) available and you require lanky|there is no version of lanky" <<<"${resolved}"; then
+              echo "::notice title=released lanky::${floor} is not on PyPI yet; this job tests the released pair once it is"
+              echo "released=false" >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
+            echo "${resolved}" >&2
+            exit 1
+          fi
+          echo "released=true" >> "${GITHUB_OUTPUT}"
           uv pip install --no-sources -e . pytest
           .venv/bin/python -c "import importlib.metadata as m; print('lanky', m.version('lanky'), 'from PyPI')"
 
       - name: Pytest
+        if: steps.install.outputs.released == 'true'
         run: .venv/bin/python -m pytest -q
 
       - name: Check the worked example
+        if: steps.install.outputs.released == 'true'
         run: .venv/bin/lanky check examples/spmv.py
 
       - name: Run the worked example
+        if: steps.install.outputs.released == 'true'
         run: .venv/bin/loopty run examples/spmv.py

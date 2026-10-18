@@ -186,7 +186,7 @@ def example_inputs() -> dict:
 
 def main() -> int:
     """Run the near field natively, then compiled, and compare both."""
-    from loopty.executor import LoopyExecutor
+    from loopty.executor import LoopyExecutor, differences
 
     data = scene()
     counts = data["cnt"].numpy()
@@ -214,12 +214,8 @@ def main() -> int:
 
     print()
     fact = LoopyExecutor().differential(p2p, split_targets, scene())
-    for name, detail in fact.provenance["outputs"].items():
-        print(
-            f"  {name}: difference {detail['difference']:.3g} within "
-            f"{detail['tolerance']:.3g} ({detail['exactness']}) -> "
-            f"{fact.status.value}"
-        )
+    for line in differences(fact):
+        print(f"  {line}")
     return 0 if native_ok and fact.status.value == "tested" else 1
 
 
