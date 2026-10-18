@@ -336,7 +336,8 @@ def test_a_table_taken_as_it_is_fixes_the_size_its_axis_solves_for() -> None:
 def test_a_kept_sum_of_complex_tables_is_complex_in_a_real_output() -> None:
     """Stored at the output's type, its imaginary part was gone before ``real`` read it.
 
-    Codex on #348: the kept table took the destination's element type.
+    Codex on #348: the kept table took the destination's element type, and
+    then the first complex one, where it is the type the tables promote to.
     """
     from lanky.prelude import Complex
     from lanky.terms import Subscript, Var
@@ -355,6 +356,16 @@ def test_a_kept_sum_of_complex_tables_is_complex_in_a_real_output() -> None:
     assert _kept_dtype(numpy, types, np.dtype(np.float64)) == np.complex128
     real_only = Subscript(Var("W"), Var("_b0")) * 2
     assert _kept_dtype(real_only, types, Real) is Real
+    # promoted as numpy promotes, among real and complex types only
+    types["S"] = ArrType(axes=(3,), dtype=np.dtype(np.float32), ragged=(False,))
+    types["Y"] = ArrType(axes=(3,), dtype=np.dtype(np.complex64), ragged=(False,))
+    types["N"] = ArrType(axes=(3,), dtype=np.dtype(np.int64), ragged=(False,))
+    wide = Subscript(Var("W"), Var("_b0")) * Subscript(Var("S"), Var("_b0"))
+    assert _kept_dtype(wide, types, np.dtype(np.float32)) is Real
+    both = Subscript(Var("Y"), Var("_b0")) * Subscript(Var("Z"), Var("_b0"))
+    assert _kept_dtype(both, types, np.dtype(np.float32)) == np.complex128
+    index = Subscript(Var("N"), Var("_b0")) * Subscript(Var("S"), Var("_b0"))
+    assert _kept_dtype(index, types, np.dtype(np.float32)) == np.float32
 
 
 def test_a_sum_reading_one_index_on_axes_of_two_extents_is_not_a_table() -> None:

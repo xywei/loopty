@@ -234,9 +234,11 @@ All notable changes to loopty are recorded here. The format follows
   kept table ran over the first array's axis and read the other past its end
   (Codex on #348).
 
-- A kept sum of complex tables under `real(...)` in a real output is kept as
-  complex numbers; it took the output's element type, and lost its
-  imaginary part before `real` read it (Codex on #348).
+- A kept sum of tables keeps the type its tables promote to: complex tables
+  under `real(...)` in a real output stay complex, and `float64` tables in a
+  `float32` output stay `float64`; it took the output's element type, and
+  lost the imaginary part or the digits before the arithmetic around it ran
+  (Codex on #348).
 
 - The draws that compare a rewrite take a table kept as it is with the sizes
   its axes determine, `n` from a `Fin[n + 1]` axis of 6 cells as a call

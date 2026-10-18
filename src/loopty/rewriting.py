@@ -3283,15 +3283,20 @@ def _keep_sums(
 
 
 def _kept_dtype(template: Any, types: Mapping[str, Any], element: Any) -> Any:
-    """A kept sum's element type: the output's, or complex where a table it reads is.
+    """A kept sum's element type: the output's, promoted by the tables it reads.
 
-    A complex sum of tables under ``real(...)`` in a real output is complex,
-    and a table of it stored at the output's type would drop its imaginary
-    part before ``real`` reads it. The type is the first complex one among
-    the tables', as the kernel spells it (``Complex``, or a numpy type).
+    The sum is stored before the arithmetic around it runs, so it keeps the
+    type that arithmetic would have read it at: a complex sum of tables
+    under ``real(...)`` in a real output stays complex, and a sum of
+    ``float64`` tables in a ``float32`` output stays ``float64``. Only
+    real and complex types promote, as numpy promotes them; an integer
+    table, an index, widens nothing. The type is spelled as the kernel
+    spells it where one of its arrays has it (``Complex``), else numpy's.
     """
-    if _complex_sort(element):
+    widest = _inexact(element)
+    if widest is None:
         return element
+    chosen = element
     stack = [template]
     while stack:
         node = stack.pop()
@@ -3299,26 +3304,32 @@ def _kept_dtype(template: Any, types: Mapping[str, Any], element: Any) -> Any:
             node.aggregate, prim.Variable
         ):
             typ = types.get(node.aggregate.name)
-            if isinstance(typ, ArrType) and _complex_sort(typ.dtype):
-                return typ.dtype
+            own = _inexact(typ.dtype) if isinstance(typ, ArrType) else None
+            if own is not None:
+                promoted = np.result_type(widest, own)
+                if promoted != widest:
+                    widest = promoted
+                    chosen = typ.dtype if own == promoted else promoted
         if isinstance(node, prim.ExpressionNode):
             stack.extend(init_args(node))
         elif isinstance(node, tuple):
             stack.extend(node)
-    return element
+    return chosen
 
 
-def _complex_sort(sort: Any) -> bool:
-    """Whether the points of ``sort`` are complex numbers, ``Complex`` or numpy's."""
+def _inexact(sort: Any) -> Any:
+    """The numpy type of a real or complex element sort, or ``None`` for another."""
     from lanky.prelude import Refined, Sort
 
     base = sort.base if isinstance(sort, Refined) else sort
     if isinstance(base, Sort):
-        return base.name == "Complex"
+        found = {"Real": np.float64, "Complex": np.complex128}.get(base.name)
+        return None if found is None else np.dtype(found)
     try:
-        return bool(np.issubdtype(np.dtype(base), np.complexfloating))
+        dtype = np.dtype(base)
     except TypeError:
-        return False
+        return None
+    return dtype if np.issubdtype(dtype, np.inexact) else None
 
 
 def _taken(term: Term) -> set[str]:
