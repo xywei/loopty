@@ -168,14 +168,14 @@ kept here ([benchmarks/README.md](https://github.com/xywei/loopty/blob/main/benc
 
 ## Run it
 
-The demos run on the 0.5.0 releases of loopty and lanky on PyPI. The
+The demos run on the 0.6.0 releases of loopty and lanky on PyPI. The
 examples are in the repository and not in the package, so clone the
 release's tag for them. On Python 3.12 or 3.13 with a C compiler:
 
 ```sh
 python3.13 -m venv .venv && . .venv/bin/activate
 pip install loopty "lanky[lean,cas]"
-git clone --branch v0.5.0 https://github.com/xywei/loopty.git && cd loopty
+git clone --branch v0.6.0 https://github.com/xywei/loopty.git && cd loopty
 python examples/l2p.py
 lanky check examples/l2p.py
 loopty run examples/l2p.py
@@ -529,15 +529,17 @@ table of row starts. Both compiled runs agree with the native one.
 
 ## Status
 
-This is 0.5.0. The core works: kernels and programs run natively, trace, state
+This is 0.6.0. The core works: kernels and programs run natively, trace, state
 their facts, lower and run compiled on the C target, and every schedule step
-is checked; the edges are sharp. New in 0.5.0, a schedule step can rewrite
-what a kernel computes by a claim, `Schedule(k).rewrite(k.out,
-by=some_claim)`, checked like every other step, and the demos write their
-proofs in Python (lanky 0.5.0) and prove facts they used to assume. 0.4.0
-named what a schedule moves by where the file defines it, `l2p.unpack.box`,
-and let a kernel body branch with Python's own `if` and `else`; the
-CHANGELOG has the migration from 0.3, step by step. The five demos
+is checked; the edges are sharp. New in 0.6.0, the demos read as engineers
+write checks, in lanky 0.6's claims: a proof is `assert` steps with their
+reasons and a loop over the conclusion's points, and an assumption several
+claims share is a named condition, `with away_from_zero as (alpha, beta,
+nonzero):`. 0.5.0 let a schedule step rewrite what a kernel computes by a
+claim, `Schedule(k).rewrite(k.out, by=some_claim)`; 0.4.0 named what a
+schedule moves by where the file defines it, `l2p.unpack.box`, and let a
+kernel body branch with Python's own `if` and `else`. The CHANGELOG has each
+migration, step by step. The five demos
 at the top of this page came with 0.3.0, as did Lean's proof of each fact
 isl decides. Below is what works,
 what works in part and what does not work yet. After it, Known limits lists
@@ -1646,13 +1648,13 @@ The Partial and Not yet lists under Status have the rest, and the
 pip install loopty
 ```
 
-That is the 0.5.0 release, whose spelling this page uses, with the five
+That is the 0.6.0 release, whose spelling this page uses, with the five
 demos at the top of it ([Run it](#run-it)). loopty runs on Python 3.12 and
 3.13: the islpy it is held to has no wheels for 3.14. CI, and every run this
 README reports, is on Linux. In a uv project, `uv add loopty`, and the same
 for the extra below. The install pulls in:
 
-- [lanky](https://github.com/xywei/lanky) 0.5.0 or later, the proof host:
+- [lanky](https://github.com/xywei/lanky) 0.6.0 or later, the proof host:
   `lanky check` prints the ledger, and loopty plugs into it;
 - [loopy](https://github.com/inducer/loopy) 2025.2, which generates the code.
   loopty builds on loopy's internals, so a release of loopty is held to the

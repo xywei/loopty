@@ -10,7 +10,7 @@ from loopty import cli
 
 
 def test_version() -> None:
-    assert loopty.__version__ == "0.5.0"
+    assert loopty.__version__ == "0.6.0"
 
 
 def test_top_level_names_are_re_exported() -> None:
