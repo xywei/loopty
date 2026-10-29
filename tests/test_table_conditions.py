@@ -355,44 +355,51 @@ def test_a_sum_mixing_its_binder_with_a_loop_in_one_index_is_not_a_table() -> No
     assert _templated(found, {"out"}, term.array_types) is None
 
 
-def test_a_kept_sum_of_complex_tables_is_complex_in_a_real_output() -> None:
-    """Stored at the output's type, its imaginary part was gone before ``real`` read it.
+@pytest.mark.parametrize(
+    ("left", "right", "literal", "expected"),
+    [
+        (np.complex128, np.float64, 1, np.complex128),
+        (np.float64, np.float32, 1, np.float64),
+        (np.complex64, np.complex128, 1, np.complex128),
+        (np.int64, np.float32, 1, np.float64),
+        (np.float32, np.float32, 2, np.float32),
+        (np.int32, np.int32, 0.5, np.float64),
+        (np.int32, np.int32, 0.5j, np.complex128),
+        (np.int32, np.int32, 2, np.int32),
+    ],
+)
+def test_kept_type_includes_the_whole_reduction(left, right, literal, expected):
+    import dataclasses
 
-    Codex on #348: the kept table took the destination's element type, and
-    then the first complex one, where it is the type the tables promote to.
-    """
-    from lanky.prelude import Complex
     from lanky.terms import Subscript, Var
 
+    from loopty.contract import compiled_storage
     from loopty.rewriting import _kept_dtype
-    from loopty.term import ArrType
+    from loopty.term import ArrType, Reduction
 
-    types = {
-        "C": ArrType(axes=(3,), dtype=Complex, ragged=(False,)),
-        "W": ArrType(axes=(3,), dtype=Real, ragged=(False,)),
-        "Z": ArrType(axes=(3,), dtype=np.dtype(np.complex128), ragged=(False,)),
-    }
-    template = Subscript(Var("C"), Var("_b0")) * Subscript(Var("W"), Var("_b0"))
-    assert _kept_dtype(template, types, Real) is Complex
-    numpy = Subscript(Var("Z"), Var("_b0")) * Subscript(Var("W"), Var("_b0"))
-    assert _kept_dtype(numpy, types, np.dtype(np.float64)) == np.complex128
-    real_only = Subscript(Var("W"), Var("_b0")) * 2
-    assert _kept_dtype(real_only, types, Real) is Real
-    # promoted as numpy promotes, among real and complex types only
-    types["S"] = ArrType(axes=(3,), dtype=np.dtype(np.float32), ragged=(False,))
-    types["Y"] = ArrType(axes=(3,), dtype=np.dtype(np.complex64), ragged=(False,))
-    types["N"] = ArrType(axes=(3,), dtype=np.dtype(np.int64), ragged=(False,))
-    wide = Subscript(Var("W"), Var("_b0")) * Subscript(Var("S"), Var("_b0"))
-    assert _kept_dtype(wide, types, np.dtype(np.float32)) is Real
-    both = Subscript(Var("Y"), Var("_b0")) * Subscript(Var("Z"), Var("_b0"))
-    assert _kept_dtype(both, types, np.dtype(np.float32)) == np.complex128
-    index = Subscript(Var("N"), Var("_b0")) * Subscript(Var("S"), Var("_b0"))
-    assert _kept_dtype(index, types, np.dtype(np.float64)) == np.float32
-    # the sum's own type, not widened to the output's (Codex, #348)
-    narrow = Subscript(Var("S"), Var("_b0")) * 2
-    assert _kept_dtype(narrow, types, Real) == np.float32
-    counts = Subscript(Var("N"), Var("_b0")) * 2
-    assert _kept_dtype(counts, types, Real) is Real
+    term = dataclasses.replace(
+        weak.term,
+        params=(
+            ("A", ArrType(axes=(3,), dtype=np.dtype(left), ragged=(False,))),
+            ("B", ArrType(axes=(3,), dtype=np.dtype(right), ragged=(False,))),
+        ),
+    )
+    body = Subscript(Var("A"), Var("q")) * Subscript(Var("B"), Var("q")) * literal
+    reduction = Reduction("sum", ("q",), term.stmts[0].domain, body, "approx")
+    assert compiled_storage(_kept_dtype(reduction, term)) == expected
+
+
+def test_keep_refuses_an_unknown_computed_type():
+    from lanky.terms import Var
+
+    from loopty.rewriting import IllegalRewrite, _kept_dtype
+    from loopty.term import Reduction
+
+    reduction = Reduction(
+        "sum", ("q",), weak.term.stmts[0].domain, Var("unknown")(1), "approx"
+    )
+    with pytest.raises(IllegalRewrite, match="cannot determine the sum"):
+        _kept_dtype(reduction, weak.term)
 
 
 def test_a_sum_reading_one_index_on_axes_of_two_extents_is_not_a_table() -> None:
@@ -541,3 +548,41 @@ def test_weights_off_beyond_their_digits_refute_the_condition() -> None:
 
 
 # }}}
+
+
+@kernel
+def integer_half_sum(
+    counts: Arr[Fin[n], Fin[m], np.int32],  # noqa: F821
+    out: Arr[Fin[n], np.float32],  # noqa: F821
+):
+    for i in out.dom:
+        out[i] = reduce_sum(counts[i, q] * 0.5 for q in counts.dom[i]) - 16777216.0
+
+
+def test_storing_an_integer_tables_real_sum_does_not_round_before_subtraction():
+    """#349: 16777216.5 must survive storage before the subtraction leaves 0.5."""
+    import dataclasses
+
+    from loopty.executor import LoopyExecutor
+    from loopty.interpret import interpret
+    from loopty.rewriting import Rewritten, _keep_sums, _table_sums, _taken
+
+    term = integer_half_sum.term
+    (stmt,) = term.stmts
+    # Model the result of a theorem rewrite introducing this sum. Exercise
+    # the real table extraction, storage construction, interpreter and compiler.
+    before = dataclasses.replace(term, stmts=(dataclasses.replace(stmt, expr=0),))
+    rewritten = Rewritten("out", "out", "keep", before, term, ())
+    sums = _table_sums(rewritten, stmt.id)
+    assert sums is not None and len(sums) == 1
+    kept = _keep_sums(
+        rewritten, stmt.id, ("v",), sums, _taken(term) | {"v"}, "keep", ""
+    )
+    assert dict(kept.after.temporaries)["v"].dtype == np.float64
+
+    for candidate in (term, kept.after):
+        for run in (interpret, lambda t, args: LoopyExecutor().run(t, **args)):
+            args = {"counts": np.array([[33554433]], dtype=np.int32),
+                    "out": np.zeros(1, dtype=np.float32)}
+            result = run(candidate, args)
+            np.testing.assert_array_equal(result["out"], [0.5])
