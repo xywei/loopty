@@ -3308,7 +3308,9 @@ def _kept_dtype(reduction: Reduction, term: Term) -> Any:
     misses integer true division and real or complex literals (#349). An
     unknown type cannot safely be guessed from the eventual output.
     """
-    from loopty.contract import array_storage
+    from lanky.prelude import Complex, Real
+
+    from loopty.contract import compiled_storage
     from loopty.promotion import Promotion
 
     _native, dtype = Promotion(term).types(reduction)
@@ -3317,10 +3319,10 @@ def _kept_dtype(reduction: Reduction, term: Term) -> Any:
             "keep= cannot determine the sum's computed type; leave this sum "
             "in the expression instead of storing it"
         )
-    # Preserve the source spelling (Real, Complex, etc.) when it denotes
-    # exactly this storage type, including checked-point storage conversions.
-    for name, typ in term.array_types.items():
-        if array_storage(term, name, typ.dtype) == dtype:
+    # Keep common source spellings without inheriting a table's refinements
+    # or finite-index bounds: the reduction need not satisfy those bounds.
+    for typ in term.array_types.values():
+        if typ.dtype in (Real, Complex) and compiled_storage(typ.dtype) == dtype:
             return typ.dtype
     return dtype
 
