@@ -2727,6 +2727,9 @@ def requirement_facts(
             line=line,
         )
         provenance: dict[str, Any] = {
+            "label": (
+                f"{owner}.{requirement.call}: {requirement.kind} {requirement.param}"
+            ),
             "call": requirement.call,
             "kernel": requirement.kernel,
             "param": requirement.param,
