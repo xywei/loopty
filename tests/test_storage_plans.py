@@ -14,7 +14,7 @@ def test_single_window_matches_contract_and_keeps_the_call_site():
     result = schedule.materialize(plan)
     expected = schedule.contract(WINDOWS.burgers.f, lambda j: j % 3, registers=False)
     assert result.key == expected.key
-    assert result._steps_at[-1].startswith("test_storage.py:")
+    assert result._steps_at[-1].startswith("test_storage_plans.py:")
     assert schedule.windows == {}
     assert plan.inspect()["lowering_limit"] is None
 
