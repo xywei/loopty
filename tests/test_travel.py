@@ -1307,3 +1307,22 @@ def test_a_requirement_decided_under_an_axiom_is_checked_all_the_same() -> None:
 
 
 # }}}
+
+
+def test_requirement_prerequisites_have_readable_labels_without_changing_identity():
+    from lanky.ledger import Fact
+
+    from loopty.typing import requirement_facts
+
+    requirements = requirement_facts(travel.flat.term, "flat")
+    requirement = next(f for f in requirements if f.provenance["param"] == "off")
+    result = Fact(
+        "dependent", "in-bounds", "access is in bounds", owner="flat",
+        status=Status.DECIDED, rests_on=(requirement.id,),
+    )
+    found = Ledger([requirement, result])
+    label = requirement.provenance["label"]
+    assert label == "flat.weigh_flat: layout off"
+    assert f"decided under {label}" in found.render()
+    assert found.support(result).effective is Status.ASSUMED
+    assert found.to_dicts()[-1]["under"] == [requirement.id, *requirement.rests_on]

@@ -1,4 +1,4 @@
-"""loopty's plugin surface: the four objects lanky discovers by entry point.
+"""loopty's plugin surface: the objects lanky discovers by entry point.
 
 lanky never imports loopty. It reads the entry-point groups ``lanky.theories``,
 ``lanky.oracles``, ``lanky.executors`` and ``lanky.verbs``, and every one of
@@ -8,6 +8,7 @@ a class does.
 
 * :class:`KernelTheory` turns decorated kernels into facts.
 * :class:`IslOracle` decides the Presburger ones, with witnesses.
+* :class:`StorageOracle` rechecks retained storage-phase evidence.
 * :class:`LoopyExecutor` runs kernels and schedules through loopy.
 * :class:`RunVerb` is the ``run`` subcommand of both commands.
 """
@@ -18,5 +19,6 @@ from loopty.cli import RunVerb
 from loopty.executor import LoopyExecutor
 from loopty.kernel import KernelTheory
 from loopty.oracle import IslOracle
+from loopty.storage_evidence import StorageOracle
 
-__all__ = ["IslOracle", "KernelTheory", "LoopyExecutor", "RunVerb"]
+__all__ = ["IslOracle", "KernelTheory", "LoopyExecutor", "RunVerb", "StorageOracle"]

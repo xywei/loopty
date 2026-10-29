@@ -42,10 +42,11 @@ def test_cli_version(capsys) -> None:
     assert loopty.__version__ in capsys.readouterr().out
 
 
-def test_plugin_module_exports_the_four_entry_points() -> None:
+def test_plugin_module_exports_the_entry_points() -> None:
     from loopty import plugin
 
     assert plugin.IslOracle().trust_class() == "decision-procedure"
+    assert plugin.StorageOracle().trust_class() == "decision-procedure"
     assert plugin.RunVerb().name == "run"
     assert plugin.KernelTheory.name == "kernel"
     assert plugin.LoopyExecutor.name == "loopy"
