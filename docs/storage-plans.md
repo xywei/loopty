@@ -98,8 +98,9 @@ Adding real prerequisite facts lets the ordinary lanky support graph determine
 strength; callers must not manufacture a decided input-correspondence fact merely
 to remove an assumed row. Argument contracts belong in that eventual input chain.
 
-Changing a schedule conservatively invalidates inherited checkpoint applicability,
-including changes that might ultimately be shown harmless. Such facts are assumed
+Changing schedule transformations conservatively invalidates inherited checkpoint applicability,
+including changes that might ultimately be shown harmless. Attaching example
+inputs preserves evidence because it does not change the symbolic kernel. Stale facts are assumed
 with a stale-snapshot explanation. Retargeting rebuilds and replays the schedule,
 so it captures new target-specific checkpoints. Earlier checkpoints from multiple
 contractions remain historical; the newest checkpoint does not prove all earlier

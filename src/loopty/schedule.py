@@ -3856,6 +3856,9 @@ class Schedule:
         other = self._clone()
         other._examples = dict(arrays)
         other._logged = {}
+        # Example inputs change diagnostics and sampling, not the symbolic
+        # kernel or its transformation evidence. Retargeting also uses this.
+        other._storage_binding = self._storage_binding
         return other
 
     @property

@@ -60,7 +60,8 @@ def test_later_cast_invalidates_inherited_evidence_but_does_not_change_old_snaps
 
 
 def test_retargeting_replays_and_binds_new_evidence():
-    before = windowed()
+    before = windowed().example()
+    assert before.storage_facts()[0].status is Status.DECIDED
     after = before.retarget("opencl")
     (fresh,) = after.storage_facts()
     assert fresh.status is Status.DECIDED
