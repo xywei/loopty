@@ -3205,7 +3205,6 @@ def _keep_sums(
     stmt = term.stmt(stmt_id)
     spelled = dict(zip(stmt.inames, stmt.spelled or stmt.inames, strict=False))
     where = at or stmt.where
-    element = term.array_types[stmt.assignee.array].dtype
     new_stmts: list[Stmt] = []
     kept: list[Kept] = []
     binders: list[Any] = []
@@ -3268,7 +3267,7 @@ def _keep_sums(
                 name,
                 ArrType(
                     axes=tuple(found.axes),
-                    dtype=_kept_dtype(found.template, term.array_types, element),
+                    dtype=_kept_dtype(new_stmts[-1].expr, term),
                     ragged=(False,) * len(found.axes),
                 ),
             )
@@ -3301,55 +3300,29 @@ def _keep_sums(
     return dataclasses.replace(rewritten, after=after, kept=tuple(kept), tables=True)
 
 
-def _kept_dtype(template: Any, types: Mapping[str, Any], element: Any) -> Any:
-    """A kept sum's element type: the one its tables promote to, else the output's.
+def _kept_dtype(reduction: Reduction, term: Term) -> Any:
+    """Store the whole reduction in the type the lowering computes it in.
 
-    The sum is stored before the arithmetic around it runs, so it keeps the
-    type the sum itself has, which is its tables' (an accumulation in the
-    type of what it adds), not the output's: a complex sum of tables under
-    ``real(...)`` in a real output stays complex, ``float64`` tables in a
-    ``float32`` output stay ``float64``, and ``float32`` tables in a
-    ``float64`` output stay ``float32``. Only real and complex types promote,
-    as numpy promotes them; an integer table, an index, gives none, and a
-    sum with no real or complex table keeps the output's type. The type is
-    spelled as the kernel spells it where one of its arrays has it
-    (``Complex``), else numpy's.
+    Promotion includes literals, operators, conversions and accumulation, as
+    it does when lowering the unkept expression. Looking only at array types
+    misses integer true division and real or complex literals (#349). An
+    unknown type cannot safely be guessed from the eventual output.
     """
-    widest = None
-    chosen = element
-    stack = [template]
-    while stack:
-        node = stack.pop()
-        if isinstance(node, prim.Subscript) and isinstance(
-            node.aggregate, prim.Variable
-        ):
-            typ = types.get(node.aggregate.name)
-            own = _inexact(typ.dtype) if isinstance(typ, ArrType) else None
-            if own is not None:
-                promoted = own if widest is None else np.result_type(widest, own)
-                if promoted != widest:
-                    widest = promoted
-                    chosen = typ.dtype if own == promoted else promoted
-        if isinstance(node, prim.ExpressionNode):
-            stack.extend(init_args(node))
-        elif isinstance(node, tuple):
-            stack.extend(node)
-    return chosen
+    from loopty.contract import array_storage
+    from loopty.promotion import Promotion
 
-
-def _inexact(sort: Any) -> Any:
-    """The numpy type of a real or complex element sort, or ``None`` for another."""
-    from lanky.prelude import Refined, Sort
-
-    base = sort.base if isinstance(sort, Refined) else sort
-    if isinstance(base, Sort):
-        found = {"Real": np.float64, "Complex": np.complex128}.get(base.name)
-        return None if found is None else np.dtype(found)
-    try:
-        dtype = np.dtype(base)
-    except TypeError:
-        return None
-    return dtype if np.issubdtype(dtype, np.inexact) else None
+    _native, dtype = Promotion(term).types(reduction)
+    if dtype is None:
+        raise IllegalRewrite(
+            "keep= cannot determine the sum's computed type; leave this sum "
+            "in the expression instead of storing it"
+        )
+    # Preserve the source spelling (Real, Complex, etc.) when it denotes
+    # exactly this storage type, including checked-point storage conversions.
+    for name, typ in term.array_types.items():
+        if array_storage(term, name, typ.dtype) == dtype:
+            return typ.dtype
+    return dtype
 
 
 def _taken(term: Term) -> set[str]:
