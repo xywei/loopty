@@ -71,8 +71,9 @@ window along one loop, every access at a fixed distance from it
 has a constant index, which a GPU keeps in registers where an index computed
 at run time puts the array in memory.
 
-This is #970's ``compute`` reuse, the relation between the slots one step
-reads and the ones the next reuses, with the check ``compute`` leaves out.
+The storage reuse and its source-level obligations are separate from backend
+realization. Upstream materialization facilities may replace the realization
+while these independent obligations continue to describe the requested window.
 """
 
 from __future__ import annotations

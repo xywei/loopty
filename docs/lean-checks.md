@@ -533,15 +533,6 @@ asked about, and claims core Lean has no words for; each says so with
   so has `tests/kernels/windows.py` a split after a window whose reader is a
   scatter-add, `y[node[i]] += ...`: the window's classes, and none of two
   updates.
-- **A device cast on a window each work item keeps:** a window of a number of
-  cells is each work item's own, so isl asks only the pairs of its accesses
-  that run on one work item to keep their order; Lean's statement of a cast
-  that puts a loop on a hardware axis claims that every pair runs on one,
-  which two boxes storing into one slot of their own windows do not, so the
-  cast is not proved and stays `decided`. `examples/l2p.py` checks such a
-  schedule, `on_a_device()`, with isl, and keeps the one in its ledger,
-  `on_a_gpu`, without windows; issue
-  [#295](https://github.com/xywei/loopty/issues/295).
 - **A part of a tile isl computed:** a statement in one of two tiled loops is
   split by the part of the tile's map over its loop, which isl computes; a
   cast with such a step is left `decided`; none of the examples has one;

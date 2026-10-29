@@ -1943,3 +1943,34 @@ def test_the_printed_predicates_hold_where_isl_says_in_lean(lean: Any) -> None:
 
 
 # }}}
+
+
+def test_private_window_slot_classes_only_require_order_when_owners_overlap():
+    windows = load(KERNELS / "windows.py")
+    device = windows.one_triangle.retarget("opencl").tag(
+        windows.triangles.triangle.i, "g.0"
+    )
+    fact = [f for f in device.facts() if f.kind == "monotone"][-1]
+    obligation = fact.term.lean_obligation()
+    assert not obligation.declined
+    names = [part.name for part in obligation.parts]
+    assert any(name.startswith("window_") for name in names)
+    assert not any(name.startswith("window_") and name.endswith("work_item")
+                   for name in names)
+    # RAW producer/read equality is still required, unlike slot conflicts.
+    assert any(name.startswith("dependence_") and name.endswith("work_item")
+               for name in names)
+
+
+@pytest.mark.parametrize("example", [False, True], ids=["triangle", "l2p"])
+def test_lean_proves_the_private_triangle_device_cast(lean: Any, example: bool):
+    if example:
+        device = load(EXAMPLES / "l2p.py").on_a_device("opencl")
+    else:
+        windows = load(KERNELS / "windows.py")
+        device = windows.one_triangle.retarget("opencl").tag(
+            windows.triangles.triangle.i, "g.0"
+        )
+    fact = [f for f in device.facts() if f.kind == "monotone"][-1]
+    result = lean.establish(fact)
+    assert result.status is Status.PROVED, result.provenance

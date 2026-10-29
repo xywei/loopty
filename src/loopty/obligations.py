@@ -2165,6 +2165,11 @@ def _monotone_parts(origin: Any, steps: Sequence[Any]) -> list[Any]:
     parts = []
     assumed = steps[-1].assumptions if steps else ()
     work = steps[-1].work if steps else None
+    private = {
+        step.window.array
+        for step in steps
+        if step.window is not None and step.window.private
+    }
     for found in _cast_classes(origin, steps):
         claim = Claim(term)
         claim.hypotheses.extend(assumed)
@@ -2269,8 +2274,27 @@ def _monotone_parts(origin: Any, steps: Sequence[Any]) -> list[Any]:
             _stage_time(origin, steps, len(steps), a.id, chain_a[-1]),
             _stage_time(origin, steps, len(steps), b.id, chain_b[-1]),
         )
+        # Private instances on different owners do not share a slot. RAW
+        # value flow still requires the reader to run on its producer's owner;
+        # only storage conflicts (including WAR/WAW of the original cells)
+        # are conditional on sharing. Match Schedule._per_work_item without
+        # importing its computed relations into the independently stated claim.
+        private_conflict = found.first[1] in private and (
+            found.kind == "window"
+            or not (found.first[0] == "write" and found.second[0] == "read")
+        )
+        if work is not None and private_conflict:
+            claim.hypotheses.append(
+                _work_item_goal(
+                    claim,
+                    work,
+                    (a.id, found.first[3], chain_a[-1]),
+                    (b.id, found.second[3], chain_b[-1]),
+                    may_share=True,
+                )
+            )
         parts.append(lanky.Part(found.name, found.label, claim.close(goal)))
-        if work is not None:
+        if work is not None and not private_conflict:
             together = _work_item_goal(
                 claim,
                 work,
@@ -2303,6 +2327,8 @@ def _work_item_goal(
     work: Any,
     one: tuple[str, str, Mapping[str, Any]],
     other: tuple[str, str, Mapping[str, Any]],
+    *,
+    may_share: bool = False,
 ) -> Any:
     """Two instances run on one work item of every hardware axis, as a proposition.
 
@@ -2350,6 +2376,10 @@ def _work_item_goal(
     for axis in work.axes:
         first, second = at(one, axis), at(other, axis)
         if first is None or second is None:
+            if may_share:
+                # An access on every item intersects the other access's
+                # owners. It does not, however, establish RAW owner equality.
+                continue
             return False
         equal.append(Comparison(first, "==", second))
     return conjunction(equal)

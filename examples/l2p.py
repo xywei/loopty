@@ -48,8 +48,8 @@ L2P, read top to bottom, in three layers:
    schedule for a GPU, each box a work group: ``fused`` with its box loop on
    ``g.0``, and no work item reads what another stored. ``on_a_device()`` is
    the same with each box's windows, ``contracted`` on ``g.0``, each work
-   item keeping its own; isl decides it, and Lean does not state a cast on
-   such windows yet (loopty #295).
+   item keeping its own; storage conflicts are ordered only between owners
+   that may share a slot, while reads still require their producer's owner.
 
 Run it three ways.
 
@@ -370,9 +370,9 @@ def on_a_device(target: str = "c") -> Schedule:
     Each work item keeps its own windows, as loopy keeps a private
     temporary, so the boxes need no order. Built for C here, which has no
     work groups; ``benchmarks/l2p.py`` retargets it onto OpenCL. isl decides
-    its tag; Lean does not state a cast on windows each work item keeps of
-    its own yet (loopty #295), so it is checked here and is no row of the
-    ledger.
+    its tag; Lean states storage-conflict order only for owners that may
+    share a slot, and still requires each read to share its producer's owner.
+    This helper is checked here and is no separate row of the ledger.
     """
     schedule = contracted if target == "c" else contracted.retarget(target)
     return schedule.on_groups(l2p.unpack.box)
