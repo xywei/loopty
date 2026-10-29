@@ -105,5 +105,7 @@ with a stale-snapshot explanation. Retargeting rebuilds and replays the schedule
 so it captures new target-specific checkpoints. Earlier checkpoints from multiple
 contractions remain historical; the newest checkpoint does not prove all earlier
 phases. Register shifts remain assumed with their explicit limitation. Corrupted
-retained rewrite objects are refuted, while unexpected checker exceptions are
+retained rewrite objects refute the checkpoint-validity claim, not the program's
+mathematical correctness. Unknown schemas and changed tool versions decline;
+unexpected checker exceptions are
 reported through lanky's existing error path. No result here is certified.

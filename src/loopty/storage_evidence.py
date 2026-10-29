@@ -46,12 +46,14 @@ class StorageCheckpoint:
             id=self.identifier,
             kind="storage-correspondence",
             statement=(
-                f"the retained window rewrite of {self.request.array} preserves "
-                "accesses and values before dependency ordering"
+                f"the retained checkpoint is valid evidence for the window rewrite of "
+                f"{self.request.array} preserving accesses and values "
+                "before dependency ordering"
             ),
             term=StorageCheck(self, schedule),
             provenance={
                 "scope": "window rewrite before dependency ordering",
+                "predicate": "retained checkpoint validity",
                 "target": self.request.target,
                 "input_key": key(self.request.kernel),
                 "output_key": key(self.result.kernel),
@@ -94,7 +96,11 @@ class StorageOracle:
             return fact
         from loopy.tools import LoopyKeyBuilder
 
-        from loopty.backend_evidence import InvalidStorageEvidence
+        from loopty.backend_evidence import (
+            InvalidStorageEvidence,
+            WindowEvidence,
+            _versions,
+        )
 
         check = fact.term
         checkpoint = check.checkpoint
@@ -119,6 +125,21 @@ class StorageOracle:
                 declined=result.evidence_limit
                 or result.reason
                 or "storage evidence unavailable",
+            )
+        if (
+            not isinstance(result.evidence, WindowEvidence)
+            or result.evidence.schema != 1
+        ):
+            return fact.with_status(
+                Status.ASSUMED,
+                self.name,
+                declined="unsupported storage evidence schema",
+            )
+        if result.evidence.versions != _versions():
+            return fact.with_status(
+                Status.ASSUMED,
+                self.name,
+                declined="storage evidence was captured with different tool versions",
             )
         try:
             result.evidence.verify(checkpoint.request, result.kernel)

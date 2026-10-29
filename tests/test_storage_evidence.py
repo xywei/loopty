@@ -132,3 +132,19 @@ def test_installed_oracle_discovery_rechecks_a_real_checkpoint(monkeypatch):
     (fact,) = windowed().storage_facts()
     assert fact.status is Status.DECIDED
     assert fact.provenance["scope"] == "window rewrite before dependency ordering"
+
+
+def test_unknown_schema_and_changed_tool_versions_decline_instead_of_refuting():
+    schedule = windowed()
+    (checkpoint,) = schedule._storage_checkpoints
+    for evidence in (
+        replace(checkpoint.result.evidence, schema=2),
+        replace(checkpoint.result.evidence, versions=("old",)),
+    ):
+        schedule._storage_checkpoints = (
+            replace(checkpoint, result=replace(checkpoint.result, evidence=evidence)),
+        )
+        fact = schedule.storage_facts()[0]
+        assert fact.status is Status.ASSUMED
+        assert fact.provenance["declined"]
+        assert fact.provenance["predicate"] == "retained checkpoint validity"
