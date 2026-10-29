@@ -1763,6 +1763,9 @@ loopty is loop + ty, for types: loops, typed. It follows `loopy`, `sumpy`, and
 
 ## Documentation
 
+- [Experimental storage plans](docs/storage-plans.md): scoped stages, the supported
+  single-window subset, and the limits of backend correspondence checking.
+
 - [docs/quickstart.md](https://github.com/xywei/loopty/blob/main/docs/quickstart.md): the two demos end to end,
   with the output the commands actually print.
 - [examples/README.md](https://github.com/xywei/loopty/blob/main/examples/README.md): all nineteen demos, with every

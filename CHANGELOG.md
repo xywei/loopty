@@ -6,6 +6,15 @@ All notable changes to loopty are recorded here. The format follows
 
 ## [Unreleased]
 
+- Fix independent Lean statements for private-window device casts: storage
+  conflicts require order only between owners that may share storage. Reads
+  still require the work item that produced their value.
+- Isolate current window lowering behind an internal request/result boundary
+  and independently check modulo rewrites against actual input/output kernels.
+  Register shifts and subsequent scheduling are outside this correspondence check.
+- Add experimental scoped storage plans. Current loopy lowers the single-window
+  subset; unsupported stage graphs, routing and memory requests fail explicitly.
+
 ## [0.6.0] - 2026-10-18
 
 The demos read as engineers write checks, in lanky 0.6's claims. A claim is

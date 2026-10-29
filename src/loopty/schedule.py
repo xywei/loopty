@@ -6183,6 +6183,29 @@ class Schedule:
         """The arrays :meth:`substitute` computes where they are read, in order."""
         return self._substituted
 
+    def storage(self, value: Any) -> Any:
+        """Build an experimental scoped storage plan without changing this schedule.
+
+        The current backend lowers its single-window subset. Richer stage graphs
+        are inspectable requests and explicitly refused until supported; see
+        :mod:`loopty.storage`.
+        """
+        from loopty.storage import StoragePlan
+
+        return StoragePlan(self, value)
+
+    def materialize(self, plan: Any) -> Schedule:
+        """Validate and apply a storage plan bound to this schedule snapshot."""
+        from loopty.storage import StoragePlan
+
+        if not isinstance(plan, StoragePlan):
+            raise TypeError("materialize takes a plan built by schedule.storage(value)")
+        token = _REPLAYED_AT.set(_called_at())
+        try:
+            return plan.apply(self)
+        finally:
+            _REPLAYED_AT.reset(token)
+
     def contract(
         self,
         handle: Any,
@@ -6552,61 +6575,30 @@ class Schedule:
         staged._order = [loop for loop in self._order if loop in live]
         draft = staged._draft()
         if draft.kernel is not None:
+            from loopty.backend import WindowRequest, lower_window
+
             ids = self._lowering.insn_ids
-            removed = [ids[stmt_id] for stmt_id in sorted(gone)]
-            entry = draft.kernel.default_entrypoint
-            name = win.window_name(array, set(entry.all_variable_names()))
-            # a window of numbers is each work item's own (see Window.private),
-            # and one of a size is one in global memory for every work item on
-            # OpenCL; on C, which has no work items, a temporary of the kernel
-            space = (
-                lp.AddressSpace.GLOBAL
-                if self._target == "opencl" and not window.private
-                else lp.AddressSpace.PRIVATE
-            )
-            register = None
-            if registers or (registers is None and self._target == "opencl"):
-                plan = win.register_plan(
-                    draft.kernel,
-                    array,
-                    [ids[producer.id] for producer in producers],
-                    chosen,
-                    removed,
-                    {insn: self._stmt_shown(stmt_id) for stmt_id, insn in ids.items()},
-                )
-                if not isinstance(plan, str) and plan[0] in self._strides:
-                    plan = (
-                        f"the loop {plan[0]} steps over a lattice, and a shift "
-                        "register shifts once per step of a loop over every value"
-                    )
-                if isinstance(plan, str):
-                    if registers:
-                        raise ValueError(f"{shown}: {plan}")
-                else:
-                    register = plan
-            # the loops the window's loop is nested in, outermost first: its
-            # shifts run in each of their steps
-            coords = self._layout.coords[producers[0].id]
-            nest = [loop for loop in staged._order if loop in coords]
-            outer = (
-                nest[: nest.index(register[0])]
-                if register is not None and register[0] in nest
-                else []
-            )
-            kernel, reason = win.windowed_kernel(
-                draft.kernel,
-                array,
-                removed,
-                chosen,
-                extents,
-                name,
-                space,
-                register,
-                outer,
-            )
-            draft.kernel = kernel
-            if reason is not None:
-                draft.unbuildable = reason
+            result = lower_window(WindowRequest(
+                kernel=draft.kernel,
+                array=array,
+                removed=tuple(ids[stmt_id] for stmt_id in sorted(gone)),
+                placement=chosen,
+                extents=tuple(extents),
+                private=window.private,
+                target=self._target,
+                registers=registers,
+                producers=tuple(ids[producer.id] for producer in producers),
+                shown={insn: self._stmt_shown(sid) for sid, insn in ids.items()},
+                strides=frozenset(self._strides),
+                nest=tuple(
+                    loop for loop in staged._order
+                    if loop in self._layout.coords[producers[0].id]
+                ),
+                description=shown,
+            ))
+            draft.kernel = result.kernel
+            if result.reason is not None:
+                draft.unbuildable = result.reason
             draft.kernel = staged._ordered_by_dependences(draft)
         return staged._commit_storage(
             draft, shown, recipe, facts, gone=frozenset(gone), window=window
