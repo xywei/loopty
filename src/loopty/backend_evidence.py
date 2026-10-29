@@ -99,6 +99,13 @@ def check_modulo_window(
 def _check_modulo(request: Any, output: Any, name: str, space: Any) -> None:
     if output is None:
         raise InvalidStorageEvidence("storage output is missing")
+    required_space = (
+        lp.AddressSpace.GLOBAL
+        if request.target == "opencl" and not request.private
+        else lp.AddressSpace.PRIVATE
+    )
+    if space != required_space:
+        raise InvalidStorageEvidence("storage address space contradicts its owners")
     source = request.kernel
     before = source.default_entrypoint
     if request.array not in before.temporary_variables:

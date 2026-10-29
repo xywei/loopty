@@ -8,7 +8,7 @@ import pytest
 from loopy.tools import LoopyKeyBuilder
 
 from loopty.backend import WindowRequest, lower_window
-from loopty.backend_evidence import InvalidStorageEvidence
+from loopty.backend_evidence import InvalidStorageEvidence, _request_key
 from loopty.window import placement_of
 
 
@@ -101,3 +101,22 @@ def test_an_unsupported_register_check_never_claims_correspondence():
     assert result.kernel is not None
     assert result.evidence is None
     assert result.evidence_limit == "register-shift correspondence is not checked"
+
+
+def test_rebinding_the_record_cannot_change_private_storage_into_shared_storage():
+    req = request()
+    result = lower_window(req)
+    record = result.evidence
+    entry = result.kernel.default_entrypoint
+    temps = dict(entry.temporary_variables)
+    space = lp.AddressSpace.GLOBAL
+    temps[record.storage_name] = temps[record.storage_name].copy(address_space=space)
+    bad = result.kernel.with_kernel(entry.copy(temporary_variables=temps))
+    forged = replace(
+        record,
+        address_space=space,
+        output_key=LoopyKeyBuilder()(bad),
+        request_key=_request_key(req, record.storage_name, space),
+    )
+    with pytest.raises(InvalidStorageEvidence, match="contradicts its owners"):
+        forged.verify(req, bad)
