@@ -91,6 +91,7 @@ loopty = "loopty.plugin:KernelTheory"
 
 [project.entry-points."lanky.oracles"]
 loopty = "loopty.plugin:IslOracle"
+loopty-storage = "loopty.plugin:StorageOracle"
 
 [project.entry-points."lanky.executors"]
 loopty = "loopty.plugin:LoopyExecutor"

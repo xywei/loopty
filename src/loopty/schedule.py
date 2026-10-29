@@ -3421,6 +3421,8 @@ class Schedule:
         if target is None:
             target = "c"
         self._source = kernel
+        self._storage_checkpoints: tuple[Any, ...] = ()
+        self._storage_binding = object()
         #: The term the kernel's body traces, which postconditions, cited
         #: theorems and ``trace-faithful`` are about (:attr:`traced`), and the
         #: term the schedule compiles, the same unless a math step rewrote it
@@ -3615,6 +3617,7 @@ class Schedule:
         """A shallow copy; every public method builds one rather than mutating."""
         other = object.__new__(Schedule)
         other.__dict__.update(self.__dict__)
+        other._storage_binding = object()
         return other
 
     def _draft(self) -> _Draft:
@@ -6574,11 +6577,13 @@ class Schedule:
         }
         staged._order = [loop for loop in self._order if loop in live]
         draft = staged._draft()
+        checkpoint = None
         if draft.kernel is not None:
             from loopty.backend import WindowRequest, lower_window
+            from loopty.storage_evidence import StorageCheckpoint
 
             ids = self._lowering.insn_ids
-            result = lower_window(WindowRequest(
+            request = WindowRequest(
                 kernel=draft.kernel,
                 array=array,
                 removed=tuple(ids[stmt_id] for stmt_id in sorted(gone)),
@@ -6595,13 +6600,61 @@ class Schedule:
                     if loop in self._layout.coords[producers[0].id]
                 ),
                 description=shown,
-            ))
+            )
+            result = lower_window(request)
+            from loopy.tools import LoopyKeyBuilder
+
+            input_key = LoopyKeyBuilder()(request.kernel)
+            checkpoint = StorageCheckpoint(
+                request=request,
+                result=result,
+                source=self._term,
+                prerequisites=(
+                    fact.id, no_clobber.id,
+                    fact_id("trace-faithful", **self._definition),
+                    self._fact_id("storage-input", self._steps, input_key),
+                    *self._assumption_ids,
+                ),
+                identifier=self._fact_id(
+                    "storage-correspondence", (*self._steps, recipe),
+                    LoopyKeyBuilder()((
+                        input_key, result.kernel,
+                        None if result.evidence is None else (
+                            result.evidence.request_key,
+                            result.evidence.schema,
+                            result.evidence.versions,
+                        ),
+                    )),
+                ),
+                where=_called_at() or self._kernel_where(),
+                owner=self._term.name,
+            )
             draft.kernel = result.kernel
             if result.reason is not None:
                 draft.unbuildable = result.reason
             draft.kernel = staged._ordered_by_dependences(draft)
-        return staged._commit_storage(
+        out = staged._commit_storage(
             draft, shown, recipe, facts, gone=frozenset(gone), window=window
+        )
+        if checkpoint is not None:
+            out._storage_checkpoints = (
+                *out._storage_checkpoints, checkpoint.bind(out),
+            )
+        return out
+
+    def storage_facts(self) -> tuple[Any, ...]:
+        """Opt-in facts about retained storage phases, rechecked when requested.
+
+        These complement :meth:`facts`; they do not establish final scheduling
+        or code generation. Source reading and input-lowering correspondence
+        remain prerequisites. Changed snapshots explicitly decline inherited
+        checkpoints; retargeting replays transformations and captures new ones.
+        """
+        from lanky.check import establish
+
+        return tuple(
+            establish(checkpoint.fact(self))
+            for checkpoint in self._storage_checkpoints
         )
 
     @property
