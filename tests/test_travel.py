@@ -1325,4 +1325,4 @@ def test_requirement_prerequisites_have_readable_labels_without_changing_identit
     assert label == "flat.weigh_flat: layout off"
     assert f"decided under {label}" in found.render()
     assert found.support(result).effective is Status.ASSUMED
-    assert found.to_dicts()[-1]["under"] == [requirement.id]
+    assert found.to_dicts()[-1]["under"] == [requirement.id, *requirement.rests_on]

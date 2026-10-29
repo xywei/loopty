@@ -6,6 +6,9 @@ All notable changes to loopty are recorded here. The format follows
 
 ## [Unreleased]
 
+- Label call-requirement prerequisites with their call, kind and parameter;
+  retain their full fact IDs and unresolved prerequisites in JSON.
+
 - Retain storage-phase checkpoints and expose opt-in `Schedule.storage_facts()`
   with structural replay, snapshot invalidation and explicit prerequisites.
   Input-lowering correspondence remains unresolved; final scheduling is outside
