@@ -819,29 +819,29 @@ names, so it is worth an assumption checked when the program runs.
 
 ```console
 $ uv run lanky check examples/travel.py
-STATUS                                                       EFFECTIVE  BY             WHERE          OWNER          STATEMENT
------------------------------------------------------------  ---------  -------------  -------------  -------------  -------------------------------------------------------------------------------------------------
-decided                                                      decided    isl            travel.py:72   number         forall i in Fin(n). perm[i] == n - 1 - i
-decided                                                      decided    type           travel.py:92   gather         x[perm[i]] is in bounds by type (perm[i] : Fin(n))
-decided                                                      decided    call           travel.py:95   permuted       after number(...) in permuted: forall i in Fin(n). perm[i] == n - 1 - i
-decided                                                      tested     isl            travel.py:99   permuted       the elements of perm are points of Fin(n) where gather is called at travel.py:99,
-                                                                                                                       after number at travel.py:98 wrote perm
-assumed                                                      assumed    -              travel.py:106  checked        the elements of perm are points of Fin(n) where gather is called at travel.py:106,
-                                                                                                                       after number_quiet at travel.py:105 wrote perm (checked when it runs)
-decided                                                      decided    isl            travel.py:115  scan           off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
-decided                                                      decided    call           travel.py:148  through        after scan(...) in through: off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
-decided                                                      tested     isl            travel.py:152  through        off holds the offsets the counts in cnt give the rows of val
-                                                                                                                       (off[0] == 0 and off[r + 1] == off[r] + cnt[r]) where rowsums is called at travel.py:152,
-                                                                                                                       after scan at travel.py:151 wrote off
-assumed                                                      assumed    -              travel.py:186  weigh          val[off[r] + j] is in bounds
-decided                                                      decided    call           travel.py:189  flat           after scan_flat(...) in flat: off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
-decided                                                      tested     isl            travel.py:193  flat           off holds the offsets the counts in cnt give the rows of wt
-                                                                                                                       (off[0] == 0 and off[r + 1] == off[r] + cnt[r]) where weigh is called at travel.py:193,
-                                                                                                                       after scan_flat at travel.py:192 wrote off
-assumed                                                      assumed    -              travel.py:193  flat           the elements of off are points of Fin(nnz + 1) where weigh is called at travel.py:193,
-                                                                                                                       after scan_flat at travel.py:192 wrote off (checked when it runs)
-decided under requirement:travel.flat@189:weigh:element:off  assumed    isl            travel.py:186  flat           val[off[r] + j] is in bounds for every instance of y[r] = reduce_sum(...) (travel.py:186),
-                                                                                                                       where weigh is called at travel.py:193
+STATUS                                 EFFECTIVE  BY             WHERE          OWNER          STATEMENT
+-------------------------------------  ---------  -------------  -------------  -------------  -------------------------------------------------------------------------------------------------
+decided                                decided    isl            travel.py:72   number         forall i in Fin(n). perm[i] == n - 1 - i
+decided                                decided    type           travel.py:92   gather         x[perm[i]] is in bounds by type (perm[i] : Fin(n))
+decided                                decided    call           travel.py:95   permuted       after number(...) in permuted: forall i in Fin(n). perm[i] == n - 1 - i
+decided                                tested     isl            travel.py:99   permuted       the elements of perm are points of Fin(n) where gather is called at travel.py:99,
+                                                                                                 after number at travel.py:98 wrote perm
+assumed                                assumed    -              travel.py:106  checked        the elements of perm are points of Fin(n) where gather is called at travel.py:106,
+                                                                                                 after number_quiet at travel.py:105 wrote perm (checked when it runs)
+decided                                decided    isl            travel.py:115  scan           off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
+decided                                decided    call           travel.py:148  through        after scan(...) in through: off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
+decided                                tested     isl            travel.py:152  through        off holds the offsets the counts in cnt give the rows of val
+                                                                                                 (off[0] == 0 and off[r + 1] == off[r] + cnt[r]) where rowsums is called at travel.py:152,
+                                                                                                 after scan at travel.py:151 wrote off
+assumed                                assumed    -              travel.py:186  weigh          val[off[r] + j] is in bounds
+decided                                decided    call           travel.py:189  flat           after scan_flat(...) in flat: off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
+decided                                tested     isl            travel.py:193  flat           off holds the offsets the counts in cnt give the rows of wt
+                                                                                                 (off[0] == 0 and off[r + 1] == off[r] + cnt[r]) where weigh is called at travel.py:193,
+                                                                                                 after scan_flat at travel.py:192 wrote off
+assumed                                assumed    -              travel.py:193  flat           the elements of off are points of Fin(nnz + 1) where weigh is called at travel.py:193,
+                                                                                                 after scan_flat at travel.py:192 wrote off (checked when it runs)
+decided under flat.weigh: element off  assumed    isl            travel.py:186  flat           val[off[r] + j] is in bounds for every instance of y[r] = reduce_sum(...) (travel.py:186),
+                                                                                                 where weigh is called at travel.py:193
 ...
 76 facts: 4 assumed, 59 decided, 13 tested
 ```
@@ -2103,132 +2103,132 @@ metric_along_r: Schedule(metric_along_r, target='c')
 contravariant_along_r: Schedule(contravariant_along_r, target='c')
   v: difference 0 within 1e-06 of each value (approx) -> tested
 
-STATUS                                              EFFECTIVE  BY           WHERE             OWNER                  STATEMENT
---------------------------------------------------  ---------  -----------  ----------------  ---------------------  ----------------------------------------------------------------------------------------------------
-tested under claim:hexahedra.sum_factorization@146  assumed    interpreter  hexahedra.py:435  weak_grad              rewrite(grad, by=sum_factorization, keep=(r_pass, s_pass)):
-                                                                                                                       over the reals, the passes leave in grad what weak_grad's statement says, unfolded through r_pass
-                                                                                                                       and s_pass; sum_factorization at Fr := Fr[d], Fs := Fs[d], Ft := Ft[d], u := w[x, d, e],
-                                                                                                                       for d = 0, 1 and 2
-decided                                             decided    isl          hexahedra.py:385  weak_grad              no cell of grad is stored twice, or read before its store
-decided                                             decided    isl          hexahedra.py:435  weak_grad              no cell of r_pass is stored twice, or read before its store
-decided                                             decided    isl          hexahedra.py:435  weak_grad              no cell of s_pass is stored twice, or read before its store
-decided                                             decided    isl          hexahedra.py:383  weak_grad              no cell of w is stored twice, or read before its store
-decided                                             decided    isl          hexahedra.py:435  weak_grad              r_pass[x_1, d_1, e_1, c_0, b_0, i_1] is in bounds
-                                                                                                                       for every instance of r_pass[x, d, e, c, b, i] = reduce_sum(...) (hexahedra.py:435)
-decided                                             decided    isl          hexahedra.py:435  weak_grad              Fr[d_1, i_1, a_0] is in bounds for every instance of r_pass[x, d, e, c, b, i] = reduce_sum(...)
-                                                                                                                       (hexahedra.py:435)
-decided                                             decided    isl          hexahedra.py:435  weak_grad              w[x_1, d_1, e_1, c_0, b_0, a_0] is in bounds
-                                                                                                                       for every instance of r_pass[x, d, e, c, b, i] = reduce_sum(...) (hexahedra.py:435)
-decided                                             decided    isl          hexahedra.py:435  weak_grad              s_pass[x_2, d_2, e_2, c_1, j_1, i_2] is in bounds
-                                                                                                                       for every instance of s_pass[x, d, e, c, j, i] = reduce_sum(...) (hexahedra.py:435)
-decided                                             decided    isl          hexahedra.py:435  weak_grad              Fs[d_2, j_1, b_1] is in bounds for every instance of s_pass[x, d, e, c, j, i] = reduce_sum(...)
-                                                                                                                       (hexahedra.py:435)
-decided                                             decided    isl          hexahedra.py:435  weak_grad              r_pass[x_2, d_2, e_2, c_1, b_1, i_2] is in bounds
-                                                                                                                       for every instance of s_pass[x, d, e, c, j, i] = reduce_sum(...) (hexahedra.py:435)
-decided                                             decided    isl          hexahedra.py:385  weak_grad              s_pass[x_0, d, e_0, c, j_0, i_0] is in bounds for every d in Fin(3)
-                                                                                                                       and every instance of grad[x, e, k, j, i] = reduce_sum(...) (hexahedra.py:385)
-decided                                             decided    isl          hexahedra.py:435  weak_grad              distinct instances of r_pass[x, d, e, c, b, i] = reduce_sum(...) (hexahedra.py:435) write
-                                                                                                                       distinct cells of r_pass
-decided                                             decided    isl          hexahedra.py:435  weak_grad              distinct instances of s_pass[x, d, e, c, j, i] = reduce_sum(...) (hexahedra.py:435) write
-                                                                                                                       distinct cells of s_pass
-decided                                             decided    isl          hexahedra.py:435  weak_grad              every cell of r_pass that s_pass[x, d, e, c, j, i] = reduce_sum(...) (hexahedra.py:435) reads was
-                                                                                                                       written before the read, by r_pass[x, d, e, c, b, i] = reduce_sum(...) (hexahedra.py:435)
-decided                                             decided    isl          hexahedra.py:385  weak_grad              every cell of s_pass that grad[x, e, k, j, i] = reduce_sum(...) (hexahedra.py:385) reads was written
-                                                                                                                       before the read, by s_pass[x, d, e, c, j, i] = reduce_sum(...) (hexahedra.py:435)
-decided                                             decided    isl          hexahedra.py:435  weak_grad              n >= 0 and (k >= 0 and k < n) and (j >= 0 and j < n) and (i >= 0 and i < n) for every k and every j
-                                                                                                                       and every i, which sum_factorization needs
-decided                                             decided    type         hexahedra.py:435  weak_grad              after rewrite(grad, ...), grad is compared at approx (it was approx)
-tested                                              tested     run          hexahedra.py:435  weak_grad              the compiled factored agrees with the native weak_grad in grad at approx,
-                                                                                                                       within 1e-06 of each value (measured at roundoff), on its example inputs and 3 drawn ones
-tested                                              tested     loopy        hexahedra.py:435  weak_grad              the scheduled run of weak_grad agrees with the native run to the accuracy its types state
-decided                                             decided    isl          hexahedra.py:440  weak_grad              fuse(weak_grad.r_pass.c, weak_grad.s_pass.c) renames the instances of weak_grad one for one
-decided                                             decided    isl          hexahedra.py:440  weak_grad              the order after fuse(weak_grad.r_pass.c, weak_grad.s_pass.c) runs every dependence of
-                                                                                                                       weak_grad forward
-tested                                              tested     loopy        hexahedra.py:440  weak_grad              the scheduled run of weak_grad agrees with the native run to the accuracy its types state
-decided                                             decided    isl          hexahedra.py:443  weak_grad              for contract(weak_grad.r_pass), every cell of weak_grad.arrays.r_pass that weak_grad reads,
-                                                                                                                       r_pass[x, d, e, c, b, i] = reduce_sum(...) (hexahedra.py:435) has stored by the time it is read
-decided                                             decided    isl          hexahedra.py:443  weak_grad              no read of weak_grad.arrays.r_pass sees its slot overwritten after
-                                                                                                                       contract(weak_grad.r_pass, lambda x, d, e, c, b, i: (b, i)):
-                                                                                                                       weak_grad.arrays.r_pass kept in n*n cells, r_pass[x, d, e, c, b, i] in slot (b, i)
-tested                                              tested     loopy        hexahedra.py:443  weak_grad              the scheduled run of weak_grad agrees with the native run to the accuracy its types state
-tested under claim:hexahedra.sum_factorization@146  assumed    interpreter  hexahedra.py:446  weak_div               rewrite(div, by=sum_factorization, keep=(r_pass, s_pass)):
-                                                                                                                       over the reals, the passes leave in div what weak_div's statement says, unfolded through r_pass
-                                                                                                                       and s_pass; sum_factorization at Fr := Fr[d], Fs := Fs[d], Ft := Ft[d], u := w[d, e],
-                                                                                                                       for d = 0, 1 and 2
-decided                                             decided    isl          hexahedra.py:418  weak_div               no cell of div is stored twice, or read before its store
-decided                                             decided    isl          hexahedra.py:446  weak_div               no cell of r_pass is stored twice, or read before its store
-decided                                             decided    isl          hexahedra.py:446  weak_div               no cell of s_pass is stored twice, or read before its store
-decided                                             decided    isl          hexahedra.py:414  weak_div               no cell of w is stored twice, or read before its store
-decided                                             decided    isl          hexahedra.py:446  weak_div               r_pass[d_1, e_1, c_0, b_0, i_1] is in bounds
-                                                                                                                       for every instance of r_pass[d, e, c, b, i] = reduce_sum(...) (hexahedra.py:446)
-decided                                             decided    isl          hexahedra.py:446  weak_div               Fr[d_1, i_1, a_0] is in bounds for every instance of r_pass[d, e, c, b, i] = reduce_sum(...)
-                                                                                                                       (hexahedra.py:446)
-decided                                             decided    isl          hexahedra.py:446  weak_div               w[d_1, e_1, c_0, b_0, a_0] is in bounds
-                                                                                                                       for every instance of r_pass[d, e, c, b, i] = reduce_sum(...) (hexahedra.py:446)
-decided                                             decided    isl          hexahedra.py:446  weak_div               s_pass[d_2, e_2, c_1, j_1, i_2] is in bounds
-                                                                                                                       for every instance of s_pass[d, e, c, j, i] = reduce_sum(...) (hexahedra.py:446)
-decided                                             decided    isl          hexahedra.py:446  weak_div               Fs[d_2, j_1, b_1] is in bounds for every instance of s_pass[d, e, c, j, i] = reduce_sum(...)
-                                                                                                                       (hexahedra.py:446)
-decided                                             decided    isl          hexahedra.py:446  weak_div               r_pass[d_2, e_2, c_1, b_1, i_2] is in bounds
-                                                                                                                       for every instance of s_pass[d, e, c, j, i] = reduce_sum(...) (hexahedra.py:446)
-decided                                             decided    isl          hexahedra.py:418  weak_div               s_pass[d, e_0, c, j_0, i_0] is in bounds for every d in Fin(3)
-                                                                                                                       and every instance of div[e, k, j, i] = reduce_sum(...) (hexahedra.py:418)
-decided                                             decided    isl          hexahedra.py:446  weak_div               distinct instances of r_pass[d, e, c, b, i] = reduce_sum(...) (hexahedra.py:446) write
-                                                                                                                       distinct cells of r_pass
-decided                                             decided    isl          hexahedra.py:446  weak_div               distinct instances of s_pass[d, e, c, j, i] = reduce_sum(...) (hexahedra.py:446) write
-                                                                                                                       distinct cells of s_pass
-decided                                             decided    isl          hexahedra.py:446  weak_div               every cell of r_pass that s_pass[d, e, c, j, i] = reduce_sum(...) (hexahedra.py:446) reads was
-                                                                                                                       written before the read, by r_pass[d, e, c, b, i] = reduce_sum(...) (hexahedra.py:446)
-decided                                             decided    isl          hexahedra.py:418  weak_div               every cell of s_pass that div[e, k, j, i] = reduce_sum(...) (hexahedra.py:418) reads was written
-                                                                                                                       before the read, by s_pass[d, e, c, j, i] = reduce_sum(...) (hexahedra.py:446)
-decided                                             decided    isl          hexahedra.py:446  weak_div               n >= 0 and (k >= 0 and k < n) and (j >= 0 and j < n) and (i >= 0 and i < n) for every k and every j
-                                                                                                                       and every i, which sum_factorization needs
-decided                                             decided    type         hexahedra.py:446  weak_div               after rewrite(div, ...), div is compared at approx (it was approx)
-tested                                              tested     run          hexahedra.py:446  weak_div               the compiled factored_div agrees with the native weak_div in div at approx,
-                                                                                                                       within 1e-06 of each value (measured at roundoff), on its example inputs and 3 drawn ones
-tested                                              tested     loopy        hexahedra.py:446  weak_div               the scheduled run of weak_div agrees with the native run to the accuracy its types state
-decided                                             decided    isl          hexahedra.py:317  passes                 every cell of passes.w that passes reads, passes.metric has stored by the time it is read,
-                                                                                                                       so passes runs without the zeros passes.w is made with
-decided                                             decided    isl          hexahedra.py:318  passes                 every cell of passes.v that passes reads, passes.along_r has stored by the time it is read,
-                                                                                                                       so passes runs without the zeros passes.v is made with
-decided                                             decided    isl          hexahedra.py:319  passes                 every cell of passes.vs that passes reads, passes.along_s has stored by the time it is read,
-                                                                                                                       so passes runs without the zeros passes.vs is made with
-decided                                             decided    isl          hexahedra.py:454  passes                 fuse(passes.metric.j, passes.along_r.j) renames the instances of passes one for one
-decided                                             decided    isl          hexahedra.py:454  passes                 the order after fuse(passes.metric.j, passes.along_r.j) runs every dependence of passes forward
-decided                                             decided    isl          hexahedra.py:455  passes                 fuse(passes.along_r.k, passes.along_s.k) renames the instances of passes one for one
-decided                                             decided    isl          hexahedra.py:455  passes                 the order after fuse(passes.along_r.k, passes.along_s.k) runs every dependence of passes forward
-tested                                              tested     loopy        hexahedra.py:455  passes                 the scheduled run of passes agrees with the native run to the accuracy its types state
-decided                                             decided    isl          hexahedra.py:459  passes                 no read of passes.w sees its slot overwritten after contract(passes.w, lambda q, e, k, j, i: i):
-                                                                                                                       passes.w kept in n cells, w[q, e, k, j, i] in slot i
-decided                                             decided    isl          hexahedra.py:459  passes                 no read of passes.v sees its slot overwritten after
-                                                                                                                       contract(passes.v, lambda q, e, k, j, i: (j, i)):
-                                                                                                                       passes.v kept in n*n cells, v[q, e, k, j, i] in slot (j, i)
-tested                                              tested     loopy        hexahedra.py:459  passes                 the scheduled run of passes agrees with the native run to the accuracy its types state
-tested                                              tested     loopy        hexahedra.py:207  metric                 the scheduled run of metric agrees with the native run to the accuracy its types state
-tested                                              tested     loopy        hexahedra.py:218  contravariant          the scheduled run of contravariant agrees with the native run to the accuracy its types state
-tested                                              tested     loopy        hexahedra.py:231  along_r                the scheduled run of along_r agrees with the native run to the accuracy its types state
-tested                                              tested     loopy        hexahedra.py:244  along_s                the scheduled run of along_s agrees with the native run to the accuracy its types state
-tested                                              tested     loopy        hexahedra.py:257  gradient_along_t       the scheduled run of gradient_along_t agrees with the native run to the accuracy its types state
-tested                                              tested     loopy        hexahedra.py:274  divergence_along_t     the scheduled run of divergence_along_t agrees with the native run to the accuracy its types state
-decided                                             decided    isl          hexahedra.py:350  div_passes             every cell of div_passes.w that div_passes reads,
-                                                                                                                       div_passes.contravariant has stored by the time it is read,
-                                                                                                                       so div_passes runs without the zeros div_passes.w is made with
-decided                                             decided    isl          hexahedra.py:351  div_passes             every cell of div_passes.v that div_passes reads,
-                                                                                                                       div_passes.along_r has stored by the time it is read,
-                                                                                                                       so div_passes runs without the zeros div_passes.v is made with
-decided                                             decided    isl          hexahedra.py:352  div_passes             every cell of div_passes.vs that div_passes reads,
-                                                                                                                       div_passes.along_s has stored by the time it is read,
-                                                                                                                       so div_passes runs without the zeros div_passes.vs is made with
-tested                                              tested     loopy        hexahedra.py:326  div_passes             the scheduled run of div_passes agrees with the native run to the accuracy its types state
-decided                                             decided    isl          hexahedra.py:465  metric_along_r         every cell of metric_along_r.w that metric_along_r reads,
-                                                                                                                       metric_along_r.metric has stored by the time it is read,
-                                                                                                                       so metric_along_r runs without the zeros metric_along_r.w is made with
-tested                                              tested     loopy        hexahedra.py:462  metric_along_r         the scheduled run of metric_along_r agrees with the native run to the accuracy its types state
-decided                                             decided    isl          hexahedra.py:473  contravariant_along_r  every cell of contravariant_along_r.w that contravariant_along_r reads,
-                                                                                                                       contravariant_along_r.contravariant has stored by the time it is read,
-                                                                                                                       so contravariant_along_r runs without the zeros contravariant_along_r.w is made with
-tested                                              tested     loopy        hexahedra.py:470  contravariant_along_r  the scheduled run of contravariant_along_r agrees with the native run to the
-                                                                                                                       accuracy its types state
+STATUS                          EFFECTIVE  BY           WHERE             OWNER                  STATEMENT
+------------------------------  ---------  -----------  ----------------  ---------------------  ----------------------------------------------------------------------------------------------------
+tested under sum_factorization  assumed    interpreter  hexahedra.py:435  weak_grad              rewrite(grad, by=sum_factorization, keep=(r_pass, s_pass)):
+                                                                                                   over the reals, the passes leave in grad what weak_grad's statement says, unfolded through r_pass
+                                                                                                   and s_pass; sum_factorization at Fr := Fr[d], Fs := Fs[d], Ft := Ft[d], u := w[x, d, e],
+                                                                                                   for d = 0, 1 and 2
+decided                         decided    isl          hexahedra.py:385  weak_grad              no cell of grad is stored twice, or read before its store
+decided                         decided    isl          hexahedra.py:435  weak_grad              no cell of r_pass is stored twice, or read before its store
+decided                         decided    isl          hexahedra.py:435  weak_grad              no cell of s_pass is stored twice, or read before its store
+decided                         decided    isl          hexahedra.py:383  weak_grad              no cell of w is stored twice, or read before its store
+decided                         decided    isl          hexahedra.py:435  weak_grad              r_pass[x_1, d_1, e_1, c_0, b_0, i_1] is in bounds
+                                                                                                   for every instance of r_pass[x, d, e, c, b, i] = reduce_sum(...) (hexahedra.py:435)
+decided                         decided    isl          hexahedra.py:435  weak_grad              Fr[d_1, i_1, a_0] is in bounds for every instance of r_pass[x, d, e, c, b, i] = reduce_sum(...)
+                                                                                                   (hexahedra.py:435)
+decided                         decided    isl          hexahedra.py:435  weak_grad              w[x_1, d_1, e_1, c_0, b_0, a_0] is in bounds
+                                                                                                   for every instance of r_pass[x, d, e, c, b, i] = reduce_sum(...) (hexahedra.py:435)
+decided                         decided    isl          hexahedra.py:435  weak_grad              s_pass[x_2, d_2, e_2, c_1, j_1, i_2] is in bounds
+                                                                                                   for every instance of s_pass[x, d, e, c, j, i] = reduce_sum(...) (hexahedra.py:435)
+decided                         decided    isl          hexahedra.py:435  weak_grad              Fs[d_2, j_1, b_1] is in bounds for every instance of s_pass[x, d, e, c, j, i] = reduce_sum(...)
+                                                                                                   (hexahedra.py:435)
+decided                         decided    isl          hexahedra.py:435  weak_grad              r_pass[x_2, d_2, e_2, c_1, b_1, i_2] is in bounds
+                                                                                                   for every instance of s_pass[x, d, e, c, j, i] = reduce_sum(...) (hexahedra.py:435)
+decided                         decided    isl          hexahedra.py:385  weak_grad              s_pass[x_0, d, e_0, c, j_0, i_0] is in bounds for every d in Fin(3)
+                                                                                                   and every instance of grad[x, e, k, j, i] = reduce_sum(...) (hexahedra.py:385)
+decided                         decided    isl          hexahedra.py:435  weak_grad              distinct instances of r_pass[x, d, e, c, b, i] = reduce_sum(...) (hexahedra.py:435) write
+                                                                                                   distinct cells of r_pass
+decided                         decided    isl          hexahedra.py:435  weak_grad              distinct instances of s_pass[x, d, e, c, j, i] = reduce_sum(...) (hexahedra.py:435) write
+                                                                                                   distinct cells of s_pass
+decided                         decided    isl          hexahedra.py:435  weak_grad              every cell of r_pass that s_pass[x, d, e, c, j, i] = reduce_sum(...) (hexahedra.py:435) reads was
+                                                                                                   written before the read, by r_pass[x, d, e, c, b, i] = reduce_sum(...) (hexahedra.py:435)
+decided                         decided    isl          hexahedra.py:385  weak_grad              every cell of s_pass that grad[x, e, k, j, i] = reduce_sum(...) (hexahedra.py:385) reads was written
+                                                                                                   before the read, by s_pass[x, d, e, c, j, i] = reduce_sum(...) (hexahedra.py:435)
+decided                         decided    isl          hexahedra.py:435  weak_grad              n >= 0 and (k >= 0 and k < n) and (j >= 0 and j < n) and (i >= 0 and i < n) for every k and every j
+                                                                                                   and every i, which sum_factorization needs
+decided                         decided    type         hexahedra.py:435  weak_grad              after rewrite(grad, ...), grad is compared at approx (it was approx)
+tested                          tested     run          hexahedra.py:435  weak_grad              the compiled factored agrees with the native weak_grad in grad at approx,
+                                                                                                   within 1e-06 of each value (measured at roundoff), on its example inputs and 3 drawn ones
+tested                          tested     loopy        hexahedra.py:435  weak_grad              the scheduled run of weak_grad agrees with the native run to the accuracy its types state
+decided                         decided    isl          hexahedra.py:440  weak_grad              fuse(weak_grad.r_pass.c, weak_grad.s_pass.c) renames the instances of weak_grad one for one
+decided                         decided    isl          hexahedra.py:440  weak_grad              the order after fuse(weak_grad.r_pass.c, weak_grad.s_pass.c) runs every dependence of
+                                                                                                   weak_grad forward
+tested                          tested     loopy        hexahedra.py:440  weak_grad              the scheduled run of weak_grad agrees with the native run to the accuracy its types state
+decided                         decided    isl          hexahedra.py:443  weak_grad              for contract(weak_grad.r_pass), every cell of weak_grad.arrays.r_pass that weak_grad reads,
+                                                                                                   r_pass[x, d, e, c, b, i] = reduce_sum(...) (hexahedra.py:435) has stored by the time it is read
+decided                         decided    isl          hexahedra.py:443  weak_grad              no read of weak_grad.arrays.r_pass sees its slot overwritten after
+                                                                                                   contract(weak_grad.r_pass, lambda x, d, e, c, b, i: (b, i)):
+                                                                                                   weak_grad.arrays.r_pass kept in n*n cells, r_pass[x, d, e, c, b, i] in slot (b, i)
+tested                          tested     loopy        hexahedra.py:443  weak_grad              the scheduled run of weak_grad agrees with the native run to the accuracy its types state
+tested under sum_factorization  assumed    interpreter  hexahedra.py:446  weak_div               rewrite(div, by=sum_factorization, keep=(r_pass, s_pass)):
+                                                                                                   over the reals, the passes leave in div what weak_div's statement says, unfolded through r_pass
+                                                                                                   and s_pass; sum_factorization at Fr := Fr[d], Fs := Fs[d], Ft := Ft[d], u := w[d, e],
+                                                                                                   for d = 0, 1 and 2
+decided                         decided    isl          hexahedra.py:418  weak_div               no cell of div is stored twice, or read before its store
+decided                         decided    isl          hexahedra.py:446  weak_div               no cell of r_pass is stored twice, or read before its store
+decided                         decided    isl          hexahedra.py:446  weak_div               no cell of s_pass is stored twice, or read before its store
+decided                         decided    isl          hexahedra.py:414  weak_div               no cell of w is stored twice, or read before its store
+decided                         decided    isl          hexahedra.py:446  weak_div               r_pass[d_1, e_1, c_0, b_0, i_1] is in bounds
+                                                                                                   for every instance of r_pass[d, e, c, b, i] = reduce_sum(...) (hexahedra.py:446)
+decided                         decided    isl          hexahedra.py:446  weak_div               Fr[d_1, i_1, a_0] is in bounds for every instance of r_pass[d, e, c, b, i] = reduce_sum(...)
+                                                                                                   (hexahedra.py:446)
+decided                         decided    isl          hexahedra.py:446  weak_div               w[d_1, e_1, c_0, b_0, a_0] is in bounds
+                                                                                                   for every instance of r_pass[d, e, c, b, i] = reduce_sum(...) (hexahedra.py:446)
+decided                         decided    isl          hexahedra.py:446  weak_div               s_pass[d_2, e_2, c_1, j_1, i_2] is in bounds
+                                                                                                   for every instance of s_pass[d, e, c, j, i] = reduce_sum(...) (hexahedra.py:446)
+decided                         decided    isl          hexahedra.py:446  weak_div               Fs[d_2, j_1, b_1] is in bounds for every instance of s_pass[d, e, c, j, i] = reduce_sum(...)
+                                                                                                   (hexahedra.py:446)
+decided                         decided    isl          hexahedra.py:446  weak_div               r_pass[d_2, e_2, c_1, b_1, i_2] is in bounds
+                                                                                                   for every instance of s_pass[d, e, c, j, i] = reduce_sum(...) (hexahedra.py:446)
+decided                         decided    isl          hexahedra.py:418  weak_div               s_pass[d, e_0, c, j_0, i_0] is in bounds for every d in Fin(3)
+                                                                                                   and every instance of div[e, k, j, i] = reduce_sum(...) (hexahedra.py:418)
+decided                         decided    isl          hexahedra.py:446  weak_div               distinct instances of r_pass[d, e, c, b, i] = reduce_sum(...) (hexahedra.py:446) write
+                                                                                                   distinct cells of r_pass
+decided                         decided    isl          hexahedra.py:446  weak_div               distinct instances of s_pass[d, e, c, j, i] = reduce_sum(...) (hexahedra.py:446) write
+                                                                                                   distinct cells of s_pass
+decided                         decided    isl          hexahedra.py:446  weak_div               every cell of r_pass that s_pass[d, e, c, j, i] = reduce_sum(...) (hexahedra.py:446) reads was
+                                                                                                   written before the read, by r_pass[d, e, c, b, i] = reduce_sum(...) (hexahedra.py:446)
+decided                         decided    isl          hexahedra.py:418  weak_div               every cell of s_pass that div[e, k, j, i] = reduce_sum(...) (hexahedra.py:418) reads was written
+                                                                                                   before the read, by s_pass[d, e, c, j, i] = reduce_sum(...) (hexahedra.py:446)
+decided                         decided    isl          hexahedra.py:446  weak_div               n >= 0 and (k >= 0 and k < n) and (j >= 0 and j < n) and (i >= 0 and i < n) for every k and every j
+                                                                                                   and every i, which sum_factorization needs
+decided                         decided    type         hexahedra.py:446  weak_div               after rewrite(div, ...), div is compared at approx (it was approx)
+tested                          tested     run          hexahedra.py:446  weak_div               the compiled factored_div agrees with the native weak_div in div at approx,
+                                                                                                   within 1e-06 of each value (measured at roundoff), on its example inputs and 3 drawn ones
+tested                          tested     loopy        hexahedra.py:446  weak_div               the scheduled run of weak_div agrees with the native run to the accuracy its types state
+decided                         decided    isl          hexahedra.py:317  passes                 every cell of passes.w that passes reads, passes.metric has stored by the time it is read,
+                                                                                                   so passes runs without the zeros passes.w is made with
+decided                         decided    isl          hexahedra.py:318  passes                 every cell of passes.v that passes reads, passes.along_r has stored by the time it is read,
+                                                                                                   so passes runs without the zeros passes.v is made with
+decided                         decided    isl          hexahedra.py:319  passes                 every cell of passes.vs that passes reads, passes.along_s has stored by the time it is read,
+                                                                                                   so passes runs without the zeros passes.vs is made with
+decided                         decided    isl          hexahedra.py:454  passes                 fuse(passes.metric.j, passes.along_r.j) renames the instances of passes one for one
+decided                         decided    isl          hexahedra.py:454  passes                 the order after fuse(passes.metric.j, passes.along_r.j) runs every dependence of passes forward
+decided                         decided    isl          hexahedra.py:455  passes                 fuse(passes.along_r.k, passes.along_s.k) renames the instances of passes one for one
+decided                         decided    isl          hexahedra.py:455  passes                 the order after fuse(passes.along_r.k, passes.along_s.k) runs every dependence of passes forward
+tested                          tested     loopy        hexahedra.py:455  passes                 the scheduled run of passes agrees with the native run to the accuracy its types state
+decided                         decided    isl          hexahedra.py:459  passes                 no read of passes.w sees its slot overwritten after contract(passes.w, lambda q, e, k, j, i: i):
+                                                                                                   passes.w kept in n cells, w[q, e, k, j, i] in slot i
+decided                         decided    isl          hexahedra.py:459  passes                 no read of passes.v sees its slot overwritten after
+                                                                                                   contract(passes.v, lambda q, e, k, j, i: (j, i)):
+                                                                                                   passes.v kept in n*n cells, v[q, e, k, j, i] in slot (j, i)
+tested                          tested     loopy        hexahedra.py:459  passes                 the scheduled run of passes agrees with the native run to the accuracy its types state
+tested                          tested     loopy        hexahedra.py:207  metric                 the scheduled run of metric agrees with the native run to the accuracy its types state
+tested                          tested     loopy        hexahedra.py:218  contravariant          the scheduled run of contravariant agrees with the native run to the accuracy its types state
+tested                          tested     loopy        hexahedra.py:231  along_r                the scheduled run of along_r agrees with the native run to the accuracy its types state
+tested                          tested     loopy        hexahedra.py:244  along_s                the scheduled run of along_s agrees with the native run to the accuracy its types state
+tested                          tested     loopy        hexahedra.py:257  gradient_along_t       the scheduled run of gradient_along_t agrees with the native run to the accuracy its types state
+tested                          tested     loopy        hexahedra.py:274  divergence_along_t     the scheduled run of divergence_along_t agrees with the native run to the accuracy its types state
+decided                         decided    isl          hexahedra.py:350  div_passes             every cell of div_passes.w that div_passes reads,
+                                                                                                   div_passes.contravariant has stored by the time it is read,
+                                                                                                   so div_passes runs without the zeros div_passes.w is made with
+decided                         decided    isl          hexahedra.py:351  div_passes             every cell of div_passes.v that div_passes reads,
+                                                                                                   div_passes.along_r has stored by the time it is read,
+                                                                                                   so div_passes runs without the zeros div_passes.v is made with
+decided                         decided    isl          hexahedra.py:352  div_passes             every cell of div_passes.vs that div_passes reads,
+                                                                                                   div_passes.along_s has stored by the time it is read,
+                                                                                                   so div_passes runs without the zeros div_passes.vs is made with
+tested                          tested     loopy        hexahedra.py:326  div_passes             the scheduled run of div_passes agrees with the native run to the accuracy its types state
+decided                         decided    isl          hexahedra.py:465  metric_along_r         every cell of metric_along_r.w that metric_along_r reads,
+                                                                                                   metric_along_r.metric has stored by the time it is read,
+                                                                                                   so metric_along_r runs without the zeros metric_along_r.w is made with
+tested                          tested     loopy        hexahedra.py:462  metric_along_r         the scheduled run of metric_along_r agrees with the native run to the accuracy its types state
+decided                         decided    isl          hexahedra.py:473  contravariant_along_r  every cell of contravariant_along_r.w that contravariant_along_r reads,
+                                                                                                   contravariant_along_r.contravariant has stored by the time it is read,
+                                                                                                   so contravariant_along_r runs without the zeros contravariant_along_r.w is made with
+tested                          tested     loopy        hexahedra.py:470  contravariant_along_r  the scheduled run of contravariant_along_r agrees with the native run to the
+                                                                                                   accuracy its types state
 
 71 facts: 52 decided, 19 tested
 
@@ -2681,102 +2681,102 @@ surface: Schedule(surface, target='c')
 volume_and_lift: Schedule(volume_and_lift, target='c')
   rhs: difference 0 within 1e-06 of each value (approx) -> tested
 
-STATUS                                                EFFECTIVE  BY           WHERE             OWNER               STATEMENT
-----------------------------------------------------  ---------  -----------  ----------------  ------------------  ---------------------------------------------------------------------------------------------------
-decided                                               decided    isl          advection.py:607  advection_rhs       every cell of advection_rhs.V that advection_rhs reads,
-                                                                                                                      advection_rhs.reference_velocity has stored by the time it is read,
-                                                                                                                      so advection_rhs runs without the zeros advection_rhs.V is made with
-decided                                               decided    isl          advection.py:608  advection_rhs       every cell of advection_rhs.vn that advection_rhs reads,
-                                                                                                                      advection_rhs.normal_velocity has stored by the time it is read,
-                                                                                                                      so advection_rhs runs without the zeros advection_rhs.vn is made with
-decided                                               decided    isl          advection.py:609  advection_rhs       every cell of advection_rhs.flux that advection_rhs reads,
-                                                                                                                      advection_rhs.upwind has stored by the time it is read,
-                                                                                                                      so advection_rhs runs without the zeros advection_rhs.flux is made with
-decided                                               decided    isl          advection.py:635  advection_rhs       substitute(advection_rhs.V) renames the instances of advection_rhs one for one
-decided                                               decided    isl          advection.py:635  advection_rhs       the order after substitute(advection_rhs.V) runs every dependence of advection_rhs forward
-decided                                               decided    isl          advection.py:636  advection_rhs       substitute(advection_rhs.vn) renames the instances of advection_rhs one for one
-decided                                               decided    isl          advection.py:636  advection_rhs       the order after substitute(advection_rhs.vn) runs every dependence of advection_rhs forward
-decided                                               decided    isl          advection.py:637  advection_rhs       fuse(advection_rhs.volume.i, advection_rhs.lift.i) renames the instances of
-                                                                                                                      advection_rhs one for one
-decided                                               decided    isl          advection.py:637  advection_rhs       the order after fuse(advection_rhs.volume.i, advection_rhs.lift.i) runs every dependence of
-                                                                                                                      advection_rhs forward
-decided                                               decided    isl          advection.py:638  advection_rhs       fuse(advection_rhs.upwind.e, advection_rhs.volume.e) renames the instances of
-                                                                                                                      advection_rhs one for one
-decided                                               decided    isl          advection.py:638  advection_rhs       the order after fuse(advection_rhs.upwind.e, advection_rhs.volume.e) runs every dependence of
-                                                                                                                      advection_rhs forward
-tested                                                tested     loopy        advection.py:638  advection_rhs       the scheduled run of advection_rhs agrees with the native run to the accuracy its types state
-decided                                               decided    isl          advection.py:642  advection_rhs       no read of advection_rhs.flux sees its slot overwritten after
-                                                                                                                      contract(advection_rhs.flux, lambda e, f, a, b: (f, a, b)):
-                                                                                                                      advection_rhs.flux kept in 6*n*n cells, flux[e, f, a, b] in slot (f, a, b)
-tested                                                tested     loopy        advection.py:642  advection_rhs       the scheduled run of advection_rhs agrees with the native run to the accuracy its types state
-tested under claim:advection.inverse_mass_inward@176  assumed    interpreter  advection.py:647  weak_rhs            rewrite(rhs, by=inverse_mass_inward), under inverse_of_the_mass:
-                                                                                                                      over the reals, what rhs stores is unchanged wherever
-                                                                                                                      (forall p in Fin(n). sum(Mi[p, c]*M[c, p] for c in Fin(n)) == 1)
-                                                                                                                      and (forall p in Fin(n), q in Fin(n) where p != q. sum(Mi[p, c]*M[c, q] for c in Fin(n)) == 0):
-                                                                                                                      sum(Mi[k, c]*Mi[j, b]*Mi[i,
-                                                                                                                          a]*sum(M[c, t]*M[...,
-                                                                                                                            sum(Mi[k, c]*Mi[i, b]*Mi[j,
-                                                                                                                                a]*sum(M[c, t]*M[... and 1 more become their inverse mass inwards, in 3 places
-tested under claim:advection.lift_inward@208          assumed    interpreter  advection.py:647  weak_rhs            rewrite(rhs, by=lift_inward), under inverse_of_the_mass:
-                                                                                                                      over the reals, what rhs stores is unchanged wherever
-                                                                                                                      (forall p in Fin(n). sum(Mi[p, c]*M[c, p] for c in Fin(n)) == 1)
-                                                                                                                      and (forall p in Fin(n), q in Fin(n) where p != q. sum(Mi[p, c]*M[c, q] for c in Fin(n)) == 0):
-                                                                                                                      sum(Mi[j, c]*Mi[i, b]*Mi[k, a]*(ends[0, a]*su...,
-                                                                                                                          sum(Mi[j, c]*Mi[i, b]*Mi[k, a]*(ends[1, a]*su...
-                                                                                                                              and 4 more become their lift inwards, in 6 places
-tested                                                tested     interpreter  advection.py:647  weak_rhs            keep=(D, L): D and L are computed once, before rhs, over the indices each reads,
-                                                                                                                      and rhs reads them where their sums were (D in 3 places and L in 6 places):
-                                                                                                                      what rhs stores is unchanged
-decided                                               decided    isl          advection.py:647  weak_rhs            no cell of D is stored twice, or read before its store
-decided                                               decided    isl          advection.py:647  weak_rhs            no cell of L is stored twice, or read before its store
-decided                                               decided    isl          advection.py:450  weak_rhs            no cell of rhs is stored twice, or read before its store
-decided                                               decided    isl          advection.py:446  weak_rhs            no cell of w is stored twice, or read before its store
-decided                                               decided    isl          advection.py:647  weak_rhs            D[i_1, r_0] is in bounds for every instance of D[i, r] = reduce_sum(...) (advection.py:647)
-decided                                               decided    isl          advection.py:647  weak_rhs            Mi[i_1, a_0] is in bounds for every instance of D[i, r] = reduce_sum(...) (advection.py:647)
-decided                                               decided    isl          advection.py:647  weak_rhs            S[a_0, r_0] is in bounds for every instance of D[i, r] = reduce_sum(...) (advection.py:647)
-decided                                               decided    isl          advection.py:647  weak_rhs            L[k_1, p] is in bounds for every instance of L[k, p] = reduce_sum(...) (advection.py:647)
-decided                                               decided    isl          advection.py:647  weak_rhs            Mi[k_1, a_1] is in bounds for every instance of L[k, p] = reduce_sum(...) (advection.py:647)
-decided                                               decided    isl          advection.py:647  weak_rhs            ends[p, a_1] is in bounds for every instance of L[k, p] = reduce_sum(...) (advection.py:647)
-decided                                               decided    isl          advection.py:450  weak_rhs            L[k_0, 0] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:450)
-decided                                               decided    isl          advection.py:450  weak_rhs            L[k_0, 1] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:450)
-decided                                               decided    isl          advection.py:450  weak_rhs            L[i_0, 0] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:450)
-decided                                               decided    isl          advection.py:450  weak_rhs            L[i_0, 1] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:450)
-decided                                               decided    isl          advection.py:450  weak_rhs            L[j_0, 0] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:450)
-decided                                               decided    isl          advection.py:450  weak_rhs            L[j_0, 1] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:450)
-decided                                               decided    isl          advection.py:450  weak_rhs            D[i_0, r] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:450)
-decided                                               decided    isl          advection.py:450  weak_rhs            D[j_0, r] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:450)
-decided                                               decided    isl          advection.py:450  weak_rhs            D[k_0, r] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:450)
-decided                                               decided    isl          advection.py:647  weak_rhs            distinct instances of D[i, r] = reduce_sum(...) (advection.py:647) write distinct cells of D
-decided                                               decided    isl          advection.py:647  weak_rhs            distinct instances of L[k, p] = reduce_sum(...) (advection.py:647) write distinct cells of L
-decided                                               decided    isl          advection.py:450  weak_rhs            every cell of D that rhs[e, k, j, i] = ...
-                                                                                                                      (advection.py:450) reads was written before the read,
-                                                                                                                      by D[i, r] = reduce_sum(...) (advection.py:647)
-decided                                               decided    isl          advection.py:450  weak_rhs            every cell of L that rhs[e, k, j, i] = ...
-                                                                                                                      (advection.py:450) reads was written before the read,
-                                                                                                                      by L[k, p] = reduce_sum(...) (advection.py:647)
-tested                                                tested     run          advection.py:647  weak_rhs            (forall p in Fin(n). sum(Mi[p, c]*M[c, p] for c in Fin(n)) == 1)
-                                                                                                                      and (forall p in Fin(n), q in Fin(n) where p != q. sum(Mi[p, c]*M[c, q] for c in Fin(n)) == 0),
-                                                                                                                      which inverse_mass_inward and lift_inward need, at the tables' digits, on the example inputs
-decided                                               decided    isl          advection.py:647  weak_rhs            n >= 0 and (k >= 0 and k < n) and (j >= 0 and j < n) and (i >= 0 and i < n) for every k and every j
-                                                                                                                      and every i, which inverse_mass_inward and lift_inward need
-decided                                               decided    type         advection.py:647  weak_rhs            after rewrite(rhs, ...), rhs is compared at approx (it was approx)
-tested                                                tested     run          advection.py:647  weak_rhs            the compiled derived agrees with the native weak_rhs in rhs at approx,
-                                                                                                                      within 1e-06 of each value (measured at roundoff), on its example inputs and 3 drawn ones
-tested                                                tested     loopy        advection.py:647  weak_rhs            the scheduled run of weak_rhs agrees with the native run to the accuracy its types state
-tested                                                tested     loopy        advection.py:277  reference_velocity  the scheduled run of reference_velocity agrees with the native run to the accuracy its types state
-tested                                                tested     loopy        advection.py:296  normal_velocity     the scheduled run of normal_velocity agrees with the native run to the accuracy its types state
-tested                                                tested     loopy        advection.py:321  upwind              the scheduled run of upwind agrees with the native run to the accuracy its types state
-tested                                                tested     loopy        advection.py:349  volume              the scheduled run of volume agrees with the native run to the accuracy its types state
-tested                                                tested     loopy        advection.py:375  lift                the scheduled run of lift agrees with the native run to the accuracy its types state
-tested                                                tested     loopy        advection.py:395  lift_on_faces       the scheduled run of lift_on_faces agrees with the native run to the accuracy its types state
-decided                                               decided    isl          advection.py:620  folded_rhs          every cell of folded_rhs.flux that folded_rhs reads,
-                                                                                                                      folded_rhs.upwind has stored by the time it is read,
-                                                                                                                      so folded_rhs runs without the zeros folded_rhs.flux is made with
-tested                                                tested     loopy        advection.py:617  folded_rhs          the scheduled run of folded_rhs agrees with the native run to the accuracy its types state
-decided                                               decided    isl          advection.py:655  surface             every cell of surface.flux that surface reads, surface.upwind has stored by the time it is read,
-                                                                                                                      so surface runs without the zeros surface.flux is made with
-tested                                                tested     loopy        advection.py:652  surface             the scheduled run of surface agrees with the native run to the accuracy its types state
-tested                                                tested     loopy        advection.py:660  volume_and_lift     the scheduled run of volume_and_lift agrees with the native run to the accuracy its types state
+STATUS                            EFFECTIVE  BY           WHERE             OWNER               STATEMENT
+--------------------------------  ---------  -----------  ----------------  ------------------  ---------------------------------------------------------------------------------------------------
+decided                           decided    isl          advection.py:607  advection_rhs       every cell of advection_rhs.V that advection_rhs reads,
+                                                                                                  advection_rhs.reference_velocity has stored by the time it is read,
+                                                                                                  so advection_rhs runs without the zeros advection_rhs.V is made with
+decided                           decided    isl          advection.py:608  advection_rhs       every cell of advection_rhs.vn that advection_rhs reads,
+                                                                                                  advection_rhs.normal_velocity has stored by the time it is read,
+                                                                                                  so advection_rhs runs without the zeros advection_rhs.vn is made with
+decided                           decided    isl          advection.py:609  advection_rhs       every cell of advection_rhs.flux that advection_rhs reads,
+                                                                                                  advection_rhs.upwind has stored by the time it is read,
+                                                                                                  so advection_rhs runs without the zeros advection_rhs.flux is made with
+decided                           decided    isl          advection.py:635  advection_rhs       substitute(advection_rhs.V) renames the instances of advection_rhs one for one
+decided                           decided    isl          advection.py:635  advection_rhs       the order after substitute(advection_rhs.V) runs every dependence of advection_rhs forward
+decided                           decided    isl          advection.py:636  advection_rhs       substitute(advection_rhs.vn) renames the instances of advection_rhs one for one
+decided                           decided    isl          advection.py:636  advection_rhs       the order after substitute(advection_rhs.vn) runs every dependence of advection_rhs forward
+decided                           decided    isl          advection.py:637  advection_rhs       fuse(advection_rhs.volume.i, advection_rhs.lift.i) renames the instances of
+                                                                                                  advection_rhs one for one
+decided                           decided    isl          advection.py:637  advection_rhs       the order after fuse(advection_rhs.volume.i, advection_rhs.lift.i) runs every dependence of
+                                                                                                  advection_rhs forward
+decided                           decided    isl          advection.py:638  advection_rhs       fuse(advection_rhs.upwind.e, advection_rhs.volume.e) renames the instances of
+                                                                                                  advection_rhs one for one
+decided                           decided    isl          advection.py:638  advection_rhs       the order after fuse(advection_rhs.upwind.e, advection_rhs.volume.e) runs every dependence of
+                                                                                                  advection_rhs forward
+tested                            tested     loopy        advection.py:638  advection_rhs       the scheduled run of advection_rhs agrees with the native run to the accuracy its types state
+decided                           decided    isl          advection.py:642  advection_rhs       no read of advection_rhs.flux sees its slot overwritten after
+                                                                                                  contract(advection_rhs.flux, lambda e, f, a, b: (f, a, b)):
+                                                                                                  advection_rhs.flux kept in 6*n*n cells, flux[e, f, a, b] in slot (f, a, b)
+tested                            tested     loopy        advection.py:642  advection_rhs       the scheduled run of advection_rhs agrees with the native run to the accuracy its types state
+tested under inverse_mass_inward  assumed    interpreter  advection.py:647  weak_rhs            rewrite(rhs, by=inverse_mass_inward), under inverse_of_the_mass:
+                                                                                                  over the reals, what rhs stores is unchanged wherever
+                                                                                                  (forall p in Fin(n). sum(Mi[p, c]*M[c, p] for c in Fin(n)) == 1)
+                                                                                                  and (forall p in Fin(n), q in Fin(n) where p != q. sum(Mi[p, c]*M[c, q] for c in Fin(n)) == 0):
+                                                                                                  sum(Mi[k, c]*Mi[j, b]*Mi[i,
+                                                                                                      a]*sum(M[c, t]*M[...,
+                                                                                                        sum(Mi[k, c]*Mi[i, b]*Mi[j,
+                                                                                                            a]*sum(M[c, t]*M[... and 1 more become their inverse mass inwards, in 3 places
+tested under lift_inward          assumed    interpreter  advection.py:647  weak_rhs            rewrite(rhs, by=lift_inward), under inverse_of_the_mass:
+                                                                                                  over the reals, what rhs stores is unchanged wherever
+                                                                                                  (forall p in Fin(n). sum(Mi[p, c]*M[c, p] for c in Fin(n)) == 1)
+                                                                                                  and (forall p in Fin(n), q in Fin(n) where p != q. sum(Mi[p, c]*M[c, q] for c in Fin(n)) == 0):
+                                                                                                  sum(Mi[j, c]*Mi[i, b]*Mi[k, a]*(ends[0, a]*su...,
+                                                                                                      sum(Mi[j, c]*Mi[i, b]*Mi[k, a]*(ends[1, a]*su...
+                                                                                                          and 4 more become their lift inwards, in 6 places
+tested                            tested     interpreter  advection.py:647  weak_rhs            keep=(D, L): D and L are computed once, before rhs, over the indices each reads,
+                                                                                                  and rhs reads them where their sums were (D in 3 places and L in 6 places):
+                                                                                                  what rhs stores is unchanged
+decided                           decided    isl          advection.py:647  weak_rhs            no cell of D is stored twice, or read before its store
+decided                           decided    isl          advection.py:647  weak_rhs            no cell of L is stored twice, or read before its store
+decided                           decided    isl          advection.py:450  weak_rhs            no cell of rhs is stored twice, or read before its store
+decided                           decided    isl          advection.py:446  weak_rhs            no cell of w is stored twice, or read before its store
+decided                           decided    isl          advection.py:647  weak_rhs            D[i_1, r_0] is in bounds for every instance of D[i, r] = reduce_sum(...) (advection.py:647)
+decided                           decided    isl          advection.py:647  weak_rhs            Mi[i_1, a_0] is in bounds for every instance of D[i, r] = reduce_sum(...) (advection.py:647)
+decided                           decided    isl          advection.py:647  weak_rhs            S[a_0, r_0] is in bounds for every instance of D[i, r] = reduce_sum(...) (advection.py:647)
+decided                           decided    isl          advection.py:647  weak_rhs            L[k_1, p] is in bounds for every instance of L[k, p] = reduce_sum(...) (advection.py:647)
+decided                           decided    isl          advection.py:647  weak_rhs            Mi[k_1, a_1] is in bounds for every instance of L[k, p] = reduce_sum(...) (advection.py:647)
+decided                           decided    isl          advection.py:647  weak_rhs            ends[p, a_1] is in bounds for every instance of L[k, p] = reduce_sum(...) (advection.py:647)
+decided                           decided    isl          advection.py:450  weak_rhs            L[k_0, 0] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:450)
+decided                           decided    isl          advection.py:450  weak_rhs            L[k_0, 1] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:450)
+decided                           decided    isl          advection.py:450  weak_rhs            L[i_0, 0] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:450)
+decided                           decided    isl          advection.py:450  weak_rhs            L[i_0, 1] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:450)
+decided                           decided    isl          advection.py:450  weak_rhs            L[j_0, 0] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:450)
+decided                           decided    isl          advection.py:450  weak_rhs            L[j_0, 1] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:450)
+decided                           decided    isl          advection.py:450  weak_rhs            D[i_0, r] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:450)
+decided                           decided    isl          advection.py:450  weak_rhs            D[j_0, r] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:450)
+decided                           decided    isl          advection.py:450  weak_rhs            D[k_0, r] is in bounds for every instance of rhs[e, k, j, i] = ... (advection.py:450)
+decided                           decided    isl          advection.py:647  weak_rhs            distinct instances of D[i, r] = reduce_sum(...) (advection.py:647) write distinct cells of D
+decided                           decided    isl          advection.py:647  weak_rhs            distinct instances of L[k, p] = reduce_sum(...) (advection.py:647) write distinct cells of L
+decided                           decided    isl          advection.py:450  weak_rhs            every cell of D that rhs[e, k, j, i] = ...
+                                                                                                  (advection.py:450) reads was written before the read,
+                                                                                                  by D[i, r] = reduce_sum(...) (advection.py:647)
+decided                           decided    isl          advection.py:450  weak_rhs            every cell of L that rhs[e, k, j, i] = ...
+                                                                                                  (advection.py:450) reads was written before the read,
+                                                                                                  by L[k, p] = reduce_sum(...) (advection.py:647)
+tested                            tested     run          advection.py:647  weak_rhs            (forall p in Fin(n). sum(Mi[p, c]*M[c, p] for c in Fin(n)) == 1)
+                                                                                                  and (forall p in Fin(n), q in Fin(n) where p != q. sum(Mi[p, c]*M[c, q] for c in Fin(n)) == 0),
+                                                                                                  which inverse_mass_inward and lift_inward need, at the tables' digits, on the example inputs
+decided                           decided    isl          advection.py:647  weak_rhs            n >= 0 and (k >= 0 and k < n) and (j >= 0 and j < n) and (i >= 0 and i < n) for every k and every j
+                                                                                                  and every i, which inverse_mass_inward and lift_inward need
+decided                           decided    type         advection.py:647  weak_rhs            after rewrite(rhs, ...), rhs is compared at approx (it was approx)
+tested                            tested     run          advection.py:647  weak_rhs            the compiled derived agrees with the native weak_rhs in rhs at approx,
+                                                                                                  within 1e-06 of each value (measured at roundoff), on its example inputs and 3 drawn ones
+tested                            tested     loopy        advection.py:647  weak_rhs            the scheduled run of weak_rhs agrees with the native run to the accuracy its types state
+tested                            tested     loopy        advection.py:277  reference_velocity  the scheduled run of reference_velocity agrees with the native run to the accuracy its types state
+tested                            tested     loopy        advection.py:296  normal_velocity     the scheduled run of normal_velocity agrees with the native run to the accuracy its types state
+tested                            tested     loopy        advection.py:321  upwind              the scheduled run of upwind agrees with the native run to the accuracy its types state
+tested                            tested     loopy        advection.py:349  volume              the scheduled run of volume agrees with the native run to the accuracy its types state
+tested                            tested     loopy        advection.py:375  lift                the scheduled run of lift agrees with the native run to the accuracy its types state
+tested                            tested     loopy        advection.py:395  lift_on_faces       the scheduled run of lift_on_faces agrees with the native run to the accuracy its types state
+decided                           decided    isl          advection.py:620  folded_rhs          every cell of folded_rhs.flux that folded_rhs reads,
+                                                                                                  folded_rhs.upwind has stored by the time it is read,
+                                                                                                  so folded_rhs runs without the zeros folded_rhs.flux is made with
+tested                            tested     loopy        advection.py:617  folded_rhs          the scheduled run of folded_rhs agrees with the native run to the accuracy its types state
+decided                           decided    isl          advection.py:655  surface             every cell of surface.flux that surface reads, surface.upwind has stored by the time it is read,
+                                                                                                  so surface runs without the zeros surface.flux is made with
+tested                            tested     loopy        advection.py:652  surface             the scheduled run of surface agrees with the native run to the accuracy its types state
+tested                            tested     loopy        advection.py:660  volume_and_lift     the scheduled run of volume_and_lift agrees with the native run to the accuracy its types state
 
 56 facts: 39 decided, 17 tested
 
